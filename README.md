@@ -53,7 +53,7 @@ npm run dev
 - macOS `.dmg`: `cd wizzle-agent && npm run tauri build -- --bundles dmg`
 - Windows `.exe` installer: `cd wizzle-agent && npm run tauri build -- --bundles nsis`
 - Linux bundles: `cd wizzle-agent && npm run tauri build -- --bundles appimage`, `deb`, or `rpm`
-- GitHub Actions also builds `dmg`, `exe`, and `deb` artifacts on every push to `main` via `.github/workflows/build-desktop-packages.yml`
+- GitHub Actions also builds `dmg`, `exe`, and `deb` on every push to `main` and publishes them to the rolling prerelease tag `main-build` via `.github/workflows/build-desktop-packages.yml`
 
 ## License
 

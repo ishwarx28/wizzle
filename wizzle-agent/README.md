@@ -82,7 +82,7 @@ npm run tauri build
 
 Bundle output is generated under `src-tauri/target/release/bundle/`.
 
-CI builds are also configured in `/Users/mrdev.288/StudioProjects/wizzle/.github/workflows/build-desktop-packages.yml` and run on every push to `main`, uploading `dmg`, `exe`, and `deb` artifacts to the workflow run.
+CI builds are also configured in `/Users/mrdev.288/StudioProjects/wizzle/.github/workflows/build-desktop-packages.yml` and run on every push to `main`, publishing `dmg`, `exe`, and `deb` assets to the rolling GitHub prerelease tag `main-build`.
 
 ## Notes
 

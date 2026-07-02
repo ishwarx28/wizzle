@@ -80,3 +80,38 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.artifact_path }}
           if-no-files-found: error
+
+  release:
+    name: Publish GitHub release assets
+    runs-on: ubuntu-22.04
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - name: Download package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Publish rolling main release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: main-build
+          name: Main Build
+          body: |
+            Automated desktop builds for the latest push to `main`.
+
+            This rolling prerelease is updated on every successful workflow run and includes:
+            - macOS `.dmg`
+            - Windows `.exe`
+            - Linux `.deb`
+          prerelease: true
+          draft: false
+          make_latest: false
+          generate_release_notes: false
+          append_body: false
+          overwrite_files: true
+          files: |
+            release-artifacts/wizzle-macos-dmg/*.dmg
+            release-artifacts/wizzle-windows-exe/*.exe
+            release-artifacts/wizzle-linux-deb/*.deb
