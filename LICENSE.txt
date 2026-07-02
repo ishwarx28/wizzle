@@ -1,0 +1,7 @@
+Copyright © 2026 Ishwar Meghwal. All rights reserved.
+
+This software and its source code are proprietary and confidential.
+
+No part of this software may be copied, modified, distributed, sublicensed, published, reverse engineered, or used for commercial or non-commercial purposes without prior written permission from the copyright holder.
+
+Unauthorized use, reproduction, or distribution of this software is prohibited.
