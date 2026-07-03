@@ -29,6 +29,7 @@ Desktop app:
 ```bash
 cd /Users/mrdev.288/StudioProjects/wizzle/wizzle-agent
 npm install
+cp .env.example .env
 source "$HOME/.cargo/env"
 npm run tauri dev
 ```
@@ -41,6 +42,8 @@ npm install
 cp .env.example .env
 npm run dev
 ```
+
+Google sign-in in the desktop app opens in the system browser and returns through a temporary loopback callback on `127.0.0.1`. For that flow you must also set `VITE_GOOGLE_OAUTH_CLIENT_ID` in `/Users/mrdev.288/StudioProjects/wizzle/wizzle-agent/.env` with a Google desktop OAuth client id.
 
 ## Verification
 

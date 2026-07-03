@@ -16,6 +16,7 @@ wizzle-agent/src-tauri/gen/schemas/
 **/.env
 **/.env.local
 **/.env.*.local
+!wizzle-agent/.env.example
 !wizzle-proxy/.env.example
 wizzle-proxy/credentials/*.json
 

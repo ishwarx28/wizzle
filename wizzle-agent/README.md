@@ -37,6 +37,7 @@ Desktop app in development:
 
 ```bash
 source "$HOME/.cargo/env"
+cp .env.example .env
 npm run tauri dev
 ```
 
@@ -45,6 +46,57 @@ Production frontend build:
 ```bash
 npm run build
 ```
+
+## Firebase Setup
+
+Copy the example env file and fill in your Firebase web app values:
+
+```bash
+cp .env.example .env
+```
+
+Required values:
+
+- `VITE_FIREBASE_API_KEY`
+- `VITE_FIREBASE_AUTH_DOMAIN`
+- `VITE_FIREBASE_PROJECT_ID`
+- `VITE_FIREBASE_APP_ID`
+
+Optional but recommended:
+
+- `VITE_FIREBASE_MESSAGING_SENDER_ID`
+- `VITE_WIZZLE_PROXY_BASE_URL`
+
+Required for Google sign-in from the desktop app:
+
+- `VITE_GOOGLE_OAUTH_CLIENT_ID`
+- `VITE_GOOGLE_OAUTH_CLIENT_SECRET`
+
+## Google Desktop OAuth Setup
+
+Wizzle uses the system browser for Google sign-in, then returns to the app through a temporary loopback callback such as `http://127.0.0.1:<port>/google/callback`.
+
+Create a Google OAuth client for a desktop app, then set the client id and client secret in `/Users/mrdev.288/StudioProjects/wizzle/wizzle-agent/.env`:
+
+```bash
+VITE_GOOGLE_OAUTH_CLIENT_ID=your-google-desktop-oauth-client-id.apps.googleusercontent.com
+VITE_GOOGLE_OAUTH_CLIENT_SECRET=your-google-desktop-oauth-client-secret
+```
+
+Notes:
+
+- This client id is separate from the Firebase web app config.
+- For this Google desktop OAuth client, Wizzle also sends the client secret during the token exchange.
+- Google sign-in works from the Tauri desktop app, not from plain `npm run dev` in a browser tab.
+- The app starts a short-lived localhost listener only for the Google OAuth callback.
+
+Auth behavior in MVP:
+
+- Email + password signs in if the account exists
+- If the email does not exist yet, the app creates the account automatically
+- New email/password accounts get their display name from the part before `@`
+- Google sign-in keeps the Google name and profile photo
+- Email/password accounts must verify email before entering the app
 
 ## Package Builds
 
