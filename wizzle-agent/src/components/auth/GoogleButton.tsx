@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes } from "react";
+import type { ButtonHTMLAttributes, PropsWithChildren } from "react";
 
 function GoogleIcon() {
   return (
@@ -24,10 +24,11 @@ function GoogleIcon() {
 }
 
 export function GoogleButton({
+  children,
   className = "",
   type = "button",
   ...props
-}: ButtonHTMLAttributes<HTMLButtonElement>) {
+}: PropsWithChildren<ButtonHTMLAttributes<HTMLButtonElement>>) {
   return (
     <button
       className={[
@@ -40,7 +41,7 @@ export function GoogleButton({
       {...props}
     >
       <GoogleIcon />
-      <span>Continue with Google</span>
+      <span>{children ?? "Continue with Google"}</span>
     </button>
   );
 }
