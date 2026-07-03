@@ -1,5 +1,5 @@
 import { AlertCircle, LoaderCircle, MailCheck, ShieldCheck } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { useAuth } from "../auth/auth-context";
@@ -64,6 +64,7 @@ export function LoginPage() {
     signInOrCreateWithEmail,
     signInWithGoogle,
   } = useAuth();
+  const passwordInputRef = useRef<HTMLInputElement | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState<LoginStatus>("idle");
@@ -140,25 +141,46 @@ export function LoginPage() {
         description="Built to think through your code, not just type it."
         title="Log in to Wizzle"
       >
-        <div className="mx-auto max-w-[474px] space-y-5">
+        <form
+          autoComplete="on"
+          className="mx-auto max-w-[474px] space-y-5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submitLogin();
+          }}
+        >
           <TextField
-            autoComplete="email"
+            autoCapitalize="none"
+            autoComplete="email username"
+            autoCorrect="off"
+            id="login-email"
             label="Email"
+            maxLength={MAX_EMAIL_LENGTH}
+            name="email"
             onChange={(event) => {
               setEmail(event.currentTarget.value);
               setErrorMessage(null);
               clearErrorMessage();
               setStatus("idle");
             }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                passwordInputRef.current?.focus();
+              }
+            }}
             placeholder="Email address"
+            spellCheck={false}
             disabled={isBusy}
-            maxLength={MAX_EMAIL_LENGTH}
             type="email"
             value={email}
           />
           <TextField
             autoComplete="current-password"
+            id="login-password"
             label="Password"
+            maxLength={MAX_PASSWORD_LENGTH}
+            name="password"
             onChange={(event) => {
               setPassword(event.currentTarget.value);
               setErrorMessage(null);
@@ -168,7 +190,7 @@ export function LoginPage() {
             placeholder="Password"
             revealablePassword
             disabled={isBusy}
-            maxLength={MAX_PASSWORD_LENGTH}
+            ref={passwordInputRef}
             type="password"
             value={password}
           />
@@ -215,9 +237,7 @@ export function LoginPage() {
             className="mt-1"
             disabled={isLoginDisabled}
             fullWidth
-            onClick={() => {
-              void submitLogin();
-            }}
+            type="submit"
           >
             {isSubmitting ? (
               <>
@@ -264,7 +284,7 @@ export function LoginPage() {
               Forgot password?
             </Link>
           </div>
-        </div>
+        </form>
       </AuthCard>
     </div>
   );

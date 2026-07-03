@@ -68,16 +68,28 @@ export function ResetPasswordPage() {
         description="Enter your email and Wizzle will send a reset link."
         title="Reset your password"
       >
-        <div className="mx-auto max-w-[474px] space-y-5">
+        <form
+          autoComplete="on"
+          className="mx-auto max-w-[474px] space-y-5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submitReset();
+          }}
+        >
           <TextField
-            autoComplete="email"
+            autoCapitalize="none"
+            autoComplete="email username"
+            autoCorrect="off"
+            id="reset-email"
             label="Email"
+            name="email"
             onChange={(event) => {
               setEmail(event.currentTarget.value);
               setErrorMessage(null);
               setIsSent(false);
             }}
             placeholder="Email address"
+            spellCheck={false}
             type="email"
             value={email}
           />
@@ -113,9 +125,7 @@ export function ResetPasswordPage() {
           <Button
             disabled={!isConfigured || isSubmitting || Boolean(emailError)}
             fullWidth
-            onClick={() => {
-              void submitReset();
-            }}
+            type="submit"
           >
             {isSubmitting ? (
               <>
@@ -134,7 +144,7 @@ export function ResetPasswordPage() {
             <ArrowLeft className="h-4 w-4" />
             Back to login
           </Link>
-        </div>
+        </form>
       </AuthCard>
     </div>
   );
