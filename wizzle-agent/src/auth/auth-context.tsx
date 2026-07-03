@@ -146,10 +146,6 @@ function getFirebaseErrorCode(error: unknown) {
   return typeof error === "object" && error && "code" in error ? String(error.code) : "";
 }
 
-async function sendPasswordSetupEmail(auth: ReturnType<typeof requireFirebaseAuth>, email: string) {
-  await sendPasswordResetEmail(auth, email);
-}
-
 export function AuthProvider({ children }: PropsWithChildren) {
   const setAccount = useWorkspaceStore((state) => state.setAccount);
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -291,9 +287,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
             );
           } catch (createError) {
             if (getFirebaseErrorCode(createError) === "auth/email-already-in-use") {
-              await sendPasswordSetupEmail(auth, normalizedEmail);
               throw new Error(
-                "This email already exists. We sent a password setup link to your inbox and spam folder.",
+                "This email was created with Google. Reset the password using the Forgot password option.",
               );
             }
 
@@ -311,16 +306,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
         if (!methods.includes("password")) {
           if (methods.includes("google.com")) {
-            try {
-              await sendPasswordSetupEmail(auth, normalizedEmail);
-            } catch (passwordSetupError) {
-              if (passwordSetupError instanceof Error) {
-                throw passwordSetupError;
-              }
-            }
-
             throw new Error(
-              "This email was first used with Google. We sent a password setup link to your inbox and spam folder.",
+              "This email was created with Google. Reset the password using the Forgot password option.",
             );
           }
 
