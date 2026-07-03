@@ -262,7 +262,6 @@ export function AuthProvider({ children }: PropsWithChildren) {
           }
 
           if (!credentials.user.emailVerified) {
-            await signOut(auth);
             return { status: "verify" };
           }
 
@@ -289,13 +288,26 @@ export function AuthProvider({ children }: PropsWithChildren) {
             photoURL: null,
           });
           await sendEmailVerification(credentials.user);
-          await signOut(auth);
 
           return { status: "created" };
         }
 
         if (!methods.includes("password")) {
-          throw new Error("This email uses Google sign-in. Continue with Google instead.");
+          if (methods.includes("google.com")) {
+            try {
+              await sendPasswordResetEmail(auth, normalizedEmail);
+            } catch (passwordSetupError) {
+              if (passwordSetupError instanceof Error) {
+                throw passwordSetupError;
+              }
+            }
+
+            throw new Error(
+              "This email was first used with Google. We sent a password setup link to your inbox and spam folder.",
+            );
+          }
+
+          throw new Error("This email uses another sign-in method.");
         }
 
         throw new Error("The email or password is incorrect.");

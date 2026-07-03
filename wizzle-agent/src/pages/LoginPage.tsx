@@ -94,12 +94,12 @@ export function LoginPage() {
       const result = await signInOrCreateWithEmail(email, password);
 
       if (result.status === "created") {
-        setStatus("created");
+        navigate("/app");
         return;
       }
 
       if (result.status === "verify") {
-        setStatus("verify");
+        navigate("/app");
         return;
       }
 
@@ -207,7 +207,7 @@ export function LoginPage() {
                 <ShieldCheck className="h-4 w-4 text-[var(--color-text)]" />
                 Verification required
               </div>
-              Check your inbox and verify the email before signing in.
+              Check your inbox and spam folder, then verify the email before signing in.
             </div>
           ) : null}
 

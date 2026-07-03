@@ -1,6 +1,7 @@
 import { PanelLeftOpen, PanelRightOpen } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import { useAuth } from "../auth/auth-context";
 import { ChatView } from "../components/workspace/ChatView";
 import { FilePanel } from "../components/workspace/FilePanel";
 import { Sidebar } from "../components/workspace/Sidebar";
@@ -19,6 +20,7 @@ function clamp(value: number, min: number, max: number) {
 }
 
 export function AppPage() {
+  const { user } = useAuth();
   const isFilePanelOpen = useWorkspaceStore((state) => state.isFilePanelOpen);
   const isSidebarOpen = useWorkspaceStore((state) => state.isSidebarOpen);
   const projects = useWorkspaceStore((state) => state.projects);
@@ -204,6 +206,12 @@ export function AppPage() {
               </button>
             ) : null}
           </header>
+
+          {!user?.emailVerified ? (
+            <div className="border-b border-[var(--color-border)] bg-[var(--color-panel-muted)] px-5 py-3 text-[13px] text-[var(--color-text-secondary)]">
+              Check your inbox and spam folder to verify your email. You can keep using Wizzle while verification is pending.
+            </div>
+          ) : null}
 
           <ChatView />
         </div>
