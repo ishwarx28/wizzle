@@ -146,6 +146,10 @@ function getFirebaseErrorCode(error: unknown) {
   return typeof error === "object" && error && "code" in error ? String(error.code) : "";
 }
 
+async function sendPasswordSetupEmail(auth: ReturnType<typeof requireFirebaseAuth>, email: string) {
+  await sendPasswordResetEmail(auth, email);
+}
+
 export function AuthProvider({ children }: PropsWithChildren) {
   const setAccount = useWorkspaceStore((state) => state.setAccount);
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -277,11 +281,24 @@ export function AuthProvider({ children }: PropsWithChildren) {
         const methods = await fetchSignInMethodsForEmail(auth, normalizedEmail);
 
         if (methods.length === 0) {
-          const credentials = await createUserWithEmailAndPassword(
-            auth,
-            normalizedEmail,
-            trimmedPassword,
-          );
+          let credentials;
+
+          try {
+            credentials = await createUserWithEmailAndPassword(
+              auth,
+              normalizedEmail,
+              trimmedPassword,
+            );
+          } catch (createError) {
+            if (getFirebaseErrorCode(createError) === "auth/email-already-in-use") {
+              await sendPasswordSetupEmail(auth, normalizedEmail);
+              throw new Error(
+                "This email already exists. We sent a password setup link to your inbox and spam folder.",
+              );
+            }
+
+            throw createError;
+          }
 
           await updateProfile(credentials.user, {
             displayName,
@@ -295,7 +312,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         if (!methods.includes("password")) {
           if (methods.includes("google.com")) {
             try {
-              await sendPasswordResetEmail(auth, normalizedEmail);
+              await sendPasswordSetupEmail(auth, normalizedEmail);
             } catch (passwordSetupError) {
               if (passwordSetupError instanceof Error) {
                 throw passwordSetupError;
