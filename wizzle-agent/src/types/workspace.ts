@@ -38,7 +38,9 @@ export interface Project {
 }
 
 export interface AccountProfile {
+  email: string;
   name: string;
   avatarLabel: string;
+  avatarUrl?: string | null;
   plan: "Free" | "Pro" | "Plus";
 }

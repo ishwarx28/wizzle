@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Copy, FileCode2, FileImage, FileText } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
@@ -25,9 +26,24 @@ function fileIcon(kind: PreviewFile["kind"]) {
 
 export function MessageBubble({ fileMap, isLatest, message, onOpenFile }: MessageBubbleProps) {
   const isUser = message.role === "user";
+  const [isCopied, setIsCopied] = useState(false);
   const linkedFiles = (message.linkedFileIds ?? [])
     .map((fileId) => fileMap.get(fileId))
     .filter((file): file is PreviewFile => Boolean(file));
+
+  useEffect(() => {
+    if (!isCopied) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setIsCopied(false);
+    }, 1600);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [isCopied]);
 
   return (
     <div className={isUser ? "group flex justify-end" : "group flex w-full"}>
@@ -83,13 +99,23 @@ export function MessageBubble({ fileMap, isLatest, message, onOpenFile }: Messag
           ].join(" ")}
         >
           <button
-            className="inline-flex items-center gap-1 rounded-full px-2 py-1 transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+            className={[
+              "inline-flex items-center gap-1 rounded-full px-2 py-1 transition",
+              isCopied
+                ? "cursor-default text-[var(--color-text-secondary)]"
+                : "hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]",
+            ].join(" ")}
+            disabled={isCopied}
             onClick={async () => {
-              await copyText(message.content);
+              const didCopy = await copyText(message.content);
+
+              if (didCopy) {
+                setIsCopied(true);
+              }
             }}
           >
             <Copy className="h-3.5 w-3.5" />
-            Copy
+            {isCopied ? "Copied" : "Copy"}
           </button>
           <span>{message.createdAtLabel}</span>
         </div>

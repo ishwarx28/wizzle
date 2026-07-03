@@ -1,6 +1,8 @@
 @import "tailwindcss";
 
-:root {
+:root,
+:root[data-theme="dark"],
+:root[data-theme="system"] {
   color-scheme: dark;
   font-family:
     Inter,
@@ -52,8 +54,44 @@
   --titlebar-leading-space: 72px;
 }
 
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-app-bg: #ffffff;
+  --color-panel-sidebar: rgba(250, 250, 250, 0.98);
+  --color-panel: rgba(255, 255, 255, 1);
+  --color-panel-elevated: transparent;
+  --color-panel-muted: rgba(250, 250, 250, 1);
+  --color-panel-hover: rgba(244, 244, 244, 1);
+  --color-panel-subtle: rgba(252, 252, 252, 1);
+  --color-panel-card: rgba(255, 255, 255, 1);
+  --color-panel-active: rgba(245, 245, 245, 1);
+  --color-panel-success: rgba(250, 250, 250, 1);
+  --color-border: rgba(17, 17, 17, 0.08);
+  --color-border-strong: rgba(17, 17, 17, 0.14);
+  --color-text: #111111;
+  --color-text-secondary: rgba(17, 17, 17, 0.72);
+  --color-text-tertiary: rgba(17, 17, 17, 0.46);
+  --color-accent: #111111;
+  --color-accent-hover: #000000;
+  --color-accent-foreground: #ffffff;
+  --color-accent-soft: rgba(17, 17, 17, 0.08);
+  --color-danger: #b43a2d;
+  --color-user-bubble: rgba(247, 247, 247, 1);
+  --color-composer: rgba(255, 255, 255, 1);
+  --color-send-button: rgba(17, 17, 17, 1);
+  --color-send-button-hover: rgba(0, 0, 0, 1);
+  --color-send-button-foreground: #ffffff;
+  --color-avatar-bg: #2084f3;
+  --color-code-bg: rgba(243, 246, 249, 1);
+  --color-code-text: #09430f;
+  --color-google-button-bg: #ffffff;
+  --color-google-button-bg-hover: #f7f8f8;
+  --color-google-button-border: #747775;
+  --color-google-button-text: #1f1f1f;
+}
+
 @media (prefers-color-scheme: light) {
-  :root {
+  :root[data-theme="system"] {
     color-scheme: light;
     --color-app-bg: #ffffff;
     --color-panel-sidebar: rgba(250, 250, 250, 0.98);
@@ -172,6 +210,16 @@ button {
 
 .auto-hide-scrollbar::-webkit-scrollbar-corner {
   background: transparent;
+}
+
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .markdown-body > *:first-child {

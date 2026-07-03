@@ -1,26 +1,61 @@
-import { useState } from "react";
+import type { ReactNode } from "react";
+import { useEffect, useState } from "react";
 import {
+  Check,
+  ChevronDown,
   ChevronRight,
   Copy,
   Folder,
   FolderPlus,
+  Laptop,
+  LogOut,
+  Mail,
+  Moon,
   MoreHorizontal,
   PanelLeftClose,
   Pencil,
+  Sun,
   SquarePen,
   Trash2,
 } from "lucide-react";
+import { createPortal } from "react-dom";
 
+import { useAuth } from "../../auth/auth-context";
 import { useScrollActivity } from "../../hooks/use-scroll-activity";
 import { useWorkspaceStore } from "../../store/workspace-store";
 import { copyText } from "../../utils/clipboard";
+import type { ThemePreference } from "../../utils/theme";
+import {
+  applyThemePreference,
+  getStoredThemePreference,
+  getThemeChangeEventName,
+} from "../../utils/theme";
+import { AppDialog } from "../common/AppDialog";
 import { LogoMark } from "../common/LogoMark";
+
+type DialogState =
+  | { type: "add-project"; value: string }
+  | { type: "confirm-logout" }
+  | { projectId: string; projectName: string; type: "remove-project" }
+  | { projectId: string; sessionId: string; sessionTitle: string; type: "delete-session" }
+  | { projectId: string; sessionId: string; value: string; type: "rename-session" };
+
+type MenuState = {
+  align: "end" | "start";
+  key: string;
+  width?: number;
+  vertical: "above" | "below";
+  x: number;
+  y: number;
+};
 
 export function Sidebar() {
   const account = useWorkspaceStore((state) => state.account);
+  const { signOut } = useAuth();
   const projects = useWorkspaceStore((state) => state.projects);
   const selectedProjectId = useWorkspaceStore((state) => state.selectedProjectId);
   const selectedSessionId = useWorkspaceStore((state) => state.selectedSessionId);
+  const draftSessionProjectId = useWorkspaceStore((state) => state.draftSessionProjectId);
   const addProject = useWorkspaceStore((state) => state.addProject);
   const createSession = useWorkspaceStore((state) => state.createSession);
   const deleteSession = useWorkspaceStore((state) => state.deleteSession);
@@ -29,232 +64,713 @@ export function Sidebar() {
   const selectSession = useWorkspaceStore((state) => state.selectSession);
   const toggleProjectExpanded = useWorkspaceStore((state) => state.toggleProjectExpanded);
   const toggleSidebar = useWorkspaceStore((state) => state.toggleSidebar);
-  const [menuKey, setMenuKey] = useState<string | null>(null);
+  const [menu, setMenu] = useState<MenuState | null>(null);
+  const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [isThemeExpanded, setIsThemeExpanded] = useState(false);
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() => getStoredThemePreference());
   const { handleScrollActivity, isScrolling } = useScrollActivity();
 
+  const menuKey = menu?.key ?? null;
+
+  useEffect(() => {
+    if (!menu) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as HTMLElement | null;
+
+      if (target?.closest("[data-sidebar-menu]") || target?.closest("[data-sidebar-menu-trigger]")) {
+        return;
+      }
+
+      setMenu(null);
+    }
+
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setMenu(null);
+      }
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleEscape);
+
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [menu]);
+
+  useEffect(() => {
+    function syncThemePreference() {
+      setThemePreference(getStoredThemePreference());
+    }
+
+    window.addEventListener(getThemeChangeEventName(), syncThemePreference);
+
+    return () => {
+      window.removeEventListener(getThemeChangeEventName(), syncThemePreference);
+    };
+  }, []);
+
+  function closeDialog() {
+    setDialog(null);
+  }
+
+  function openAnchoredMenu(key: string, element: HTMLElement) {
+    const rect = element.getBoundingClientRect();
+
+    setMenu({
+      key,
+      x: rect.right,
+      y: rect.bottom + 6,
+      align: "end",
+      vertical: "below",
+    });
+  }
+
+  function openContextMenu(key: string, x: number, y: number) {
+    setMenu({
+      key,
+      x: Math.min(x + 6, window.innerWidth - 16),
+      y: Math.min(y + 6, window.innerHeight - 16),
+      align: "start",
+      vertical: "below",
+    });
+  }
+
+  function renderFloatingMenu(
+    key: string,
+    items: Array<{
+      danger?: boolean;
+      icon: ReactNode;
+      label: string;
+      onSelect: () => void | Promise<void>;
+    }>,
+  ) {
+    if (menuKey !== key || !menu) {
+      return null;
+    }
+
+    return createPortal(
+      <div
+        className="fixed z-[300] min-w-[168px] rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)] p-1 shadow-[0_14px_36px_rgba(0,0,0,0.3)]"
+        data-sidebar-menu
+        style={{
+          left: menu.x,
+          top: menu.y,
+          transform: [
+            menu.align === "end" ? "translateX(-100%)" : "",
+            menu.vertical === "above" ? "translateY(-100%)" : "",
+          ]
+            .filter(Boolean)
+            .join(" "),
+        }}
+      >
+        {items.map((item) => (
+          <button
+            className={[
+              "flex w-full items-center gap-2 rounded-xl px-3 py-2 transition hover:bg-[var(--color-panel-hover)] [&_svg]:h-3.5 [&_svg]:w-3.5",
+              item.danger ? "text-[var(--color-danger)]" : "text-[var(--color-text)]",
+            ].join(" ")}
+            key={item.label}
+            onClick={async () => {
+              await item.onSelect();
+              setMenu(null);
+            }}
+          >
+            {item.icon}
+            <span className="whitespace-nowrap text-[13px] leading-none font-normal tracking-normal">
+              {item.label}
+            </span>
+          </button>
+        ))}
+      </div>,
+      document.body,
+    );
+  }
+
   return (
-    <aside className="flex h-full w-full flex-col border-r border-[var(--color-border)] bg-[var(--color-panel-sidebar)]">
-      <div
-        className="app-titlebar-region app-titlebar-sidebar flex items-center justify-between pb-2 pr-4 pt-4"
-        data-tauri-drag-region
-      >
-        <div className="flex items-center gap-3">
-          <LogoMark className="h-7 w-7 object-contain" />
-          <div>
-            <p className="text-sm font-semibold text-[var(--color-text)]">Wizzle</p>
+    <>
+      <aside className="flex h-full w-full flex-col border-r border-[var(--color-border)] bg-[var(--color-panel-sidebar)]">
+        <div
+          className="app-titlebar-region app-titlebar-sidebar flex items-center justify-between pb-2 pr-4 pt-4"
+          data-tauri-drag-region
+        >
+          <div className="flex items-center gap-3">
+            <LogoMark className="h-7 w-7 object-contain" />
+            <div>
+              <p className="text-sm font-semibold text-[var(--color-text)]">Wizzle</p>
+            </div>
           </div>
+          <button
+            aria-label="Collapse sidebar"
+            className="rounded-xl p-2 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+            onClick={toggleSidebar}
+          >
+            <PanelLeftClose className="h-4 w-4" />
+          </button>
         </div>
-        <button
-          aria-label="Collapse sidebar"
-          className="rounded-xl p-2 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
-          onClick={toggleSidebar}
-        >
-          <PanelLeftClose className="h-4 w-4" />
-        </button>
-      </div>
 
-      <div className="px-3">
-        <button
-          className="flex h-8 w-full items-center gap-3 rounded-lg px-2 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
-          onClick={addProject}
-        >
-          <FolderPlus className="h-4 w-4" />
-          <span className="text-[15px] font-normal leading-[1.1]">Add new project</span>
-        </button>
-      </div>
-
-      <div
-        className={[
-          "auto-hide-scrollbar mt-2 flex-1 overflow-y-auto px-2 pb-4",
-          isScrolling ? "is-scrolling" : "",
-        ].join(" ")}
-        onScroll={handleScrollActivity}
-      >
-        <div className="mb-1.5 mt-1 px-2 text-[13px] font-medium text-[var(--color-text-tertiary)]">
-          Projects
+        <div className="px-3">
+          <button
+            className="flex h-8 w-full items-center gap-3 rounded-lg px-2 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+            onClick={() => setDialog({ type: "add-project", value: "" })}
+          >
+            <FolderPlus className="h-4 w-4" />
+            <span className="text-[15px] font-normal leading-[1.1]">Add new project</span>
+          </button>
         </div>
-        <div className="space-y-1">
-          {projects.map((project) => {
-            return (
-            <div className="px-1 py-0.5" key={project.id}>
-              <div
-                className={[
-                  "group/project flex items-center gap-1 rounded-2xl px-1 py-0.5 transition",
-                  "hover:bg-[var(--color-panel-hover)]",
-                ].join(" ")}
-              >
-                <button
-                  className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1 text-left text-[var(--color-text-secondary)]"
-                  onClick={() => toggleProjectExpanded(project.id)}
-                >
-                  <Folder className="h-3.25 w-3.25 shrink-0 text-[var(--color-text-secondary)]" />
-                  <span className="truncate text-[15px] font-normal leading-[1.1]">{project.name}</span>
-                  <ChevronRight
-                    className={[
-                      "h-3.25 w-3.25 shrink-0 text-[var(--color-text-secondary)] opacity-0 transition-all duration-200 group-hover/project:opacity-100",
-                      project.isExpanded ? "rotate-90" : "rotate-0",
-                    ].join(" ")}
-                  />
-                </button>
-                <div className="relative">
-                  <button
-                    aria-label="Project options"
-                    className={[
-                      "rounded-lg p-1.5 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-subtle)] hover:text-[var(--color-text)]",
-                      menuKey === project.id ? "opacity-100" : "opacity-0 group-hover/project:opacity-100",
-                    ].join(" ")}
-                    onClick={() => setMenuKey(menuKey === project.id ? null : project.id)}
-                  >
-                    <MoreHorizontal className="h-3.5 w-3.5" />
-                  </button>
-                  {menuKey === project.id ? (
-                    <div className="absolute right-0 z-20 mt-2 w-44 rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-elevated)] p-1">
-                      <button
-                        className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-[var(--color-text)] transition hover:bg-[var(--color-panel-hover)]"
-                        onClick={async () => {
-                          await copyText(project.rootPath);
-                          setMenuKey(null);
-                        }}
-                      >
-                        <Copy className="h-4 w-4" />
-                        Copy path
-                      </button>
-                      <button
-                        className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-[var(--color-danger)] transition hover:bg-[var(--color-panel-hover)]"
-                        onClick={() => {
-                          removeProject(project.id);
-                          setMenuKey(null);
-                        }}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                        Remove project
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
-                <button
-                  aria-label="Create session"
-                  className={[
-                    "rounded-lg p-1.5 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-subtle)] hover:text-[var(--color-text)]",
-                    "opacity-0 group-hover/project:opacity-100",
-                  ].join(" ")}
-                  onClick={() => createSession(project.id)}
-                >
-                  <SquarePen className="h-3.5 w-3.5" />
-                </button>
-              </div>
 
-              <div
-                className={[
-                  "grid transition-all duration-250 ease-out",
-                  project.isExpanded ? "mt-0.5 grid-rows-[1fr] opacity-100" : "mt-0 grid-rows-[0fr] opacity-0",
-                ].join(" ")}
-              >
-                <div className="min-h-0 overflow-hidden">
+        <div
+          className={[
+            "auto-hide-scrollbar mt-2 flex-1 overflow-y-auto px-2 pb-4",
+            isScrolling ? "is-scrolling" : "",
+          ].join(" ")}
+          onScroll={handleScrollActivity}
+        >
+          <div className="mb-1.5 mt-1 px-2 text-[13px] font-medium text-[var(--color-text-tertiary)]">
+            Projects
+          </div>
+          <div className="space-y-1">
+            {projects.map((project) => {
+              const projectMenuKey = project.id;
+              const projectHasDraft = project.id === draftSessionProjectId && selectedSessionId === null;
+
+              return (
+                <div className="px-1 py-0.5" key={project.id}>
                   <div
                     className={[
-                      "space-y-0.5 pl-4 transition-all duration-250 ease-out",
-                      project.isExpanded ? "translate-y-0 pt-0.5" : "-translate-y-1 pt-0",
+                      "group/project relative flex items-center gap-1 rounded-2xl px-1 py-0.5 transition",
+                      menuKey === projectMenuKey ? "z-20 bg-[var(--color-panel-hover)]" : "hover:bg-[var(--color-panel-hover)]",
+                    ].join(" ")}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      openContextMenu(projectMenuKey, event.clientX, event.clientY);
+                    }}
+                  >
+                    <button
+                      className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1 text-left text-[var(--color-text-secondary)]"
+                      onClick={() => toggleProjectExpanded(project.id)}
+                    >
+                      <Folder className="h-3.25 w-3.25 shrink-0 text-[var(--color-text-secondary)]" />
+                      <span className="truncate text-[15px] font-normal leading-[1.1]">{project.name}</span>
+                      <ChevronRight
+                        className={[
+                          "h-3.25 w-3.25 shrink-0 text-[var(--color-text-secondary)] opacity-0 transition-all duration-200 group-hover/project:opacity-100",
+                          project.isExpanded ? "rotate-90" : "rotate-0",
+                        ].join(" ")}
+                      />
+                    </button>
+
+                    <button
+                      aria-label="Project options"
+                      className={[
+                        "rounded-lg p-1.5 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-subtle)] hover:text-[var(--color-text)]",
+                        menuKey === projectMenuKey ? "opacity-100" : "opacity-0 group-hover/project:opacity-100",
+                      ].join(" ")}
+                      data-sidebar-menu-trigger
+                      onClick={(event) => {
+                        if (menuKey === projectMenuKey) {
+                          setMenu(null);
+                          return;
+                        }
+
+                        openAnchoredMenu(projectMenuKey, event.currentTarget);
+                      }}
+                    >
+                      <MoreHorizontal className="h-3.5 w-3.5" />
+                    </button>
+
+                    <button
+                      aria-label="Create session"
+                      className={[
+                        "rounded-lg p-1.5 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-subtle)] hover:text-[var(--color-text)]",
+                        "opacity-0 group-hover/project:opacity-100",
+                      ].join(" ")}
+                      onClick={() => createSession(project.id)}
+                    >
+                      <SquarePen className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+
+                  {renderFloatingMenu(projectMenuKey, [
+                    {
+                      icon: <Copy className="h-4 w-4" />,
+                      label: "Copy path",
+                      onSelect: async () => {
+                        await copyText(project.rootPath);
+                      },
+                    },
+                    {
+                      danger: true,
+                      icon: <Trash2 className="h-4 w-4" />,
+                      label: "Remove project",
+                      onSelect: () => {
+                        setDialog({
+                          type: "remove-project",
+                          projectId: project.id,
+                          projectName: project.name,
+                        });
+                      },
+                    },
+                  ])}
+
+                  <div
+                    className={[
+                      "grid transition-all duration-250 ease-out",
+                      project.isExpanded ? "mt-0.5 grid-rows-[1fr] opacity-100" : "mt-0 grid-rows-[0fr] opacity-0",
                     ].join(" ")}
                   >
-                  {project.sessions.map((session) => {
-                    const isActive =
-                      project.id === selectedProjectId && session.id === selectedSessionId;
-                    const sessionMenuKey = `${project.id}:${session.id}`;
-
-                    return (
-                      <div className="group/session flex items-center gap-1" key={session.id}>
-                        <div
-                          className={[
-                            "flex min-w-0 flex-1 items-center rounded-xl transition",
-                            isActive ? "bg-[var(--color-panel-active)]" : "hover:bg-[var(--color-panel-hover)]",
-                          ].join(" ")}
-                        >
-                          <button
-                            className={[
-                              "min-w-0 flex-1 rounded-xl px-3 py-1.5 text-left transition",
-                              isActive
-                                ? "text-[var(--color-text)]"
-                                : "text-[var(--color-text-secondary)] hover:text-[var(--color-text)]",
-                            ].join(" ")}
-                            onClick={() => selectSession(project.id, session.id)}
-                          >
-                            <span className="block truncate text-[15px] font-normal leading-[1.1]">{session.title}</span>
-                          </button>
-                          <div className="relative ml-auto mr-2 h-8 w-8 shrink-0">
-                            <span
-                              className={[
-                                "pointer-events-none absolute inset-0 flex items-center justify-center text-[13px] text-[var(--color-text-tertiary)] transition-opacity",
-                                menuKey === sessionMenuKey
-                                  ? "opacity-0"
-                                  : "opacity-100 group-hover/session:opacity-0",
-                              ].join(" ")}
-                            >
-                              {session.updatedAtLabel}
-                            </span>
-                            <button
-                              aria-label="Session options"
-                              className={[
-                                "absolute inset-0 flex items-center justify-center rounded-lg text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]",
-                                menuKey === sessionMenuKey
-                                  ? "opacity-100"
-                                  : "opacity-0 group-hover/session:opacity-100",
-                              ].join(" ")}
-                              onClick={() =>
-                                setMenuKey(menuKey === sessionMenuKey ? null : sessionMenuKey)
-                              }
-                            >
-                              <MoreHorizontal className="h-3.5 w-3.5" />
-                            </button>
-                          {menuKey === sessionMenuKey ? (
-                            <div className="absolute right-0 z-20 mt-2 w-44 rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-elevated)] p-1">
-                              <button
-                                className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-[var(--color-text)] transition hover:bg-[var(--color-panel-hover)]"
-                                onClick={() => {
-                                  renameSession(project.id, session.id);
-                                  setMenuKey(null);
-                                }}
-                              >
-                                <Pencil className="h-4 w-4" />
-                                Rename session
-                              </button>
-                              <button
-                                className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-[var(--color-danger)] transition hover:bg-[var(--color-panel-hover)]"
-                                onClick={() => {
-                                  deleteSession(project.id, session.id);
-                                  setMenuKey(null);
-                                }}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                                Delete session
-                              </button>
+                    <div
+                      className={[
+                        "min-h-0",
+                        project.isExpanded ? "overflow-visible" : "overflow-hidden",
+                      ].join(" ")}
+                    >
+                      <div
+                        className={[
+                          "space-y-0.5 pl-4 transition-all duration-250 ease-out",
+                          project.isExpanded ? "translate-y-0 pt-0.5" : "-translate-y-1 pt-0",
+                        ].join(" ")}
+                      >
+                        {projectHasDraft ? (
+                          <div className="group/session flex items-center gap-1">
+                            <div className="flex min-w-0 flex-1 items-center rounded-xl bg-[var(--color-panel-active)]">
+                              <div className="min-w-0 flex-1 rounded-xl px-3 py-1.5 text-left text-[var(--color-text)]">
+                                <span className="block truncate text-[15px] font-normal leading-[1.1]">
+                                  New session
+                                </span>
+                              </div>
+                              <div className="mr-2 h-8 w-8 shrink-0" />
                             </div>
-                          ) : null}
                           </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-                </div>
-              </div>
-            </div>
-            );
-          })}
-        </div>
-      </div>
+                        ) : null}
 
-      <div className="border-t border-[var(--color-border)] px-3 py-3">
-        <div className="flex items-center gap-2.5 px-1 py-1">
-          <div className="flex h-9 w-9 items-center justify-center rounded-full bg-[var(--color-avatar-bg)] text-[12px] font-semibold text-white">
-            {account.avatarLabel}
+                        {project.sessions.map((session) => {
+                          const isActive =
+                            project.id === selectedProjectId && session.id === selectedSessionId;
+                          const sessionMenuKey = `${project.id}:${session.id}`;
+
+                          return (
+                            <div
+                              className={[
+                                "group/session relative flex items-center gap-1",
+                                menuKey === sessionMenuKey ? "z-20" : "",
+                              ].join(" ")}
+                              key={session.id}
+                              onContextMenu={(event) => {
+                                event.preventDefault();
+                                openContextMenu(sessionMenuKey, event.clientX, event.clientY);
+                              }}
+                            >
+                              <div
+                                className={[
+                                  "flex min-w-0 flex-1 items-center rounded-xl transition",
+                                  isActive ? "bg-[var(--color-panel-active)]" : "hover:bg-[var(--color-panel-hover)]",
+                                ].join(" ")}
+                              >
+                                <button
+                                  className={[
+                                    "min-w-0 flex-1 rounded-xl px-3 py-1.5 text-left transition",
+                                    isActive
+                                      ? "text-[var(--color-text)]"
+                                      : "text-[var(--color-text-secondary)] hover:text-[var(--color-text)]",
+                                  ].join(" ")}
+                                  onClick={() => selectSession(project.id, session.id)}
+                                >
+                                  <span className="block truncate text-[15px] font-normal leading-[1.1]">
+                                    {session.title}
+                                  </span>
+                                </button>
+                                <div className="relative ml-auto mr-2 h-8 w-8 shrink-0">
+                                  <span
+                                    className={[
+                                      "pointer-events-none absolute inset-0 flex items-center justify-center text-[13px] text-[var(--color-text-tertiary)] transition-opacity",
+                                      menuKey === sessionMenuKey
+                                        ? "opacity-0"
+                                        : "opacity-100 group-hover/session:opacity-0",
+                                    ].join(" ")}
+                                  >
+                                    {session.updatedAtLabel}
+                                  </span>
+                                  <button
+                                    aria-label="Session options"
+                                    className={[
+                                      "absolute inset-0 flex items-center justify-center rounded-lg text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]",
+                                      menuKey === sessionMenuKey
+                                        ? "opacity-100"
+                                        : "opacity-0 group-hover/session:opacity-100",
+                                    ].join(" ")}
+                                    data-sidebar-menu-trigger
+                                    onClick={(event) => {
+                                      if (menuKey === sessionMenuKey) {
+                                        setMenu(null);
+                                        return;
+                                      }
+
+                                      openAnchoredMenu(sessionMenuKey, event.currentTarget);
+                                    }}
+                                  >
+                                    <MoreHorizontal className="h-3.5 w-3.5" />
+                                  </button>
+                                </div>
+                              </div>
+
+                              {renderFloatingMenu(sessionMenuKey, [
+                                {
+                                  icon: <Pencil className="h-4 w-4" />,
+                                  label: "Rename session",
+                                  onSelect: () => {
+                                    setDialog({
+                                      type: "rename-session",
+                                      projectId: project.id,
+                                      sessionId: session.id,
+                                      value: session.title,
+                                    });
+                                  },
+                                },
+                                {
+                                  danger: true,
+                                  icon: <Trash2 className="h-4 w-4" />,
+                                  label: "Delete session",
+                                  onSelect: () => {
+                                    setDialog({
+                                      type: "delete-session",
+                                      projectId: project.id,
+                                      sessionId: session.id,
+                                      sessionTitle: session.title,
+                                    });
+                                  },
+                                },
+                              ])}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="border-t border-[var(--color-border)] px-3 py-3">
+          <button
+            className="flex w-full items-center gap-2.5 rounded-2xl px-1 py-1 text-left transition hover:bg-[var(--color-panel-hover)]"
+            data-sidebar-menu-trigger
+            onClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect();
+
+              if (menuKey === "account") {
+                setMenu(null);
+                setIsThemeExpanded(false);
+                return;
+              }
+
+              const sidebar = event.currentTarget.closest("aside");
+              const sidebarRect = sidebar?.getBoundingClientRect();
+
+              setMenu({
+                key: "account",
+                x: sidebarRect ? sidebarRect.left + 14 : rect.left,
+                y: rect.top - 12,
+                align: "start",
+                vertical: "above",
+                width: sidebarRect ? Math.max(sidebarRect.width - 28, 248) : 248,
+              });
+            }}
+          >
+          <div className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full bg-[var(--color-avatar-bg)] text-[12px] font-semibold text-white">
+            {account.avatarUrl ? (
+              <img
+                alt={account.name}
+                className="h-full w-full object-cover"
+                src={account.avatarUrl}
+              />
+            ) : (
+              account.avatarLabel
+            )}
           </div>
           <div className="min-w-0">
             <p className="truncate text-[15px] font-normal text-[var(--color-text)]">{account.name}</p>
             <p className="text-[12px] text-[var(--color-text-tertiary)]">{account.plan}</p>
           </div>
+          </button>
         </div>
-      </div>
-    </aside>
+      </aside>
+
+      {menuKey === "account" && menu ? createPortal(
+        <div
+          className="fixed z-[300] rounded-[24px] border border-[var(--color-border-strong)] bg-[var(--color-panel)] p-3 shadow-[0_18px_40px_rgba(0,0,0,0.22)] backdrop-blur-xl"
+          data-sidebar-menu
+          style={{
+            left: menu.x,
+            top: menu.y,
+            transform: "translateY(-100%)",
+            width: menu.width,
+          }}
+        >
+          <div className="flex items-center gap-3 rounded-[18px] px-3 py-2.5">
+            <div className="flex h-7 w-7 items-center justify-center rounded-full border border-[var(--color-border)] text-[var(--color-text-secondary)]">
+              <Mail className="h-3.5 w-3.5" />
+            </div>
+            <div className="min-w-0">
+              <p className="truncate text-[13px] font-normal leading-none tracking-normal text-[var(--color-text)]">
+                {account.email}
+              </p>
+            </div>
+          </div>
+          <div className="mx-3 my-2 h-px bg-[var(--color-border)]" />
+          <button
+            className="flex w-full items-center justify-between rounded-[18px] px-3 py-2.5 text-[var(--color-text)] transition hover:bg-[var(--color-panel-hover)]"
+            onClick={() => setIsThemeExpanded((value) => !value)}
+          >
+            <span className="flex items-center gap-3">
+              <Laptop className="h-4 w-4" />
+              <span className="text-[13px] font-normal leading-none tracking-normal">Theme</span>
+            </span>
+            <ChevronDown
+              className={[
+                "h-3.5 w-3.5 transition-transform",
+                isThemeExpanded ? "rotate-180" : "rotate-0",
+              ].join(" ")}
+            />
+          </button>
+          <div
+            className={[
+              "grid transition-all duration-250 ease-out",
+              isThemeExpanded ? "mt-1 grid-rows-[1fr] opacity-100" : "mt-0 grid-rows-[0fr] opacity-0",
+            ].join(" ")}
+          >
+            <div className={["min-h-0", isThemeExpanded ? "overflow-visible" : "overflow-hidden"].join(" ")}>
+              <div
+                className={[
+                  "space-y-1 px-2 pb-1 transition-all duration-250 ease-out",
+                  isThemeExpanded ? "translate-y-0 pt-0" : "-translate-y-1 pt-0",
+                ].join(" ")}
+              >
+                {([
+                  { icon: Laptop, label: "System", value: "system" },
+                  { icon: Sun, label: "Light", value: "light" },
+                  { icon: Moon, label: "Dark", value: "dark" },
+                ] as const).map((option) => {
+                  const Icon = option.icon;
+                  const isActive = themePreference === option.value;
+
+                  return (
+                    <button
+                      className="flex w-full items-center justify-between rounded-[16px] px-3 py-2 text-[var(--color-text)] transition hover:bg-[var(--color-panel-hover)]"
+                      key={option.value}
+                      onClick={() => {
+                        applyThemePreference(option.value);
+                        setThemePreference(option.value);
+                      }}
+                    >
+                      <span className="flex items-center gap-3">
+                        <Icon className="h-3.5 w-3.5" />
+                        <span className="text-[13px] font-normal leading-none tracking-normal">
+                          {option.label}
+                        </span>
+                      </span>
+                      <span
+                        className={[
+                          "flex h-4 w-4 items-center justify-center rounded-full border",
+                          isActive
+                            ? "border-[var(--color-text)] text-[var(--color-text)]"
+                            : "border-[var(--color-border-strong)] text-transparent",
+                        ].join(" ")}
+                      >
+                        <Check className="h-2.5 w-2.5" />
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+          <div className="mx-3 my-2 h-px bg-[var(--color-border)]" />
+          <button
+            className="flex w-full items-center gap-3 rounded-[18px] px-3 py-2.5 text-[var(--color-text)] transition hover:bg-[var(--color-panel-hover)]"
+            onClick={() => {
+              setMenu(null);
+              setIsThemeExpanded(false);
+              setDialog({ type: "confirm-logout" });
+            }}
+          >
+            <LogOut className="h-4 w-4" />
+            <span className="text-[13px] font-normal leading-none tracking-normal">Log out</span>
+          </button>
+        </div>,
+        document.body,
+      ) : null}
+
+      {dialog?.type === "add-project" ? (
+        <AppDialog
+          actions={
+            <>
+              <button
+                className="h-10 rounded-full px-4 text-[14px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                onClick={closeDialog}
+              >
+                Cancel
+              </button>
+              <button
+                className="h-10 rounded-full bg-[var(--color-accent)] px-4 text-[14px] font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!dialog.value.trim()}
+                onClick={() => {
+                  addProject(dialog.value);
+                  closeDialog();
+                }}
+              >
+                Add project
+              </button>
+            </>
+          }
+          description="Add a local project to the sidebar."
+          onClose={closeDialog}
+          title="Add project"
+        >
+          <input
+            autoFocus
+            className="h-11 w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-4 text-[14px] text-[var(--color-text)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-border-strong)]"
+            onChange={(event) => setDialog({ ...dialog, value: event.currentTarget.value })}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && dialog.value.trim()) {
+                addProject(dialog.value);
+                closeDialog();
+              }
+            }}
+            placeholder="Project name"
+            value={dialog.value}
+          />
+        </AppDialog>
+      ) : null}
+
+      {dialog?.type === "confirm-logout" ? (
+        <AppDialog
+          actions={
+            <>
+              <button
+                className="h-10 rounded-full px-4 text-[14px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                onClick={closeDialog}
+              >
+                Cancel
+              </button>
+              <button
+                className="h-10 rounded-full bg-[var(--color-accent)] px-4 text-[14px] font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)]"
+                onClick={async () => {
+                  closeDialog();
+                  await signOut();
+                }}
+              >
+                Log out
+              </button>
+            </>
+          }
+          description="You will be returned to the login screen."
+          onClose={closeDialog}
+          title="Log out?"
+        />
+      ) : null}
+
+      {dialog?.type === "rename-session" ? (
+        <AppDialog
+          actions={
+            <>
+              <button
+                className="h-10 rounded-full px-4 text-[14px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                onClick={closeDialog}
+              >
+                Cancel
+              </button>
+              <button
+                className="h-10 rounded-full bg-[var(--color-accent)] px-4 text-[14px] font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!dialog.value.trim()}
+                onClick={() => {
+                  renameSession(dialog.projectId, dialog.sessionId, dialog.value);
+                  closeDialog();
+                }}
+              >
+                Save
+              </button>
+            </>
+          }
+          description="Update the session name shown in the sidebar."
+          onClose={closeDialog}
+          title="Rename session"
+        >
+          <input
+            autoFocus
+            className="h-11 w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-4 text-[14px] text-[var(--color-text)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-border-strong)]"
+            onChange={(event) => setDialog({ ...dialog, value: event.currentTarget.value })}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && dialog.value.trim()) {
+                renameSession(dialog.projectId, dialog.sessionId, dialog.value);
+                closeDialog();
+              }
+            }}
+            placeholder="Session title"
+            value={dialog.value}
+          />
+        </AppDialog>
+      ) : null}
+
+      {dialog?.type === "delete-session" ? (
+        <AppDialog
+          actions={
+            <>
+              <button
+                className="h-10 rounded-full px-4 text-[14px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                onClick={closeDialog}
+              >
+                Cancel
+              </button>
+              <button
+                className="h-10 rounded-full bg-[var(--color-danger)] px-4 text-[14px] font-medium text-white transition hover:opacity-90"
+                onClick={() => {
+                  deleteSession(dialog.projectId, dialog.sessionId);
+                  closeDialog();
+                }}
+              >
+                Delete
+              </button>
+            </>
+          }
+          description={`Delete "${dialog.sessionTitle}" from this project?`}
+          onClose={closeDialog}
+          title="Delete session"
+        />
+      ) : null}
+
+      {dialog?.type === "remove-project" ? (
+        <AppDialog
+          actions={
+            <>
+              <button
+                className="h-10 rounded-full px-4 text-[14px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                onClick={closeDialog}
+              >
+                Cancel
+              </button>
+              <button
+                className="h-10 rounded-full bg-[var(--color-danger)] px-4 text-[14px] font-medium text-white transition hover:opacity-90"
+                onClick={() => {
+                  removeProject(dialog.projectId);
+                  closeDialog();
+                }}
+              >
+                Remove
+              </button>
+            </>
+          }
+          description={`Remove "${dialog.projectName}" from the sidebar?`}
+          onClose={closeDialog}
+          title="Remove project"
+        />
+      ) : null}
+    </>
   );
 }

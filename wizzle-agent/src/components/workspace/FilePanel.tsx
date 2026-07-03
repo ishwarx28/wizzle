@@ -1,8 +1,17 @@
-import { FileCode2, FileImage, FileText, PanelRightClose, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Copy, FileCode2, FileImage, FileText, PanelRightClose, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { oneDark, oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
 
 import { useScrollActivity } from "../../hooks/use-scroll-activity";
 import { useWorkspaceStore } from "../../store/workspace-store";
+import { copyImage, copyText } from "../../utils/clipboard";
+import {
+  getStoredThemePreference,
+  getThemeChangeEventName,
+  resolveEffectiveTheme,
+} from "../../utils/theme";
 
 function fileIcon(kind: "markdown" | "text" | "image" | "other") {
   switch (kind) {
@@ -17,6 +26,49 @@ function fileIcon(kind: "markdown" | "text" | "image" | "other") {
   }
 }
 
+function resolveLanguage(language?: string, fileName?: string) {
+  if (language === "ts") {
+    return "typescript";
+  }
+
+  if (language === "js") {
+    return "javascript";
+  }
+
+  if (language) {
+    return language;
+  }
+
+  if (!fileName || !fileName.includes(".")) {
+    return "text";
+  }
+
+  const extension = fileName.split(".").pop()?.toLowerCase();
+
+  switch (extension) {
+    case "ts":
+      return "typescript";
+    case "tsx":
+      return "tsx";
+    case "js":
+      return "javascript";
+    case "jsx":
+      return "jsx";
+    case "json":
+      return "json";
+    case "md":
+      return "markdown";
+    case "sh":
+      return "bash";
+    case "css":
+      return "css";
+    case "html":
+      return "markup";
+    default:
+      return "text";
+  }
+}
+
 export function FilePanel() {
   const previewFiles = useWorkspaceStore((state) => state.previewFiles);
   const activeFileId = useWorkspaceStore((state) => state.activeFileId);
@@ -24,6 +76,10 @@ export function FilePanel() {
   const closeFile = useWorkspaceStore((state) => state.closeFile);
   const openFile = useWorkspaceStore((state) => state.openFile);
   const toggleFilePanel = useWorkspaceStore((state) => state.toggleFilePanel);
+  const [isDarkMode, setIsDarkMode] = useState(
+    () => resolveEffectiveTheme(getStoredThemePreference()) === "dark",
+  );
+  const [isCopied, setIsCopied] = useState(false);
   const tabsScroll = useScrollActivity();
   const contentScroll = useScrollActivity();
 
@@ -31,6 +87,56 @@ export function FilePanel() {
     .map((fileId) => previewFiles.find((file) => file.id === fileId))
     .filter((file): file is NonNullable<typeof file> => Boolean(file));
   const activeFile = previewFiles.find((file) => file.id === activeFileId) ?? openedFiles[0] ?? null;
+
+  useEffect(() => {
+    function syncTheme() {
+      setIsDarkMode(resolveEffectiveTheme(getStoredThemePreference()) === "dark");
+    }
+
+    window.addEventListener(getThemeChangeEventName(), syncTheme);
+
+    return () => {
+      window.removeEventListener(getThemeChangeEventName(), syncTheme);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isCopied) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setIsCopied(false);
+    }, 1600);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [isCopied]);
+
+  useEffect(() => {
+    setIsCopied(false);
+  }, [activeFileId]);
+
+  const canCopyActiveFile =
+    activeFile?.kind === "markdown" ||
+    activeFile?.kind === "text" ||
+    (activeFile?.kind === "image" && Boolean(activeFile.imageSrc));
+
+  async function handleCopyActiveFile() {
+    if (!activeFile) {
+      return;
+    }
+
+    const didCopy =
+      activeFile.kind === "image" && activeFile.imageSrc
+        ? await copyImage(activeFile.imageSrc)
+        : await copyText(activeFile.content ?? "");
+
+    if (didCopy) {
+      setIsCopied(true);
+    }
+  }
 
   return (
     <aside className="flex h-full w-full shrink-0 flex-col border-l border-[var(--color-border)] bg-[var(--color-panel-sidebar)]">
@@ -40,8 +146,7 @@ export function FilePanel() {
       >
         <div
           className={[
-            "auto-hide-scrollbar flex min-w-0 flex-1 gap-1 overflow-x-auto",
-            tabsScroll.isScrolling ? "is-scrolling" : "",
+            "no-scrollbar flex min-w-0 flex-1 gap-1 overflow-x-auto whitespace-nowrap",
           ].join(" ")}
           onScroll={tabsScroll.handleScrollActivity}
         >
@@ -52,7 +157,7 @@ export function FilePanel() {
               return (
                 <div
                   className={[
-                    "flex min-w-0 items-center gap-1 rounded-md border px-2 py-1 text-[12px] transition",
+                    "flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-[12px] transition",
                     isActive
                       ? "border-[var(--color-border-strong)] bg-[var(--color-panel-active)] text-[var(--color-text)]"
                       : "border-[var(--color-border)] bg-transparent text-[var(--color-text-secondary)] hover:bg-[var(--color-panel-hover)]",
@@ -60,11 +165,11 @@ export function FilePanel() {
                   key={file.id}
                 >
                   <button
-                    className="flex min-w-0 items-center gap-1.5"
+                    className="flex shrink-0 items-center gap-1.5"
                     onClick={() => openFile(file.id)}
                   >
                     {fileIcon(file.kind)}
-                    <span className="truncate">{file.name}</span>
+                    <span className="max-w-[180px] truncate">{file.name}</span>
                   </button>
                   <button
                     aria-label={`Close ${file.name}`}
@@ -100,14 +205,38 @@ export function FilePanel() {
       >
         {activeFile ? (
           <div>
-            <div className="mb-4 flex items-start justify-between gap-4">
-              <div>
-                <h2 className="text-[15px] font-medium text-[var(--color-text)]">{activeFile.name}</h2>
-                <p className="mt-1 text-[12px] text-[var(--color-text-tertiary)]">{activeFile.path}</p>
+            <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <h2 className="break-words text-[15px] font-medium text-[var(--color-text)]">
+                  {activeFile.name}
+                </h2>
+                <p className="mt-1 break-all text-[12px] text-[var(--color-text-tertiary)]">
+                  {activeFile.path}
+                </p>
               </div>
-              <div className="text-[11px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                {activeFile.kind}
-              </div>
+              {canCopyActiveFile ? (
+                <button
+                  className={[
+                    "inline-flex shrink-0 items-center gap-1 rounded-full px-1 py-0.5 transition",
+                    isCopied
+                      ? "cursor-default text-[var(--color-text-secondary)]"
+                      : "text-[var(--color-text-tertiary)] hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]",
+                  ].join(" ")}
+                  disabled={isCopied}
+                  onClick={() => {
+                    void handleCopyActiveFile();
+                  }}
+                >
+                  <Copy className="h-3 w-3" />
+                  <span className="text-[11px] font-normal uppercase leading-none tracking-[0.08em]">
+                    {isCopied ? "Copied" : activeFile.kind}
+                  </span>
+                </button>
+              ) : (
+                <div className="shrink-0 text-[11px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                  {activeFile.kind}
+                </div>
+              )}
             </div>
 
             {activeFile.kind === "markdown" ? (
@@ -117,9 +246,33 @@ export function FilePanel() {
             ) : null}
 
             {activeFile.kind === "text" ? (
-              <pre className="overflow-x-auto text-sm leading-7 text-[var(--color-code-text)]">
-                <code>{activeFile.content}</code>
-              </pre>
+              <SyntaxHighlighter
+                PreTag="div"
+                codeTagProps={{
+                  style: {
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                    overflowWrap: "anywhere",
+                  },
+                }}
+                customStyle={{
+                  background: "transparent",
+                  margin: 0,
+                  padding: 0,
+                  fontSize: "13px",
+                  lineHeight: "1.75",
+                  overflowX: "hidden",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                  overflowWrap: "anywhere",
+                }}
+                language={resolveLanguage(activeFile.language, activeFile.name)}
+                showLineNumbers={false}
+                style={isDarkMode ? oneDark : oneLight}
+                wrapLongLines
+              >
+                {activeFile.content ?? ""}
+              </SyntaxHighlighter>
             ) : null}
 
             {activeFile.kind === "image" ? (

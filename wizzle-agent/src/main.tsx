@@ -5,6 +5,12 @@ import App from "./App";
 import logoSrc from "./assets/brand/wizzle-logo.png";
 import darkLogoSrc from "./assets/brand/wizzle-logo-dark.png";
 import "./styles.css";
+import {
+  getStoredThemePreference,
+  getThemeChangeEventName,
+  initializeThemePreference,
+  resolveEffectiveTheme,
+} from "./utils/theme";
 
 function applyPlatformClass() {
   const isMac = navigator.userAgent.toLowerCase().includes("mac");
@@ -14,10 +20,10 @@ function applyPlatformClass() {
 function applyFavicon() {
   const existingLink = document.querySelector<HTMLLinkElement>("link[rel='icon']");
   const link = existingLink ?? document.createElement("link");
-  const darkModeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 
   const syncFavicon = () => {
-    link.href = darkModeQuery.matches ? darkLogoSrc : logoSrc;
+    const effectiveTheme = resolveEffectiveTheme(getStoredThemePreference());
+    link.href = effectiveTheme === "dark" ? darkLogoSrc : logoSrc;
   };
 
   link.rel = "icon";
@@ -28,10 +34,11 @@ function applyFavicon() {
   }
 
   syncFavicon();
-  darkModeQuery.addEventListener("change", syncFavicon);
+  window.addEventListener(getThemeChangeEventName(), syncFavicon);
 }
 
 applyPlatformClass();
+initializeThemePreference();
 applyFavicon();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(

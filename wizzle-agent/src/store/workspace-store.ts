@@ -15,17 +15,18 @@ interface WorkspaceState {
   projects: Project[];
   previewFiles: PreviewFile[];
   selectedProjectId: string;
-  selectedSessionId: string;
+  selectedSessionId: string | null;
+  draftSessionProjectId: string | null;
   activeFileId: string | null;
   openedFileIds: string[];
   isSidebarOpen: boolean;
   isFilePanelOpen: boolean;
   modelId: ModelId;
   permissionMode: PermissionMode;
-  addProject: () => void;
+  addProject: (projectName: string) => void;
   toggleProjectExpanded: (projectId: string) => void;
   createSession: (projectId: string) => void;
-  renameSession: (projectId: string, sessionId: string) => void;
+  renameSession: (projectId: string, sessionId: string, title: string) => void;
   deleteSession: (projectId: string, sessionId: string) => void;
   removeProject: (projectId: string) => void;
   selectSession: (projectId: string, sessionId: string) => void;
@@ -35,7 +36,8 @@ interface WorkspaceState {
   toggleFilePanel: () => void;
   setModelId: (modelId: ModelId) => void;
   setPermissionMode: (permissionMode: PermissionMode) => void;
-  sendPrompt: (prompt: string) => void;
+  setAccount: (account: AccountProfile) => void;
+  sendPrompt: (prompt: string, attachments?: PreviewFile[]) => void;
 }
 
 const previewFiles: PreviewFile[] = [
@@ -177,10 +179,14 @@ The files below are already attached to the workspace for quick review.`,
 ];
 
 const account: AccountProfile = {
+  email: "mrdev.288@gmail.com",
   name: "Ishwar Meghwal",
   avatarLabel: "IM",
-  plan: "Plus",
+  avatarUrl: null,
+  plan: "Free",
 };
+
+const DRAFT_SESSION_TITLE = "New session";
 
 function createAssistantReply(prompt: string): Message {
   const normalizedPrompt = prompt.trim();
@@ -200,12 +206,59 @@ I would keep the UI inside the existing shell, preserve the device theme, and ro
   };
 }
 
+function createAttachmentFallback(attachments: PreviewFile[]) {
+  return attachments.length === 1 ? "Attached 1 file." : `Attached ${attachments.length} files.`;
+}
+
+function createUserMessage(prompt: string, attachments: PreviewFile[]): Message {
+  const normalizedPrompt = prompt.trim();
+
+  return {
+    id: `message-user-${Date.now()}`,
+    role: "user",
+    content: normalizedPrompt || createAttachmentFallback(attachments),
+    createdAtLabel: "just now",
+    linkedFileIds: attachments.map((attachment) => attachment.id),
+  };
+}
+
+function createAssistantReplyWithAttachments(prompt: string, attachments: PreviewFile[]): Message {
+  if (attachments.length === 0) {
+    return createAssistantReply(prompt);
+  }
+
+  const normalizedPrompt = prompt.trim();
+  const attachmentLine =
+    attachments.length === 1
+      ? "I kept your attached file available in the preview panel."
+      : `I kept your ${attachments.length} attached files available in the preview panel.`;
+
+  return {
+    id: `message-assistant-${Date.now()}`,
+    role: "assistant",
+    createdAtLabel: "just now",
+    content: normalizedPrompt
+      ? `Here is a mocked phase 1 response for:
+
+> ${normalizedPrompt}
+
+${attachmentLine}`
+      : `${attachmentLine}
+
+You can open any of them from the message and inspect them in the right panel.`,
+  };
+}
+
 function withSelectedSession<T>(
   projects: Project[],
   selectedProjectId: string,
-  selectedSessionId: string,
+  selectedSessionId: string | null,
   updater: (projectIndex: number, sessionIndex: number, nextProjects: Project[]) => T,
 ): T | null {
+  if (!selectedSessionId) {
+    return null;
+  }
+
   const projectIndex = projects.findIndex((project) => project.id === selectedProjectId);
   if (projectIndex === -1) {
     return null;
@@ -228,30 +281,30 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   previewFiles,
   selectedProjectId: "project-wizzle",
   selectedSessionId: "session-phase1",
+  draftSessionProjectId: null,
   activeFileId: "file-architecture",
   openedFileIds: ["file-architecture"],
   isSidebarOpen: true,
   isFilePanelOpen: true,
   modelId: "wizzle-1-thinking",
   permissionMode: "full-access",
-  addProject: () =>
+  addProject: (projectName) =>
     set((state) => {
-      const projectNumber = state.projects.length + 1;
-      const projectName = window.prompt("Project name", `Project ${projectNumber}`)?.trim();
+      const normalizedName = projectName.trim();
 
-      if (!projectName) {
+      if (!normalizedName) {
         return state;
       }
 
       const newProject: Project = {
         id: `project-${Date.now()}`,
-        name: projectName,
-        rootPath: `/mock/projects/${projectName.replace(/ /g, "-").toLowerCase()}`,
+        name: normalizedName,
+        rootPath: `/mock/projects/${normalizedName.replace(/ /g, "-").toLowerCase()}`,
         isExpanded: true,
         sessions: [
           {
             id: `session-${Date.now()}`,
-            title: "New session",
+            title: DRAFT_SESSION_TITLE,
             updatedAtLabel: "now",
             messages: [],
           },
@@ -262,6 +315,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         projects: [newProject, ...state.projects],
         selectedProjectId: newProject.id,
         selectedSessionId: newProject.sessions[0].id,
+        draftSessionProjectId: null,
       };
     }),
   toggleProjectExpanded: (projectId) =>
@@ -272,40 +326,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     })),
   createSession: (projectId) =>
     set((state) => {
-      const title = window.prompt("Session title", "New session")?.trim() || "New session";
-
-      const nextProjects = state.projects.map((project) => {
-        if (project.id !== projectId) {
-          return project;
-        }
-
-        return {
-          ...project,
-          isExpanded: true,
-          sessions: [
-            {
-              id: `session-${Date.now()}`,
-              title,
-              updatedAtLabel: "now",
-              messages: [],
-            },
-            ...project.sessions,
-          ],
-        };
-      });
-
-      const nextProject = nextProjects.find((project) => project.id === projectId);
-      const nextSession = nextProject?.sessions[0];
-
-      return nextProject && nextSession
-        ? {
-            projects: nextProjects,
-            selectedProjectId: nextProject.id,
-            selectedSessionId: nextSession.id,
-          }
-        : state;
+      return {
+        projects: state.projects.map((project) =>
+          project.id === projectId ? { ...project, isExpanded: true } : project,
+        ),
+        selectedProjectId: projectId,
+        selectedSessionId: null,
+        draftSessionProjectId: projectId,
+      };
     }),
-  renameSession: (projectId, sessionId) =>
+  renameSession: (projectId, sessionId, title) =>
     set((state) => ({
       projects: state.projects.map((project) => {
         if (project.id !== projectId) {
@@ -319,8 +349,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
               return session;
             }
 
-            const title = window.prompt("Rename session", session.title)?.trim();
-            return title ? { ...session, title } : session;
+            const normalizedTitle = title.trim();
+            return normalizedTitle ? { ...session, title: normalizedTitle } : session;
           }),
         };
       }),
@@ -329,7 +359,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     set((state) => {
       const project = state.projects.find((entry) => entry.id === projectId);
 
-      if (!project || project.sessions.length <= 1 || !window.confirm("Delete this session?")) {
+      if (!project || project.sessions.length <= 1) {
         return state;
       }
 
@@ -352,12 +382,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
             projects: nextProjects,
             selectedProjectId: fallbackProject.id,
             selectedSessionId: fallbackSession.id,
+            draftSessionProjectId:
+              state.draftSessionProjectId === projectId ? fallbackProject.id : state.draftSessionProjectId,
           }
         : state;
     }),
   removeProject: (projectId) =>
     set((state) => {
-      if (state.projects.length <= 1 || !window.confirm("Remove this project from the sidebar?")) {
+      if (state.projects.length <= 1) {
         return state;
       }
 
@@ -369,16 +401,20 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         ? {
             projects: nextProjects,
             selectedProjectId: fallbackProject.id,
-            selectedSessionId: fallbackProject.sessions[0]?.id ?? "",
+            selectedSessionId: fallbackProject.sessions[0]?.id ?? null,
+            draftSessionProjectId: null,
           }
         : {
             projects: nextProjects,
+            draftSessionProjectId:
+              state.draftSessionProjectId === projectId ? null : state.draftSessionProjectId,
           };
     }),
   selectSession: (projectId, sessionId) =>
     set({
       selectedProjectId: projectId,
       selectedSessionId: sessionId,
+      draftSessionProjectId: null,
     }),
   openFile: (fileId) =>
     set((state) => ({
@@ -409,12 +445,47 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     })),
   setModelId: (modelId) => set({ modelId }),
   setPermissionMode: (permissionMode) => set({ permissionMode }),
-  sendPrompt: (prompt) =>
+  setAccount: (account) => set({ account }),
+  sendPrompt: (prompt, attachments = []) =>
     set((state) => {
       const content = prompt.trim();
 
-      if (!content) {
+      if (!content && attachments.length === 0) {
         return state;
+      }
+
+      const nextPreviewFiles = attachments.length > 0
+        ? [...state.previewFiles, ...attachments.filter((attachment) => !state.previewFiles.some((file) => file.id === attachment.id))]
+        : state.previewFiles;
+
+      if (state.draftSessionProjectId) {
+        const projectIndex = state.projects.findIndex(
+          (project) => project.id === state.draftSessionProjectId,
+        );
+
+        if (projectIndex === -1) {
+          return state;
+        }
+
+        const nextProjects = structuredClone(state.projects);
+        const userMessage = createUserMessage(content, attachments);
+        const nextSessionId = `session-${Date.now()}`;
+
+        nextProjects[projectIndex].sessions.unshift({
+          id: nextSessionId,
+          title: DRAFT_SESSION_TITLE,
+          updatedAtLabel: "now",
+          messages: [userMessage, createAssistantReplyWithAttachments(content, attachments)],
+        });
+        nextProjects[projectIndex].isExpanded = true;
+
+        return {
+          projects: nextProjects,
+          previewFiles: nextPreviewFiles,
+          selectedProjectId: nextProjects[projectIndex].id,
+          selectedSessionId: nextSessionId,
+          draftSessionProjectId: null,
+        };
       }
 
       const result = withSelectedSession(
@@ -422,21 +493,20 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         state.selectedProjectId,
         state.selectedSessionId,
         (projectIndex, sessionIndex, nextProjects) => {
-          const userMessage: Message = {
-            id: `message-user-${Date.now()}`,
-            role: "user",
-            content,
-            createdAtLabel: "just now",
-          };
+          const userMessage = createUserMessage(content, attachments);
 
           nextProjects[projectIndex].sessions[sessionIndex].messages.push(userMessage);
-          nextProjects[projectIndex].sessions[sessionIndex].messages.push(createAssistantReply(content));
+          nextProjects[projectIndex].sessions[sessionIndex].messages.push(
+            createAssistantReplyWithAttachments(content, attachments),
+          );
           nextProjects[projectIndex].sessions[sessionIndex].updatedAtLabel = "now";
 
           return nextProjects;
         },
       );
 
-      return result ? { projects: result } : state;
+      return result
+        ? { projects: result, previewFiles: nextPreviewFiles, draftSessionProjectId: null }
+        : state;
     }),
 }));

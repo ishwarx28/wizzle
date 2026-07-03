@@ -11,6 +11,7 @@ export function ChatView() {
   const projects = useWorkspaceStore((state) => state.projects);
   const selectedProjectId = useWorkspaceStore((state) => state.selectedProjectId);
   const selectedSessionId = useWorkspaceStore((state) => state.selectedSessionId);
+  const draftSessionProjectId = useWorkspaceStore((state) => state.draftSessionProjectId);
   const openFile = useWorkspaceStore((state) => state.openFile);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const shouldScrollAfterSendRef = useRef(false);
@@ -18,11 +19,14 @@ export function ChatView() {
   const { handleScrollActivity, isScrolling } = useScrollActivity();
 
   const currentProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0];
-  const currentSession =
-    currentProject?.sessions.find((session) => session.id === selectedSessionId) ??
-    currentProject?.sessions[0];
+  const isDraftSession = currentProject?.id === draftSessionProjectId && selectedSessionId === null;
+  const currentSession = isDraftSession
+    ? null
+    : currentProject?.sessions.find((session) => session.id === selectedSessionId) ??
+      currentProject?.sessions[0];
   const fileMap = new Map(previewFiles.map((file) => [file.id, file]));
-  const hasMessages = (currentSession?.messages.length ?? 0) > 0;
+  const currentMessages = currentSession?.messages ?? [];
+  const hasMessages = currentMessages.length > 0;
 
   useEffect(() => {
     function handleComposerSend() {
@@ -79,7 +83,7 @@ export function ChatView() {
     container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
   }
 
-  if (!currentProject || !currentSession) {
+  if (!currentProject || (!currentSession && !isDraftSession)) {
     return null;
   }
 
@@ -98,10 +102,10 @@ export function ChatView() {
           ref={scrollContainerRef}
         >
           <div className="mx-auto flex max-w-[920px] flex-col gap-4">
-            {currentSession.messages.map((message, index) => (
+            {currentMessages.map((message, index) => (
               <MessageBubble
                 fileMap={fileMap}
-                isLatest={index === currentSession.messages.length - 1}
+                isLatest={index === currentMessages.length - 1}
                 key={message.id}
                 message={message}
                 onOpenFile={openFile}

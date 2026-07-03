@@ -22,7 +22,9 @@ export function AppPage() {
   const isFilePanelOpen = useWorkspaceStore((state) => state.isFilePanelOpen);
   const isSidebarOpen = useWorkspaceStore((state) => state.isSidebarOpen);
   const projects = useWorkspaceStore((state) => state.projects);
+  const selectedProjectId = useWorkspaceStore((state) => state.selectedProjectId);
   const selectedSessionId = useWorkspaceStore((state) => state.selectedSessionId);
+  const draftSessionProjectId = useWorkspaceStore((state) => state.draftSessionProjectId);
   const toggleFilePanel = useWorkspaceStore((state) => state.toggleFilePanel);
   const toggleSidebar = useWorkspaceStore((state) => state.toggleSidebar);
   const shellRef = useRef<HTMLDivElement | null>(null);
@@ -30,9 +32,13 @@ export function AppPage() {
   const [filePanelWidth, setFilePanelWidth] = useState(DEFAULT_FILE_PANEL_WIDTH);
   const [activeResize, setActiveResize] = useState<"sidebar" | "file" | null>(null);
 
-  const currentSession =
-    projects.flatMap((project) => project.sessions).find((session) => session.id === selectedSessionId) ??
-    projects[0]?.sessions[0];
+  const currentProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0];
+  const isDraftSession = currentProject?.id === draftSessionProjectId && selectedSessionId === null;
+  const currentSession = isDraftSession
+    ? null
+    : currentProject?.sessions.find((session) => session.id === selectedSessionId) ??
+      projects.flatMap((project) => project.sessions).find((session) => session.id === selectedSessionId) ??
+      currentProject?.sessions[0];
   const panelTransitionClass =
     activeResize === null ? "transition-[width] duration-300 ease-out" : "transition-none";
   const panelContentTransitionClass =
@@ -56,6 +62,18 @@ export function AppPage() {
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [toggleSidebar]);
+
+  useEffect(() => {
+    function handleContextMenu(event: MouseEvent) {
+      event.preventDefault();
+    }
+
+    window.addEventListener("contextmenu", handleContextMenu);
+
+    return () => {
+      window.removeEventListener("contextmenu", handleContextMenu);
+    };
+  }, []);
 
   useEffect(() => {
     if (activeResize === null) {
@@ -171,7 +189,7 @@ export function AppPage() {
               ) : null}
               <div className="min-w-0">
                 <p className="truncate text-[15px] font-medium leading-none text-[var(--color-text)]">
-                  {currentSession?.title ?? "Workspace"}
+                  {currentSession?.title ?? (isDraftSession ? "New session" : "Workspace")}
                 </p>
               </div>
             </div>
