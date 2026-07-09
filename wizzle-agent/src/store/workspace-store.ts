@@ -43,7 +43,7 @@ import {
   completeContextCompaction,
   type ContextCompactionStatus,
 } from "../lib/context-status";
-import { resolveMaxPromptSize } from "../lib/env";
+import { formatPromptTooLargeError, isPromptOverLimit, resolvePromptMaxChars } from "../lib/prompt-size";
 import { frontendLogger } from "../lib/logger";
 import {
   describeSettledTurnPersistResult,
@@ -141,7 +141,7 @@ const STREAM_PERSIST_INTERVAL_MS = 750;
 const STREAM_PERSIST_CHAR_THRESHOLD = 2_000;
 const MAX_TOOL_OUTPUT_BUFFER_LENGTH = 120_000;
 const MAX_TOOL_STREAM_BUFFER_LENGTH = MAX_TOOL_OUTPUT_BUFFER_LENGTH / 2;
-const MAX_PROMPT_SIZE = resolveMaxPromptSize();
+const MAX_PROMPT_SIZE = resolvePromptMaxChars();
 
 type BufferedToolOutput = {
   combinedOutput: string;
@@ -1149,8 +1149,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       return { accepted: false, error: "The chat is not ready for another message.", ok: false };
     }
 
-    if (content.length > MAX_PROMPT_SIZE) {
-      const error = `Prompts can be at most ${MAX_PROMPT_SIZE.toLocaleString()} characters.`;
+    if (isPromptOverLimit(content, MAX_PROMPT_SIZE)) {
+      const error = formatPromptTooLargeError(MAX_PROMPT_SIZE);
       set({
         chatError: error,
       });

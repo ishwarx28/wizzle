@@ -28,11 +28,16 @@ import {
   enhanceWorkspacePrompt,
   interruptWorkspacePromptEnhancement,
   isInterruptedWorkspaceChatError,
-  resolvePromptInputLimit,
 } from "../../lib/chat-stream";
 import { MAX_REPLAY_INPUT, selectReplayHistoryWithinBudget } from "../../lib/context-budget";
 import { loadComposerState, saveComposerState } from "../../lib/local-workspace";
 import { isImageAttachment, modelSupportsImages } from "../../lib/image-capability";
+import {
+  applyPromptLimit,
+  formatPromptTooLargeError,
+  isPromptOverLimit,
+  resolvePromptMaxChars,
+} from "../../lib/prompt-size";
 import { SESSION_RUN_WAKE_EVENT } from "../../lib/session-run-wake";
 import { useWorkspaceStore } from "../../store/workspace-store";
 import type {
@@ -124,7 +129,7 @@ const textExtensions = new Set([
   "xml",
 ]);
 const ENHANCE_SHORTCUT_KEY = "e";
-const MAX_PROMPT_SIZE = resolvePromptInputLimit();
+const MAX_PROMPT_SIZE = resolvePromptMaxChars();
 
 function getExtension(fileName: string) {
   const extension = fileName.split(".").pop()?.toLowerCase();
@@ -328,7 +333,7 @@ export function Composer({
   const setPermissionMode = useWorkspaceStore((state) => state.setPermissionMode);
   const setReasoningLevel = useWorkspaceStore((state) => state.setReasoningLevel);
   const resolveToolApproval = useWorkspaceStore((state) => state.resolveToolApproval);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraftRaw] = useState("");
   const [attachments, setAttachments] = useState<PreviewFile[]>([]);
   const [isEnhancingPrompt, setIsEnhancingPrompt] = useState(false);
   const [queuedSubmissions, setQueuedSubmissions] = useState<QueuedSubmission[]>([]);
@@ -337,6 +342,28 @@ export function Composer({
   const [renderFloatingEnhanceAction, setRenderFloatingEnhanceAction] = useState(false);
   const [showFloatingEnhanceActionState, setShowFloatingEnhanceActionState] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  /** All draft writes are clamped to MAX_PROMPT_SIZE (#42). */
+  const setDraft = useCallback(
+    (
+      value: string | ((previous: string) => string),
+      options?: { notifyIfTruncated?: boolean },
+    ) => {
+      setDraftRaw((current) => {
+        const next = typeof value === "function" ? value(current) : value;
+        const { text, truncated } = applyPromptLimit(next, MAX_PROMPT_SIZE);
+
+        if (truncated && options?.notifyIfTruncated) {
+          queueMicrotask(() => {
+            setToastMessage(formatPromptTooLargeError(MAX_PROMPT_SIZE));
+          });
+        }
+
+        return text;
+      });
+    },
+    [],
+  );
   const shimmerOverlayRef = useRef<HTMLDivElement | null>(null);
   const modelSelectorRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -564,7 +591,7 @@ export function Composer({
             return;
           }
 
-          setDraft(partialDraft);
+          setDraft(partialDraft, { notifyIfTruncated: true });
         },
         projectId: selectedProjectId,
         reasoningLevel: selectedReasoningLevel,
@@ -573,7 +600,7 @@ export function Composer({
       if (enhanceRequestIdRef.current !== requestId) {
         return;
       }
-      setDraft(enhancedDraft);
+      setDraft(enhancedDraft, { notifyIfTruncated: true });
       enhanceOriginalDraftRef.current = null;
       focusComposer();
     } catch (error) {
@@ -823,6 +850,12 @@ export function Composer({
 
       if (queuedSubmissionsRef.current.length >= MAX_QUEUED_SUBMISSIONS) {
         showToast("You can queue up to 6 prompts.");
+        return;
+      }
+
+      // Size-check at enqueue so the draft is not cleared then failed later (#42).
+      if (isPromptOverLimit(nextPrompt, MAX_PROMPT_SIZE)) {
+        showToast(formatPromptTooLargeError(MAX_PROMPT_SIZE));
         return;
       }
 
@@ -1283,7 +1316,7 @@ export function Composer({
 
       event.preventDefault();
       clearChatError();
-      setDraft((currentDraft) => `${currentDraft}${event.key}`);
+      setDraft((currentDraft) => `${currentDraft}${event.key}`, { notifyIfTruncated: true });
       focusComposer();
     }
 
@@ -1309,7 +1342,7 @@ export function Composer({
       clearChatError();
 
       if (text) {
-        setDraft((currentDraft) => `${currentDraft}${text}`);
+        setDraft((currentDraft) => `${currentDraft}${text}`, { notifyIfTruncated: true });
         focusComposer();
       }
 
@@ -1335,6 +1368,7 @@ export function Composer({
     interruptPrompt,
     pendingToolApproval,
     resolveToolApproval,
+    setDraft,
   ]);
 
   useEffect(() => {
@@ -1508,7 +1542,8 @@ export function Composer({
               maxLength={MAX_PROMPT_SIZE}
               onChange={(event) => {
                 clearChatError();
-                setDraft(event.currentTarget.value);
+                // maxLength blocks most typing; still clamp for IME / programmatic edges.
+                setDraft(event.currentTarget.value, { notifyIfTruncated: true });
               }}
               onContextMenu={(event) => {
                 event.stopPropagation();
