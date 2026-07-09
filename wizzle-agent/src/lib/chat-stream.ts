@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 
 import { frontendLogger } from "./logger";
 import { resolveMaxPromptSize } from "./env";
+import { resolveImageAttachmentHardFailError } from "./image-capability";
 import { shouldManageSessionRuntimeForHelperCompletion } from "./session-runtime-helpers";
 import type { Message, ModelCapability, ModelId, PreviewFile } from "../types/workspace";
 import {
@@ -238,7 +239,18 @@ function buildUserContentPartsForCapabilities(
   prompt: string,
   attachments: PreviewFile[],
   modelCapabilities: ModelCapability[],
+  options?: {
+    /** Fail instead of omitting images (new sends). History replay soft-skips. */
+    hardFailOnUnsupportedImages?: boolean;
+  },
 ): OpenAIContentPart[] {
+  const imageCapable = modelCapabilities.includes("image");
+  const imageFail = resolveImageAttachmentHardFailError(modelCapabilities, attachments);
+
+  if (imageFail && options?.hardFailOnUnsupportedImages) {
+    throw new Error(imageFail);
+  }
+
   const parts: OpenAIContentPart[] = [];
   const trimmedPrompt = prompt.trim();
   const attachmentBlock = buildTextAttachmentBlock(attachments);
@@ -249,11 +261,7 @@ function buildUserContentPartsForCapabilities(
   }
 
   for (const attachment of attachments) {
-    if (
-      attachment.kind !== "image" ||
-      !attachment.imageSrc ||
-      !modelCapabilities.includes("image")
-    ) {
+    if (attachment.kind !== "image" || !attachment.imageSrc || !imageCapable) {
       continue;
     }
 

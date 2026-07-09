@@ -19,13 +19,17 @@ struct ReadToolArguments {
     timeout: Option<ToolTimeout>,
 }
 
-pub async fn run(project_root: PathBuf, arguments: Value) -> Result<AgentToolRunPayload, String> {
+pub async fn run(
+    project_root: PathBuf,
+    arguments: Value,
+    image_capable: bool,
+) -> Result<AgentToolRunPayload, String> {
     let arguments: ReadToolArguments = serde_json::from_value(arguments)
         .map_err(|error| format!("Invalid arguments for read: {error}"))?;
     let timeout = arguments.timeout.unwrap_or_default();
 
     run_blocking_with_timeout(timeout, "read", move || {
-        execute(project_root, arguments, timeout)
+        execute(project_root, arguments, timeout, image_capable)
     })
     .await
 }
@@ -34,12 +38,20 @@ fn execute(
     project_root: PathBuf,
     arguments: ReadToolArguments,
     timeout: ToolTimeout,
+    image_capable: bool,
 ) -> Result<AgentToolRunPayload, String> {
     let path = pathing::resolve_existing_read_path(&project_root, &arguments.path)?;
     let bytes =
         fs::read(&path).map_err(|error| format!("Could not read {}: {error}", path.display()))?;
 
     if let Some(image) = build_inline_image_payload(&path.to_string_lossy(), &bytes)? {
+        if !image_capable {
+            return Ok(output::error(
+                "This model does not support images. Image files cannot be read with the current model."
+                    .to_string(),
+            ));
+        }
+
         return Ok(output::success(json!({
             "ok": true,
             "contentHash": content_hash(&bytes),

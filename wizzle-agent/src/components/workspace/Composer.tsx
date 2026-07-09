@@ -32,6 +32,7 @@ import {
 } from "../../lib/chat-stream";
 import { MAX_REPLAY_INPUT, selectReplayHistoryWithinBudget } from "../../lib/context-budget";
 import { loadComposerState, saveComposerState } from "../../lib/local-workspace";
+import { isImageAttachment, modelSupportsImages } from "../../lib/image-capability";
 import { SESSION_RUN_WAKE_EVENT } from "../../lib/session-run-wake";
 import { useWorkspaceStore } from "../../store/workspace-store";
 import type {
@@ -386,7 +387,20 @@ export function Composer({
     ? selectedReasoningLevel.charAt(0).toUpperCase() + selectedReasoningLevel.slice(1)
     : "Default";
   const modelCapabilities = selectedProviderModel?.capabilities ?? ["text"];
+  const modelSupportsImageAttachments = modelSupportsImages(modelCapabilities);
   const modelContextLimit = selectedProviderModel?.maxContext ?? MAX_REPLAY_INPUT;
+
+  // Drop image drafts if the user switches to a text-only model (#40).
+  useEffect(() => {
+    if (modelSupportsImageAttachments) {
+      return;
+    }
+
+    setAttachments((current) => {
+      const next = current.filter((attachment) => !isImageAttachment(attachment));
+      return next.length === current.length ? current : next;
+    });
+  }, [modelSupportsImageAttachments]);
   const modelsByProvider = useMemo(() => {
     const grouped = new Map<string, typeof providerModels>();
 
@@ -704,9 +718,9 @@ export function Composer({
 
     if (unsupportedCount > 0) {
       showToast(
-        modelCapabilities.includes("image")
+        modelSupportsImages(modelCapabilities)
           ? "Only supported text, markdown, code files, and images can be attached."
-          : "The selected model supports text attachments only.",
+          : "This model does not support images. Only text, markdown, and code files can be attached.",
       );
       return;
     }
@@ -727,6 +741,17 @@ export function Composer({
     }
 
     clearChatError();
+
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    if (imageFiles.length > 0 && !modelSupportsImages(modelCapabilities)) {
+      showToast("This model does not support images. Image files were not attached.");
+      // Still allow any non-image files in the same batch.
+      files = files.filter((file) => !file.type.startsWith("image/"));
+      if (files.length === 0) {
+        return;
+      }
+    }
+
     const oversizedFiles = files.filter((file) => file.size > attachmentSourceLimit(file));
     const supportedFiles = files.filter((file) => file.size <= attachmentSourceLimit(file));
     const previewResults = await Promise.allSettled(
@@ -1595,7 +1620,11 @@ export function Composer({
                 onClick={() => {
                   void handleAttachmentSelection();
                 }}
-                title="Attach file or image"
+                title={
+                  modelSupportsImageAttachments
+                    ? "Attach file or image"
+                    : "Attach file (images require an image-capable model)"
+                }
                 type="button"
               >
                 <Paperclip className="h-4 w-4" />

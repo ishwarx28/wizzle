@@ -23,7 +23,7 @@ pub async fn run_agent_tool(
         .map_err(|error| format!("Invalid JSON tool arguments: {error}"))?;
 
     match input.tool_name.as_str() {
-        "read" => read::run(project_root, arguments).await,
+        "read" => read::run(project_root, arguments, input.image_capable).await,
         "write" => {
             let lock_path = write::resolve_lock_path(&project_root, &arguments)?;
             let session_lock = input

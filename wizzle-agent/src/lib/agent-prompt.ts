@@ -24,6 +24,7 @@ function buildPathList(paths: string[], emptyMessage: string) {
 function buildEnvironmentBlock(options: {
   currentYear: number;
   gitTrackedState: string;
+  imageCapable: boolean;
   operatingSystem: string;
   platform: string;
   projectRoot: string;
@@ -35,6 +36,8 @@ function buildEnvironmentBlock(options: {
     `Platform: ${options.platform}`,
     `OS: ${options.operatingSystem}`,
     `Git tracked state: ${options.gitTrackedState || "Unknown."}`,
+    // Tell the model not to read images when the selected model cannot view them (#40/#41).
+    options.imageCapable ? "image: enabled" : "image: disabled",
   ].join("\n");
 }
 
@@ -80,17 +83,22 @@ export function buildWorkspaceSystemPrompt(options: {
   gitTrackedState: string;
   globalSkillFiles: AgentGlobalSkillFile[];
   globalSkillsDir: string | null;
+  /** When false, environment includes `image: disabled` so the model avoids image reads. */
+  imageCapable?: boolean;
   instructionFiles: AgentInstructionFile[];
   operatingSystem: string;
   platform: string;
   projectRoot: string;
   sessionCacheDir: string | null;
 }) {
+  const imageCapable = options.imageCapable ?? true;
+
   return [
     baseSystemPrompt.trim(),
     buildEnvironmentBlock({
       currentYear: options.currentYear,
       gitTrackedState: options.gitTrackedState,
+      imageCapable,
       operatingSystem: options.operatingSystem,
       platform: options.platform,
       projectRoot: options.projectRoot,

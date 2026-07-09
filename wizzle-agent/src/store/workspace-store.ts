@@ -31,6 +31,7 @@ import {
   completeSessionRunFinish,
   isSessionAlreadyRunningError,
 } from "../lib/session-run-wake";
+import { resolveImageAttachmentHardFailError } from "../lib/image-capability";
 import {
   appendMessagePart,
   synchronizeMessageFromParts,
@@ -1169,6 +1170,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     }
     const initialProviderModel =
       initialState.providerModels.find((model) => model.id === initialState.modelId) ?? null;
+
+    const imageAttachmentError = resolveImageAttachmentHardFailError(
+      initialProviderModel?.capabilities,
+      attachments,
+    );
+    if (imageAttachmentError) {
+      set({ chatError: imageAttachmentError });
+      return { accepted: false, error: imageAttachmentError, ok: false };
+    }
 
     if (initialState.loadingSessionId && initialState.loadingSessionId === initialState.selectedSessionId) {
       const error = "Wait for the selected session to finish loading.";

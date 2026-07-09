@@ -135,6 +135,7 @@ function buildSystemPrompt(options: {
   gitTrackedState: Awaited<ReturnType<typeof loadAgentProjectContext>>["gitTrackedState"];
   globalSkillFiles: Awaited<ReturnType<typeof loadAgentProjectContext>>["globalSkillFiles"];
   globalSkillsDir: Awaited<ReturnType<typeof loadAgentProjectContext>>["globalSkillsDir"];
+  imageCapable?: boolean;
   instructionFiles: Awaited<ReturnType<typeof loadAgentProjectContext>>["instructionFiles"];
   operatingSystem: string;
   platform: string;
@@ -146,6 +147,7 @@ function buildSystemPrompt(options: {
     gitTrackedState: options.gitTrackedState,
     globalSkillFiles: options.globalSkillFiles,
     globalSkillsDir: options.globalSkillsDir,
+    imageCapable: options.imageCapable,
     instructionFiles: options.instructionFiles,
     operatingSystem: options.operatingSystem,
     platform: options.platform,
@@ -322,12 +324,14 @@ export async function runWorkspaceAgent(options: {
   });
 
   const projectContext = await loadAgentProjectContext(options.projectId, options.chatId);
-  const tools = resolveAgentTools();
+  const imageCapable = options.modelCapabilities.includes("image");
+  const tools = resolveAgentTools({ imageCapable, modelCapabilities: options.modelCapabilities });
   const systemPrompt = buildSystemPrompt({
     currentYear: new Date().getFullYear(),
     gitTrackedState: projectContext.gitTrackedState,
     globalSkillFiles: projectContext.globalSkillFiles,
     globalSkillsDir: projectContext.globalSkillsDir,
+    imageCapable,
     instructionFiles: projectContext.instructionFiles,
     operatingSystem: resolveRuntimeOperatingSystem(),
     platform: resolveRuntimePlatform(),
@@ -740,6 +744,7 @@ export async function runWorkspaceAgent(options: {
           toolPayload = isApproved
             ? await runAgentTool({
                 arguments: toolCall.function.arguments,
+                imageCapable,
                 onChunk: (chunk) => options.onToolChunk?.(chunk),
                 projectId: options.projectId,
                 sessionId: options.chatId,
