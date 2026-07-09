@@ -759,10 +759,12 @@ export async function runWorkspaceAgent(options: {
               toolCallIdLength: toolCall.id.length,
               toolName: toolCall.function.name,
             });
+            // Partial stream text is folded in by the store from live buffers (#37).
             toolPayload = {
               error: "User interrupted",
               output: JSON.stringify({
                 error: "User interrupted",
+                interrupted: true,
                 ok: false,
               }),
               status: "interrupted",

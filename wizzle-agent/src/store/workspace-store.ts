@@ -66,6 +66,13 @@ import {
   resolveIsSendingMessage,
 } from "../lib/session-sending";
 import { extractLinkedFileFromToolResult } from "../lib/tool-activity";
+import {
+  appendBufferedToolChunk,
+  createEmptyToolStreamBuffer,
+  createInterruptedToolStreamOutput,
+  createToolStreamOutput,
+  type BufferedToolOutput,
+} from "../lib/tool-stream-buffer";
 import type {
   Message,
   MessageEditState,
@@ -151,15 +158,7 @@ const SESSION_TITLE_MAX_LENGTH = 48;
 const STREAM_FLUSH_INTERVAL_MS = 64;
 const STREAM_PERSIST_INTERVAL_MS = 750;
 const STREAM_PERSIST_CHAR_THRESHOLD = 2_000;
-const MAX_TOOL_OUTPUT_BUFFER_LENGTH = 120_000;
-const MAX_TOOL_STREAM_BUFFER_LENGTH = MAX_TOOL_OUTPUT_BUFFER_LENGTH / 2;
 const MAX_PROMPT_SIZE = resolvePromptMaxChars();
-
-type BufferedToolOutput = {
-  combinedOutput: string;
-  stderr: string;
-  stdout: string;
-};
 
 type PendingToolApprovalResolution = {
   approved: boolean;
@@ -404,44 +403,6 @@ function upsertStreamingPart(
     content: `${entry.content ?? ""}${chunkText}`,
     status: part.status ?? entry.status,
   }));
-}
-
-function appendLimitedText(existing: string, chunk: string, maxLength: number) {
-  if (!chunk || existing.length >= maxLength) {
-    return existing;
-  }
-
-  return `${existing}${chunk}`.slice(0, maxLength);
-}
-
-function appendBufferedToolChunk(
-  buffer: BufferedToolOutput,
-  stream: "stderr" | "stdout",
-  chunk: string,
-): BufferedToolOutput {
-  return {
-    combinedOutput: appendLimitedText(
-      buffer.combinedOutput,
-      chunk,
-      MAX_TOOL_OUTPUT_BUFFER_LENGTH,
-    ),
-    stderr:
-      stream === "stderr"
-        ? appendLimitedText(buffer.stderr, chunk, MAX_TOOL_STREAM_BUFFER_LENGTH)
-        : buffer.stderr,
-    stdout:
-      stream === "stdout"
-        ? appendLimitedText(buffer.stdout, chunk, MAX_TOOL_STREAM_BUFFER_LENGTH)
-        : buffer.stdout,
-  };
-}
-
-function createToolStreamOutput(buffer: BufferedToolOutput) {
-  return JSON.stringify({
-    combinedOutput: buffer.combinedOutput,
-    stderr: buffer.stderr,
-    stdout: buffer.stdout,
-  });
 }
 
 function upsertSessionMessage(messages: Message[], message: Message) {
@@ -2148,11 +2109,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         return;
       }
 
-      const currentBuffer = bufferedToolOutputByCallId.get(chunk.toolCallId) ?? {
-        combinedOutput: "",
-        stderr: "",
-        stdout: "",
-      };
+      const currentBuffer =
+        bufferedToolOutputByCallId.get(chunk.toolCallId) ?? createEmptyToolStreamBuffer();
       bufferedToolOutputByCallId.set(
         chunk.toolCallId,
         appendBufferedToolChunk(currentBuffer, chunk.stream, chunk.chunk),
@@ -2165,6 +2123,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         return;
       }
 
+      // Capture live stream before flush so interrupt/error can preserve partials (#37).
+      const preFlushBuffer = message.toolCallId
+        ? bufferedToolOutputByCallId.get(message.toolCallId)
+        : undefined;
+
       clearPendingFlush();
       clearPendingToolFlush();
       flushBufferedChunks();
@@ -2172,10 +2135,65 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       activeAssistantMessageId = null;
       activeContentStepId = null;
       bufferedContent = "";
+
+      let messageToStore = message;
+      if (
+        message.toolCallId &&
+        (message.status === "interrupted" || message.status === "error")
+      ) {
+        const state = useWorkspaceStore.getState();
+        const existing = resolvePersistedSession(
+          state.projects,
+          targetProjectId,
+          targetSessionId as string,
+        )?.messages.find((entry) => entry.id === message.id);
+        const existingResult = existing?.parts?.find((part) => part.type === "tool_result");
+        const partialSource =
+          preFlushBuffer &&
+          (preFlushBuffer.truncated ||
+            preFlushBuffer.combinedOutput.length > 0 ||
+            preFlushBuffer.stdout.length > 0 ||
+            preFlushBuffer.stderr.length > 0)
+            ? preFlushBuffer
+            : (existingResult?.output ?? existing?.content ?? null);
+        const hasPartial =
+          (typeof partialSource === "string" && partialSource.trim().length > 0) ||
+          (partialSource &&
+            typeof partialSource === "object" &&
+            (partialSource.truncated ||
+              partialSource.combinedOutput.length > 0 ||
+              partialSource.stdout.length > 0 ||
+              partialSource.stderr.length > 0));
+
+        if (hasPartial) {
+          const reason =
+            message.status === "interrupted"
+              ? "User interrupted"
+              : (message.parts?.find((part) => part.type === "tool_result")?.error ??
+                "Tool failed.");
+          const preserved = createInterruptedToolStreamOutput(partialSource, reason);
+          messageToStore = {
+            ...message,
+            content: preserved,
+            parts: (message.parts ?? []).map((part) =>
+              part.type === "tool_result"
+                ? {
+                    ...part,
+                    error: part.error ?? reason,
+                    output: preserved,
+                  }
+                : part,
+            ),
+          };
+        }
+      } else if (message.toolCallId) {
+        bufferedToolOutputByCallId.delete(message.toolCallId);
+      }
+
       const linkedFile = extractLinkedFileFromToolResult({
-        content: message.content,
-        status: message.status,
-        toolName: message.toolName,
+        content: messageToStore.content,
+        status: messageToStore.status,
+        toolName: messageToStore.toolName,
       });
       let linkedFileIds: string[] = [];
       let previewFilesForMessage: PreviewFile[] = [];
@@ -2200,8 +2218,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           frontendLogger.debug("frontend.workspace", "tool_preview_load_failed", {
             error,
             sessionIdLength: targetSessionId.length,
-            toolCallIdLength: message.toolCallId?.length ?? 0,
-            toolName: message.toolName ?? null,
+            toolCallIdLength: messageToStore.toolCallId?.length ?? 0,
+            toolName: messageToStore.toolName ?? null,
           });
         }
       }
@@ -2212,8 +2230,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           targetProjectId,
           targetSessionId as string,
           (session) => {
-            upsertSessionMessage(session.messages, message);
-            const targetMessage = session.messages.find((entry) => entry.id === message.id);
+            upsertSessionMessage(session.messages, messageToStore);
+            const targetMessage = session.messages.find((entry) => entry.id === messageToStore.id);
 
             if (targetMessage && linkedFileIds.length > 0) {
               targetMessage.linkedFileIds = linkedFileIds;
@@ -2235,13 +2253,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           projects: nextProjects,
         };
       });
-      persistMessageFromStateSoft(message.id, "tool_message_appended");
+      persistMessageFromStateSoft(messageToStore.id, "tool_message_appended");
       frontendLogger.info("frontend.workspace", "tool_message_appended", {
-        messageIdLength: message.id.length,
+        messageIdLength: messageToStore.id.length,
         linkedFileCount: linkedFileIds.length,
         sessionIdLength: targetSessionId.length,
-        status: message.status ?? null,
-        toolCallIdLength: message.toolCallId?.length ?? 0,
+        status: messageToStore.status ?? null,
+        toolCallIdLength: messageToStore.toolCallId?.length ?? 0,
       });
     };
 
@@ -2393,7 +2411,18 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
               if (targetMessage.role === "tool") {
                 if (targetMessage.status === "streaming") {
-                  const interruptedOutput = "User interrupted";
+                  const settleReason =
+                    status === "interrupted"
+                      ? "User interrupted"
+                      : status === "error"
+                        ? "Tool failed."
+                        : "Tool finished.";
+                  const liveBuffer = targetMessage.toolCallId
+                    ? bufferedToolOutputByCallId.get(targetMessage.toolCallId)
+                    : undefined;
+                  if (targetMessage.toolCallId) {
+                    bufferedToolOutputByCallId.delete(targetMessage.toolCallId);
+                  }
                   const toolCallMetadata = targetMessage.toolCallId
                     ? assistantToolCallMetadata.get(targetMessage.toolCallId)
                     : undefined;
@@ -2406,57 +2435,73 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
                       : status === "interrupted"
                         ? "interrupted"
                         : "done";
-                  targetMessage.parts = (targetMessage.parts ?? []).map((part) => ({
-                    ...part,
-                    error:
-                      status === "interrupted" && part.type === "tool_result"
-                        ? part.error ?? "User interrupted"
-                        : part.error,
-                    metadata:
-                      part.type === "tool_result"
-                        ? {
-                            ...(part.metadata ?? {}),
-                            finishedAtMs: completedAtMs,
-                            parentPartId: part.parentPartId ?? toolCallMetadata?.parentPartId,
-                            projectId: targetProjectId,
-                            startedAtMs:
-                              typeof part.metadata?.startedAtMs === "number"
-                                ? part.metadata.startedAtMs
-                                : toolCallMetadata?.startedAtMs,
-                            status:
-                              status === "interrupted"
-                                ? "interrupted"
-                                : status === "error"
-                                  ? "error"
-                                  : part.status === "error"
-                                    ? part.status
-                                    : "done",
-                          }
-                        : part.metadata,
-                    output:
-                      status === "interrupted" && part.type === "tool_result"
-                        ? interruptedOutput
-                        : part.output,
-                    status:
+                  targetMessage.parts = (targetMessage.parts ?? []).map((part) => {
+                    if (part.type === "tool_result") {
+                      hasToolResultPart = true;
+                    }
+
+                    const nextStatus =
                       status === "error"
                         ? "error"
                         : part.status === "error"
                           ? part.status
                           : status === "interrupted"
                             ? "interrupted"
-                            : "done",
-                  })).map((part) => {
-                    if (part.type === "tool_result") {
-                      hasToolResultPart = true;
-                    }
+                            : "done";
+                    // #37: keep partial stream text; mark interrupted/truncated honestly.
+                    const nextOutput =
+                      (status === "interrupted" || status === "error") &&
+                      part.type === "tool_result"
+                        ? createInterruptedToolStreamOutput(
+                            liveBuffer ?? part.output ?? null,
+                            settleReason,
+                          )
+                        : part.output;
 
-                    return part;
+                    return {
+                      ...part,
+                      error:
+                        (status === "interrupted" || status === "error") &&
+                        part.type === "tool_result"
+                          ? part.error ?? settleReason
+                          : part.error,
+                      metadata:
+                        part.type === "tool_result"
+                          ? {
+                              ...(part.metadata ?? {}),
+                              finishedAtMs: completedAtMs,
+                              parentPartId: part.parentPartId ?? toolCallMetadata?.parentPartId,
+                              projectId: targetProjectId,
+                              startedAtMs:
+                                typeof part.metadata?.startedAtMs === "number"
+                                  ? part.metadata.startedAtMs
+                                  : toolCallMetadata?.startedAtMs,
+                              status:
+                                status === "interrupted"
+                                  ? "interrupted"
+                                  : status === "error"
+                                    ? "error"
+                                    : part.status === "error"
+                                      ? part.status
+                                      : "done",
+                            }
+                          : part.metadata,
+                      output: nextOutput,
+                      status: nextStatus,
+                    };
                   });
 
-                  if (status === "interrupted" && !hasToolResultPart) {
+                  if (
+                    (status === "interrupted" || status === "error") &&
+                    !hasToolResultPart
+                  ) {
+                    const interruptedOutput = createInterruptedToolStreamOutput(
+                      liveBuffer ?? null,
+                      settleReason,
+                    );
                     targetMessage.parts = appendMessagePart(targetMessage.parts, {
                       createdAtMs: completedAtMs,
-                      error: "User interrupted",
+                      error: settleReason,
                       id: `${targetMessage.id}-result`,
                       metadata: {
                         arguments: toolCallMetadata?.arguments,
@@ -2464,13 +2509,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
                         parentPartId: toolCallMetadata?.parentPartId,
                         projectId: targetProjectId,
                         startedAtMs: toolCallMetadata?.startedAtMs ?? completedAtMs,
-                        status: "interrupted",
+                        status: status === "error" ? "error" : "interrupted",
                         toolName: targetMessage.toolName ?? toolCallMetadata?.toolName,
                       },
                       name: targetMessage.toolName ?? toolCallMetadata?.toolName,
                       output: interruptedOutput,
                       parentPartId: toolCallMetadata?.parentPartId,
-                      status: "interrupted",
+                      status: status === "error" ? "error" : "interrupted",
                       toolCallId: targetMessage.toolCallId,
                       type: "tool_result",
                     });

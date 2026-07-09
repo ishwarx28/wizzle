@@ -5,18 +5,12 @@ mod types;
 
 use futures_util::future::{AbortHandle, Abortable, Aborted};
 use serde_json::json;
-use std::{
-    collections::HashMap,
-    fs,
-    sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashMap, sync::Mutex};
 use tauri::{State, Window};
 use uuid::Uuid;
 
 use crate::agent::{AgentRuntimeState, SessionRuntimeStateKind};
 use crate::logging::log_desktop_event;
-use crate::workspace::paths::{ensure_dir, wizzle_root_dir};
 
 pub use types::{
     CancelProviderChatInput, DeleteProviderInput, ImportProviderYamlInput,
@@ -25,54 +19,6 @@ pub use types::{
 };
 
 const INTERRUPTED_ERROR: &str = "__WIZZLE_PROVIDER_CHAT_INTERRUPTED__";
-
-fn now_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-fn write_debug_history(body: &serde_json::Value) -> Result<(), String> {
-    let root = wizzle_root_dir()?;
-    ensure_dir(&root)?;
-    let path = root.join("debug-history.json");
-    // Temporary debugging only: this file captures the latest provider replay body and should not be treated as durable storage.
-    let payload = json!({
-        "body": body,
-        "writtenAtMs": now_unix_ms(),
-    });
-    let contents = serde_json::to_string_pretty(&payload)
-        .map_err(|error| format!("Could not serialize Wizzle debug history: {error}"))?;
-    fs::write(&path, contents).map_err(|error| {
-        format!(
-            "Could not write Wizzle debug history to {}: {error}",
-            path.display()
-        )
-    })
-}
-
-fn resolved_debug_body(
-    body: &serde_json::Value,
-    resolved_model: &types::ProviderResolvedModel,
-    stream: bool,
-    reasoning_level: Option<&str>,
-) -> serde_json::Value {
-    openai_compatible::build_request_body(resolved_model, body.clone(), stream, reasoning_level)
-}
-
-fn write_unresolved_debug_history(body: &serde_json::Value, error: &str) -> Result<(), String> {
-    let mut body = body.clone();
-
-    if let Some(object) = body.as_object_mut() {
-        object.insert(
-            "modelResolutionError".to_string(),
-            serde_json::Value::String(error.to_string()),
-        );
-    }
-
-    write_debug_history(&body)
-}
 
 #[derive(Default)]
 pub struct ProviderChatRequestStore {
@@ -220,29 +166,7 @@ pub async fn stream_provider_chat(
         }),
     );
     let request_id = input.request_id.clone();
-    let resolved_model = match repository::resolve_model(&input.model_uuid) {
-        Ok(model) => model,
-        Err(error) => {
-            let _ = write_unresolved_debug_history(&input.body, &error);
-            return Err(error);
-        }
-    };
-    let debug_body = resolved_debug_body(
-        &input.body,
-        &resolved_model,
-        true,
-        input.reasoning_level.as_deref(),
-    );
-
-    if let Err(error) = write_debug_history(&debug_body) {
-        log_desktop_event(
-            "warn",
-            "desktop.provider",
-            "debug_history_write_failed",
-            json!({ "error": error }),
-        );
-    }
-
+    let resolved_model = repository::resolve_model(&input.model_uuid)?;
     let client = reqwest::Client::new();
     let (abort_handle, abort_registration) = AbortHandle::new_pair();
 
