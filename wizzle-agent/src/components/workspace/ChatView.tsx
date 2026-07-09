@@ -2,6 +2,13 @@ import { ArrowDown, FolderOpenDot } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { useScrollActivity } from "../../hooks/use-scroll-activity";
+import {
+  hasEarlierUserTurns,
+  initialVisibleTurnCount,
+  nextVisibleTurnCount,
+  reconcileVisibleTurnCountAfterHydrate,
+  visibleRawStartIndexForTurns,
+} from "../../lib/chat-turn-pagination";
 import { interleaveContextStatus } from "../../lib/context-status";
 import { buildDisplayMessages } from "../../lib/message-parts";
 import { useWorkspaceStore } from "../../store/workspace-store";
@@ -11,7 +18,6 @@ import { MessageBubble } from "./MessageBubble";
 
 import { ToolApprovalPrompt } from "./ToolApprovalPrompt";
 
-const TURN_PAGE_SIZE = 10;
 const AUTO_SCROLL_RESUME_DELAY_MS = 420;
 const BOTTOM_SNAP_THRESHOLD_PX = 80;
 
@@ -45,7 +51,7 @@ export function ChatView() {
   const previousMessageCountRef = useRef(0);
   const prependRestoreRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  const [visibleTurnCount, setVisibleTurnCount] = useState(TURN_PAGE_SIZE);
+  const [visibleTurnCount, setVisibleTurnCount] = useState(() => initialVisibleTurnCount());
   const { handleScrollActivity, isScrolling } = useScrollActivity();
 
   const currentProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0];
@@ -71,18 +77,10 @@ export function ChatView() {
     [currentMessages],
   );
   const totalTurnCount = userTurnStartIndexes.length;
-  const visibleRawStartIndex = useMemo(() => {
-    if (currentMessages.length === 0) {
-      return 0;
-    }
-
-    if (userTurnStartIndexes.length === 0) {
-      return 0;
-    }
-
-    const turnWindowStart = Math.max(0, userTurnStartIndexes.length - visibleTurnCount);
-    return userTurnStartIndexes[turnWindowStart] ?? 0;
-  }, [currentMessages.length, userTurnStartIndexes, visibleTurnCount]);
+  const visibleRawStartIndex = useMemo(
+    () => visibleRawStartIndexForTurns(userTurnStartIndexes, visibleTurnCount),
+    [userTurnStartIndexes, visibleTurnCount],
+  );
   const visibleRawMessages = useMemo(
     () => currentMessages.slice(visibleRawStartIndex),
     [currentMessages, visibleRawStartIndex],
@@ -122,8 +120,7 @@ export function ChatView() {
     [contextStatus, visibleMessages],
   );
   const hasMessages = displayMessages.length > 0;
-  const olderTurnCount = Math.max(0, totalTurnCount - visibleTurnCount);
-  const hasEarlierTurns = olderTurnCount > 0;
+  const hasEarlierTurns = hasEarlierUserTurns(totalTurnCount, visibleTurnCount);
   const latestUserMessage = useMemo(
     () =>
       [...currentMessages]
@@ -199,8 +196,16 @@ export function ChatView() {
       lastEffectSessionIdRef.current = nextSessionId;
       previousMessageCountRef.current = currentMessages.length;
       prependRestoreRef.current = null;
-      setVisibleTurnCount(Math.min(Math.max(totalTurnCount, 1), TURN_PAGE_SIZE));
+      // Full first page always — do not clamp to totalTurnCount while history is empty (I-1).
+      setVisibleTurnCount(initialVisibleTurnCount());
       setShowScrollToBottom(false);
+      return;
+    }
+
+    // History may hydrate after session select; unstick a too-small window (I-1).
+    const reconciled = reconcileVisibleTurnCountAfterHydrate(totalTurnCount, visibleTurnCount);
+    if (reconciled !== visibleTurnCount) {
+      setVisibleTurnCount(reconciled);
       return;
     }
 
@@ -257,7 +262,7 @@ export function ChatView() {
     if (currentMessages.length > previousMessageCount && distanceFromBottom < 200) {
       container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
     }
-  }, [currentMessages, currentSession?.id, hasMessages]);
+  }, [currentMessages, currentSession?.id, hasMessages, totalTurnCount, visibleTurnCount]);
 
   useLayoutEffect(() => {
     const nextSessionId = currentSession?.id ?? null;
@@ -364,9 +369,7 @@ export function ChatView() {
       scrollHeight: container.scrollHeight,
       scrollTop: container.scrollTop,
     };
-    setVisibleTurnCount((currentCount) =>
-      Math.min(Math.max(totalTurnCount, 1), currentCount + TURN_PAGE_SIZE),
-    );
+    setVisibleTurnCount((currentCount) => nextVisibleTurnCount(totalTurnCount, currentCount));
   }
 
   if (!currentProject) {
