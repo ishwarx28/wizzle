@@ -33,6 +33,8 @@ import {
   filterCompactedTurnIds,
 } from "../lib/session-edit-truncate";
 import { drainComposerSessionQueue } from "../lib/composer-session-queue";
+import { createDurablePersistFailureReporter } from "../lib/durable-persist-failure";
+import { getErrorMessage } from "../lib/settle-turn-persist";
 import {
   completeSessionRunFinish,
   isSessionAlreadyRunningError,
@@ -1594,6 +1596,28 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     const bufferedToolOutputByCallId = new Map<string, BufferedToolOutput>();
     let activeContentStepId: string | null = null;
 
+    // Soft UI warning for mid-stream save failures; do not abort the turn (#6).
+    const durablePersistFailureReporter = createDurablePersistFailureReporter({
+      onReport: (message) => {
+        set({ chatError: message });
+      },
+    });
+
+    const handleMidStreamPersistFailure = (error: unknown, reason: string) => {
+      if (isTurnAlreadyFinalizedError(error) || turnSettled) {
+        return;
+      }
+
+      frontendLogger.error("frontend.workspace", "mid_stream_durable_persist_failed", {
+        error,
+        errorMessage: getErrorMessage(error, "Unknown save error."),
+        reason,
+        sessionIdLength: targetSessionId.length,
+        turnIdLength: turnId.length,
+      });
+      durablePersistFailureReporter.report(error);
+    };
+
     const persistMessageFromState = async (messageId: string) => {
       if (!isActiveRunRequest() || turnSettled) {
         return;
@@ -1650,12 +1674,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           continue;
         }
 
-        await appendOrUpdateMessage({
-          message,
-          previewFiles: state.previewFiles,
-          projectId: targetProjectId,
-          sessionId: targetSessionId as string,
-        });
+        try {
+          await appendOrUpdateMessage({
+            message,
+            previewFiles: state.previewFiles,
+            projectId: targetProjectId,
+            sessionId: targetSessionId as string,
+          });
+        } catch (error) {
+          if (isTurnAlreadyFinalizedError(error) || turnSettled) {
+            continue;
+          }
+          handleMidStreamPersistFailure(error, "active_turn_messages");
+        }
       }
     };
 
@@ -1719,16 +1750,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           return persistMessageFromState(activeAssistantMessageId);
         })
         .catch((error) => {
-          if (isTurnAlreadyFinalizedError(error) || turnSettled) {
-            return;
-          }
-
-          frontendLogger.debug("frontend.workspace", "durable_stream_persist_failed", {
-            error,
-            reason,
-            sessionIdLength: targetSessionId?.length ?? 0,
-          });
+          handleMidStreamPersistFailure(error, reason);
         });
+    };
+
+    const persistMessageFromStateSoft = (messageId: string, reason: string) => {
+      void persistMessageFromState(messageId).catch((error) => {
+        handleMidStreamPersistFailure(error, reason);
+      });
     };
 
     const noteDurableStreamProgress = (charCount: number) => {
@@ -1809,7 +1838,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
         return nextProjects ? { projects: nextProjects } : state;
       });
-      void persistMessageFromState(messageId).catch(() => undefined);
+      persistMessageFromStateSoft(messageId, "assistant_chunks_flushed");
       noteDurableStreamProgress(contentChunk.length);
       frontendLogger.debug("frontend.workspace", "assistant_chunks_flushed", {
         contentLength: contentChunk.length,
@@ -1895,7 +1924,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
         return nextProjects ? { projects: nextProjects } : state;
       });
-      void persistActiveTurnMessages().catch(() => undefined);
+      void persistActiveTurnMessages().catch((error) => {
+        handleMidStreamPersistFailure(error, "tool_chunks_flushed");
+      });
       noteDurableStreamProgress(
         pendingToolOutputs.reduce((total, [, buffer]) => total + buffer.combinedOutput.length, 0),
       );
@@ -1953,7 +1984,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
         return nextProjects ? { projects: nextProjects } : state;
       });
-      void persistMessageFromState(message.id).catch(() => undefined);
+      persistMessageFromStateSoft(message.id, "assistant_message_created");
       frontendLogger.info("frontend.workspace", "assistant_message_created", {
         messageIdLength: message.id.length,
         sessionIdLength: targetSessionId.length,
@@ -2028,7 +2059,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
         return nextProjects ? { projects: nextProjects } : state;
       });
-      void persistMessageFromState(messageId).catch(() => undefined);
+      persistMessageFromStateSoft(messageId, "assistant_stream_finished");
       frontendLogger.info("frontend.workspace", "assistant_stream_finished", {
         messageIdLength: messageId.length,
         sessionIdLength: targetSessionId.length,
@@ -2100,7 +2131,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
         return nextProjects ? { projects: nextProjects } : state;
       });
-      void persistMessageFromState(messageId).catch(() => undefined);
+      persistMessageFromStateSoft(messageId, "assistant_tool_calls_synced");
       frontendLogger.info("frontend.workspace", "assistant_tool_calls_synced", {
         messageIdLength: messageId.length,
         sessionIdLength: targetSessionId.length,
@@ -2204,7 +2235,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           projects: nextProjects,
         };
       });
-      void persistMessageFromState(message.id).catch(() => undefined);
+      persistMessageFromStateSoft(message.id, "tool_message_appended");
       frontendLogger.info("frontend.workspace", "tool_message_appended", {
         messageIdLength: message.id.length,
         linkedFileCount: linkedFileIds.length,
