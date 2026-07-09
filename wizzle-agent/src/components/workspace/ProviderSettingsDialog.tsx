@@ -659,7 +659,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                 </p>
                 <div className="mt-4 flex flex-wrap gap-2">
                   <button
-                    className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--color-border)] px-3 text-[12px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--color-border)] px-3 text-[13px] font-normal leading-none tracking-normal text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                     onClick={() => openEditProviderDialog(provider)}
                     type="button"
                   >
@@ -667,7 +667,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                     Edit
                   </button>
                   <button
-                    className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--color-border)] px-3 text-[12px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--color-border)] px-3 text-[13px] font-normal leading-none tracking-normal text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                     onClick={() => {
                       setDialog({
                         type: "refresh-models",
@@ -683,7 +683,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                     Refresh
                   </button>
                   <button
-                    className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[color-mix(in_srgb,var(--color-danger)_45%,transparent)] px-3 text-[12px] text-[var(--color-danger)] transition hover:bg-[var(--color-panel-hover)] disabled:opacity-50"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[color-mix(in_srgb,var(--color-danger)_45%,transparent)] px-3 text-[13px] font-normal leading-none tracking-normal text-[var(--color-danger)] transition hover:bg-[var(--color-panel-hover)] disabled:opacity-50"
                     onClick={() => {
                       void handleDelete(provider.id);
                     }}
