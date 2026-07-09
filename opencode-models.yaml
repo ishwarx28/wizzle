@@ -19,7 +19,7 @@ providers:
           - max
         maxContext: 128000
         # Optional model-level tokenizer (overrides provider tokenizerJson).
-        # tokenizerJson: "https://huggingface.co/deepseek-ai/DeepSeek-V3/resolve/main/tokenizer.json"
+        # tokenizerJson: "https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/tokenizer.json"
         tokenizerKind: heuristic
       - modelId: hy3-free
         displayName: hy3

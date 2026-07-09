@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { ChatView } from "../components/workspace/ChatView";
 import { FilePanel } from "../components/workspace/FilePanel";
 import { ProviderSettingsPage } from "../components/workspace/ProviderSettingsDialog";
+import { SessionProcessMenu } from "../components/workspace/SessionProcessMenu";
 import { Sidebar } from "../components/workspace/Sidebar";
 import { usePanelResize } from "../hooks/use-panel-resize";
 import { useWindowDrag } from "../hooks/use-window-drag";
@@ -267,15 +268,20 @@ export function AppPage() {
                 </div>
               </div>
 
-              {!isFilePanelOpen ? (
-                <button
-                  aria-label="Open file panel"
-                  className="relative z-10 rounded-xl p-2 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
-                  onClick={toggleFilePanel}
-                >
-                  <PanelRightOpen className="h-4 w-4" />
-                </button>
-              ) : null}
+              <div className="relative z-10 flex shrink-0 items-center gap-0.5">
+                {activePage === "chat" ? (
+                  <SessionProcessMenu sessionId={currentSession?.id ?? selectedSessionId} />
+                ) : null}
+                {!isFilePanelOpen ? (
+                  <button
+                    aria-label="Open file panel"
+                    className="rounded-xl p-2 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                    onClick={toggleFilePanel}
+                  >
+                    <PanelRightOpen className="h-4 w-4" />
+                  </button>
+                ) : null}
+              </div>
             </header>
 
             {providerModelsError ? (

@@ -197,6 +197,11 @@ fn build_shell_command(command: &str) -> Command {
     } else {
         let mut process = Command::new("sh");
         process.args(["-lc", command]);
+        // Own process group so stop can kill the shell and its children (http.server, etc.).
+        #[cfg(unix)]
+        {
+            process.process_group(0);
+        }
         process
     }
 }

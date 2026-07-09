@@ -205,25 +205,49 @@ fn lock_for_key(
         .clone())
 }
 
+/// Stop a background shell and its children (e.g. `sh -c "python -m http.server"`).
+/// Unix: kill process group first, then children by parent, then the pid itself.
 async fn terminate_pid(pid: u32) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let _ = tokio::process::Command::new("taskkill")
+        let status = tokio::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .status()
             .await
             .map_err(|error| format!("Could not stop process {pid}: {error}"))?;
+        if !status.success() {
+            return Err(format!("Could not stop process {pid} (taskkill failed)."));
+        }
         return Ok(());
     }
 
     #[cfg(not(target_os = "windows"))]
     {
+        // Negative PID = process group (requires spawn with process_group(0)).
+        let _ = tokio::process::Command::new("kill")
+            .args(["-TERM", &format!("-{pid}")])
+            .status()
+            .await;
         let _ = tokio::process::Command::new("kill")
             .args(["-TERM", &pid.to_string()])
             .status()
-            .await
-            .map_err(|error| format!("Could not stop process {pid}: {error}"))?;
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            .await;
+        // Children of the shell that left the group (common for pipelines).
+        let _ = tokio::process::Command::new("pkill")
+            .args(["-TERM", "-P", &pid.to_string()])
+            .status()
+            .await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let _ = tokio::process::Command::new("kill")
+            .args(["-KILL", &format!("-{pid}")])
+            .status()
+            .await;
+        let _ = tokio::process::Command::new("pkill")
+            .args(["-KILL", "-P", &pid.to_string()])
+            .status()
+            .await;
         let _ = tokio::process::Command::new("kill")
             .args(["-KILL", &pid.to_string()])
             .status()
@@ -537,12 +561,20 @@ impl AgentRuntimeState {
             .get(process_id)
             .cloned();
 
-        if let Some(handle) = handle {
+        let pid = if let Some(handle) = handle {
             if handle.session_id != session_id {
                 return Err("That process belongs to a different session.".to_string());
             }
+            Some(handle.pid)
+        } else {
+            // App restart / map miss: still kill using the SQL-tracked pid when present.
+            sqlite_repository::read_process(session_id, process_id)
+                .ok()
+                .and_then(|process| process.pid.map(|value| value as u32))
+        };
 
-            terminate_pid(handle.pid).await?;
+        if let Some(pid) = pid {
+            terminate_pid(pid).await?;
             self.unregister_background_process(process_id);
         }
 
