@@ -55,6 +55,16 @@ function main() {
   assert(getComposerSessionQueue("s1").length === 1, "module get/set");
   assert(removeComposerQueueItem([a, b], a.id)[0]?.id === b.id, "remove");
 
+  // useSyncExternalStore requires a stable empty snapshot (React error #185).
+  const emptyA = getComposerSessionQueue("missing-session");
+  const emptyB = getComposerSessionQueue("missing-session");
+  assert(emptyA === emptyB, "empty queue snapshot is referentially stable");
+  assert(emptyA.length === 0, "empty queue length");
+  setComposerSessionQueue("s1", []);
+  const clearedA = getComposerSessionQueue("s1");
+  const clearedB = getComposerSessionQueue("s1");
+  assert(clearedA === clearedB && clearedA.length === 0, "cleared queue is stable empty");
+
   resetComposerSessionQueuesForTests();
   const draftA = createComposerQueueItem({ attachments: [], prompt: "queued on draft" });
   const draftB = createComposerQueueItem({ attachments: [], prompt: "sending on draft" });

@@ -19,6 +19,9 @@ const queuesBySessionId = new Map<string, ComposerQueueItem[]>();
 const listenersBySessionId = new Map<string, Set<() => void>>();
 const drainingSessionIds = new Set<string>();
 
+/** Stable empty snapshot for useSyncExternalStore — never return a fresh `[]` (React #185). */
+const EMPTY_COMPOSER_QUEUE: ComposerQueueItem[] = [];
+
 function notify(sessionId: string) {
   const listeners = listenersBySessionId.get(sessionId);
   if (!listeners) {
@@ -30,10 +33,19 @@ function notify(sessionId: string) {
 }
 
 export function getComposerSessionQueue(sessionId: string): ComposerQueueItem[] {
-  return queuesBySessionId.get(sessionId) ?? [];
+  return queuesBySessionId.get(sessionId) ?? EMPTY_COMPOSER_QUEUE;
 }
 
 export function setComposerSessionQueue(sessionId: string, items: ComposerQueueItem[]) {
+  if (items.length === 0) {
+    // Keep a stable empty snapshot; remove the map entry so get returns EMPTY_COMPOSER_QUEUE.
+    const hadEntry = queuesBySessionId.delete(sessionId);
+    if (hadEntry) {
+      notify(sessionId);
+    }
+    return;
+  }
+
   queuesBySessionId.set(
     sessionId,
     items.map((item) => ({
