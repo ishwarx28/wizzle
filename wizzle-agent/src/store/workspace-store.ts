@@ -22,6 +22,7 @@ import {
   setProjectExpanded,
   updateSessionSelection,
   updateSessionTitle,
+  setSessionRuntimeState,
   upsertTurnSummary as persistTurnSummary,
 } from "../lib/local-workspace";
 import {
@@ -30,6 +31,11 @@ import {
   updateMatchingMessagePart,
 } from "../lib/message-parts";
 import { buildTurnReplaySummary } from "../lib/context-budget";
+import {
+  beginContextCompaction,
+  completeContextCompaction,
+  type ContextCompactionStatus,
+} from "../lib/context-status";
 import { resolveMaxPromptSize } from "../lib/env";
 import { frontendLogger } from "../lib/logger";
 import {
@@ -80,6 +86,8 @@ interface WorkspaceState {
   isSendingMessage: boolean;
   /** Session ids with an in-flight agent run (multi-session isolated). */
   sendingSessionIds: string[];
+  /** Inline context compaction status per session (#81). */
+  sessionContextStatus: Record<string, ContextCompactionStatus>;
   pendingToolApproval: ToolApprovalRequest | null;
   providerModels: ProviderModelInfo[];
   providerModelsError: string | null;
@@ -604,6 +612,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   isFilePanelOpen: true,
   isSendingMessage: false,
   sendingSessionIds: [],
+  sessionContextStatus: {},
   isSidebarOpen: true,
   loadingSessionId: null,
   modelId: "",
@@ -2449,6 +2458,25 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         onReasoningFinished: finishReasoningStep,
         onAssistantStreamFinished: finishAssistantStream,
         onAssistantToolCalls: syncAssistantToolCalls,
+        onCompactionStarted: async () => {
+          const state = useWorkspaceStore.getState();
+          const session = resolvePersistedSession(
+            state.projects,
+            targetProjectId,
+            targetSessionId as string,
+          );
+          const messageCount = session?.messages.length ?? 0;
+          set((current) => ({
+            sessionContextStatus: {
+              ...current.sessionContextStatus,
+              [targetSessionId as string]: beginContextCompaction(
+                current.sessionContextStatus[targetSessionId as string],
+                messageCount,
+              ),
+            },
+          }));
+          void setSessionRuntimeState(targetSessionId as string, "compacting").catch(() => undefined);
+        },
         onCompactedContext: async (compactedContext) => {
           let compactedSession: Session | null = null;
           set((state) => {
@@ -2464,7 +2492,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
               },
             );
 
-            return nextProjects ? { projects: nextProjects } : state;
+            return {
+              ...(nextProjects ? { projects: nextProjects } : {}),
+              sessionContextStatus: {
+                ...state.sessionContextStatus,
+                [targetSessionId as string]: completeContextCompaction(
+                  state.sessionContextStatus[targetSessionId as string],
+                ),
+              },
+            };
           });
 
           if (compactedSession) {
@@ -2475,6 +2511,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
               session: compactedSession,
             });
           }
+        },
+        onCompactionEnded: async (result) => {
+          if (result === "compacted") {
+            void setSessionRuntimeState(targetSessionId as string, "busy").catch(() => undefined);
+            return;
+          }
+
+          set((state) => {
+            const next = { ...state.sessionContextStatus };
+            delete next[targetSessionId as string];
+            return { sessionContextStatus: next };
+          });
+          void setSessionRuntimeState(targetSessionId as string, "busy").catch(() => undefined);
         },
         onToolChunk: appendToolChunk,
         onToolMessage: appendToolMessage,

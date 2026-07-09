@@ -63,6 +63,13 @@ pub struct SessionRuntimeInput {
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SetSessionRuntimeStateInput {
+    pub session_id: String,
+    pub state: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionProcessInput {
     pub process_id: String,
     pub session_id: String,
@@ -646,6 +653,31 @@ pub fn get_session_runtime_state(
     input: SessionRuntimeInput,
     runtime: tauri::State<'_, AgentRuntimeState>,
 ) -> Result<SessionRuntimeStatePayload, String> {
+    runtime.get_state(&input.session_id)
+}
+
+#[tauri::command]
+pub fn set_session_runtime_state(
+    window: Window,
+    input: SetSessionRuntimeStateInput,
+    runtime: tauri::State<'_, AgentRuntimeState>,
+) -> Result<SessionRuntimeStatePayload, String> {
+    let state = match input.state.as_str() {
+        "idle" => SessionRuntimeStateKind::Idle,
+        "busy" => SessionRuntimeStateKind::Busy,
+        "compacting" => SessionRuntimeStateKind::Compacting,
+        "waiting_approval" => SessionRuntimeStateKind::WaitingApproval,
+        "interrupted" => SessionRuntimeStateKind::Interrupted,
+        "error" => SessionRuntimeStateKind::Error,
+        _ => {
+            return Err(format!(
+                "Unsupported session runtime state: {}",
+                input.state
+            ))
+        }
+    };
+
+    runtime.set_state(&window, &input.session_id, state, None)?;
     runtime.get_state(&input.session_id)
 }
 

@@ -2,9 +2,11 @@ import { ArrowDown, FolderOpenDot } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { useScrollActivity } from "../../hooks/use-scroll-activity";
+import { interleaveContextStatus } from "../../lib/context-status";
 import { buildDisplayMessages } from "../../lib/message-parts";
 import { useWorkspaceStore } from "../../store/workspace-store";
 import { Composer } from "./Composer";
+import { ContextStatusDivider } from "./ContextStatusDivider";
 import { MessageBubble } from "./MessageBubble";
 import { SessionProcessPanel } from "./SessionProcessPanel";
 import { ToolApprovalPrompt } from "./ToolApprovalPrompt";
@@ -22,6 +24,7 @@ function isNearBottom(container: HTMLDivElement, threshold = BOTTOM_SNAP_THRESHO
 export function ChatView() {
   const activeMessageEdit = useWorkspaceStore((state) => state.activeMessageEdit);
   const isSendingMessage = useWorkspaceStore((state) => state.isSendingMessage);
+  const sessionContextStatus = useWorkspaceStore((state) => state.sessionContextStatus);
   const loadingSessionId = useWorkspaceStore((state) => state.loadingSessionId);
   const previewFiles = useWorkspaceStore((state) => state.previewFiles);
   const draftSessions = useWorkspaceStore((state) => state.draftSessions);
@@ -85,6 +88,38 @@ export function ChatView() {
   );
   const displayMessages = useMemo(() => buildDisplayMessages(visibleRawMessages), [visibleRawMessages]);
   const visibleMessages = displayMessages;
+  const contextStatus = useMemo(() => {
+    const sessionId = currentSession?.id ?? selectedSessionId;
+    if (!sessionId) {
+      return null;
+    }
+
+    const status = sessionContextStatus[sessionId];
+    if (!status) {
+      return null;
+    }
+
+    // Map absolute session message index onto the currently visible window.
+    const relativeAfter = Math.min(
+      visibleMessages.length,
+      Math.max(0, status.afterMessageCount - visibleRawStartIndex),
+    );
+
+    return {
+      ...status,
+      afterMessageCount: relativeAfter,
+    };
+  }, [
+    currentSession?.id,
+    selectedSessionId,
+    sessionContextStatus,
+    visibleMessages.length,
+    visibleRawStartIndex,
+  ]);
+  const chatItems = useMemo(
+    () => interleaveContextStatus(visibleMessages, contextStatus),
+    [contextStatus, visibleMessages],
+  );
   const hasMessages = displayMessages.length > 0;
   const olderTurnCount = Math.max(0, totalTurnCount - visibleTurnCount);
   const hasEarlierTurns = olderTurnCount > 0;
@@ -416,36 +451,49 @@ export function ChatView() {
                 </button>
               </div>
             ) : null}
-            {visibleMessages.map((message, index) => (
-              <MessageBubble
-                canEditUserMessage={
-                  message.role === "user" &&
-                  message.id === latestUserMessageId &&
-                  canEditLatestUserTurn &&
-                  activeMessageEdit?.messageId !== message.id
-                }
-                fileMap={fileMap}
-                isEditingUserMessage={activeMessageEdit?.messageId === message.id}
-                isLatest={index === visibleMessages.length - 1}
-                key={message.id}
-                message={message}
-                onEditUserMessage={({ attachments, messageId, prompt, turnId }) => {
-                  if (!currentProject || !currentSession) {
-                    return;
-                  }
+            {chatItems.map((item, index) => {
+              if (item.type === "context-status") {
+                return (
+                  <ContextStatusDivider
+                    key={`context-status-${item.phase}-${index}`}
+                    phase={item.phase}
+                  />
+                );
+              }
 
-                  startMessageEdit({
-                    attachments,
-                    messageId,
-                    projectId: currentProject.id,
-                    prompt,
-                    sessionId: currentSession.id,
-                    turnId,
-                  });
-                }}
-                onOpenFile={openFile}
-              />
-            ))}
+              const message = item.message;
+
+              return (
+                <MessageBubble
+                  canEditUserMessage={
+                    message.role === "user" &&
+                    message.id === latestUserMessageId &&
+                    canEditLatestUserTurn &&
+                    activeMessageEdit?.messageId !== message.id
+                  }
+                  fileMap={fileMap}
+                  isEditingUserMessage={activeMessageEdit?.messageId === message.id}
+                  isLatest={index === chatItems.length - 1}
+                  key={message.id}
+                  message={message}
+                  onEditUserMessage={({ attachments, messageId, prompt, turnId }) => {
+                    if (!currentProject || !currentSession) {
+                      return;
+                    }
+
+                    startMessageEdit({
+                      attachments,
+                      messageId,
+                      projectId: currentProject.id,
+                      prompt,
+                      sessionId: currentSession.id,
+                      turnId,
+                    });
+                  }}
+                  onOpenFile={openFile}
+                />
+              );
+            })}
             <div aria-hidden className="h-px w-full shrink-0" ref={bottomAnchorRef} />
           </div>
         </div>

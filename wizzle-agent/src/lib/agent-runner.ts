@@ -220,7 +220,10 @@ export async function runWorkspaceAgent(options: {
   onReasoningFinished?: (messageId: string) => void;
   onAssistantStreamFinished: (messageId: string, phase: AssistantPhase) => void;
   onAssistantToolCalls: (messageId: string, toolCalls: ToolCall[]) => void;
+  onCompactionStarted?: () => Promise<void> | void;
   onCompactedContext?: (context: CompactedContextRecord) => Promise<void> | void;
+  /** Called when compaction exits without a new summary (or after failure cleanup). */
+  onCompactionEnded?: (result: "compacted" | "skipped" | "failed") => Promise<void> | void;
   onToolMessage: (message: Message) => Promise<void> | void;
   onToolChunk?: (chunk: AgentToolOutputChunk) => void;
   onTurnFinished: (payload: { status: "done" | "error" | "interrupted"; turnId: string }) => void;
@@ -306,42 +309,55 @@ export async function runWorkspaceAgent(options: {
         inputBudget: selection.budget.inputBudget,
         turnIdLength: options.turnId.length,
       });
+      await options.onCompactionStarted?.();
 
-      const nextCompactedContext = await compactReplayBlocks({
-        blocks: buildReplayBlocks(conversationHistory, options.turnId),
-        chatId: options.chatId,
-        currentTurnId: options.turnId,
-        droppedTurnIds: selection.droppedTurnIds,
-        model: options.selectedModel,
-        previousContext: compactedContext,
-        projectId: options.projectId,
-        previewFileMap: options.previewFileMap,
-        tokenLimit: selection.budget.compactedContextTokens,
-      });
-
-      if (nextCompactedContext) {
-        compactedContext = nextCompactedContext;
-        await options.onCompactedContext?.(nextCompactedContext);
-        selection = selectReplayHistoryWithinBudget({
-          cachedEstimateByBlockId: replayEstimateCache,
-          cacheKeyData: promptCacheKeyData,
-          compactedContext,
+      try {
+        const nextCompactedContext = await compactReplayBlocks({
+          blocks: buildReplayBlocks(conversationHistory, options.turnId),
+          chatId: options.chatId,
           currentTurnId: options.turnId,
-          history: conversationHistory,
-          maxContext: options.selectedModel.maxContext,
-          maxOutputTokens: options.selectedModel.maxOutputTokens,
-          modelCapabilities: options.modelCapabilities,
+          droppedTurnIds: selection.droppedTurnIds,
+          model: options.selectedModel,
+          previousContext: compactedContext,
+          projectId: options.projectId,
           previewFileMap: options.previewFileMap,
-          systemPrompt,
-          tokenizerKind: options.selectedModel.tokenizerKind ?? options.tokenizerKind,
-          tools,
-          turnSummaries: options.turnSummaries,
+          tokenLimit: selection.budget.compactedContextTokens,
         });
-        frontendLogger.info("frontend.agent", "compaction_finished", {
-          compactedTurnCount: nextCompactedContext.compactedTurnIds.length,
-          summaryTokens: nextCompactedContext.tokens,
+
+        if (nextCompactedContext) {
+          compactedContext = nextCompactedContext;
+          await options.onCompactedContext?.(nextCompactedContext);
+          selection = selectReplayHistoryWithinBudget({
+            cachedEstimateByBlockId: replayEstimateCache,
+            cacheKeyData: promptCacheKeyData,
+            compactedContext,
+            currentTurnId: options.turnId,
+            history: conversationHistory,
+            maxContext: options.selectedModel.maxContext,
+            maxOutputTokens: options.selectedModel.maxOutputTokens,
+            modelCapabilities: options.modelCapabilities,
+            previewFileMap: options.previewFileMap,
+            systemPrompt,
+            tokenizerKind: options.selectedModel.tokenizerKind ?? options.tokenizerKind,
+            tools,
+            turnSummaries: options.turnSummaries,
+          });
+          frontendLogger.info("frontend.agent", "compaction_finished", {
+            compactedTurnCount: nextCompactedContext.compactedTurnIds.length,
+            summaryTokens: nextCompactedContext.tokens,
+            turnIdLength: options.turnId.length,
+          });
+          await options.onCompactionEnded?.("compacted");
+        } else {
+          await options.onCompactionEnded?.("skipped");
+        }
+      } catch (error) {
+        frontendLogger.error("frontend.agent", "compaction_failed", {
+          error,
           turnIdLength: options.turnId.length,
         });
+        await options.onCompactionEnded?.("failed");
+        throw error;
       }
     }
 

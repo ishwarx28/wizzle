@@ -33,6 +33,18 @@ export async function getSessionRuntimeState(sessionId: string) {
   });
 }
 
+export async function setSessionRuntimeState(
+  sessionId: string,
+  state: SessionRuntimeState["state"],
+) {
+  return invoke<SessionRuntimeState>("set_session_runtime_state", {
+    input: {
+      sessionId,
+      state,
+    },
+  });
+}
+
 export async function listSessionRuntimeStates() {
   return invoke<SessionRuntimeState[]>("list_session_runtime_states");
 }
