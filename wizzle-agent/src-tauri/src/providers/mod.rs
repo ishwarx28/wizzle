@@ -56,18 +56,9 @@ fn resolved_debug_body(
     body: &serde_json::Value,
     resolved_model: &types::ProviderResolvedModel,
     stream: bool,
+    reasoning_level: Option<&str>,
 ) -> serde_json::Value {
-    let mut body = body.clone();
-
-    if let Some(object) = body.as_object_mut() {
-        object.insert(
-            "model".to_string(),
-            serde_json::Value::String(resolved_model.model.model_id.clone()),
-        );
-        object.insert("stream".to_string(), serde_json::Value::Bool(stream));
-    }
-
-    body
+    openai_compatible::build_request_body(resolved_model, body.clone(), stream, reasoning_level)
 }
 
 fn write_unresolved_debug_history(body: &serde_json::Value, error: &str) -> Result<(), String> {
@@ -170,7 +161,12 @@ pub async fn complete_provider_chat(
     let _ = runtime.set_state(&window, &input.chat_id, SessionRuntimeStateKind::Busy, None);
 
     let completion_result = Abortable::new(
-        openai_compatible::complete_chat(&client, &resolved_model, input.body),
+        openai_compatible::complete_chat(
+            &client,
+            &resolved_model,
+            input.body,
+            input.reasoning_level.as_deref(),
+        ),
         abort_registration,
     )
     .await;
@@ -228,7 +224,12 @@ pub async fn stream_provider_chat(
             return Err(error);
         }
     };
-    let debug_body = resolved_debug_body(&input.body, &resolved_model, true);
+    let debug_body = resolved_debug_body(
+        &input.body,
+        &resolved_model,
+        true,
+        input.reasoning_level.as_deref(),
+    );
 
     if let Err(error) = write_debug_history(&debug_body) {
         log_desktop_event(
@@ -253,6 +254,7 @@ pub async fn stream_provider_chat(
             &request_id,
             &resolved_model,
             input.body,
+            input.reasoning_level.as_deref(),
         ),
         abort_registration,
     )

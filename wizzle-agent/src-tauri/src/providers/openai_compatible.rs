@@ -241,13 +241,47 @@ fn endpoint_with_path(endpoint: &str, path: &str) -> String {
     )
 }
 
-fn build_request_body(model: &ProviderResolvedModel, mut body: Value, stream: bool) -> Value {
+/// Map UI / model reasoning level labels into OpenAI-compatible `reasoning_effort` values.
+pub fn resolve_reasoning_effort(level: &str) -> Option<String> {
+    let normalized = level.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    // Wizzle's historical defaults map onto common effort labels.
+    // Model-specific values (low/medium/high/max) pass through unchanged.
+    let effort = match normalized.as_str() {
+        "fast" => "low",
+        "balanced" => "medium",
+        other => other,
+    };
+
+    Some(effort.to_string())
+}
+
+fn model_supports_reasoning(model: &ProviderResolvedModel) -> bool {
+    !model.model.reasoning_levels.is_empty()
+}
+
+pub(crate) fn build_request_body(
+    model: &ProviderResolvedModel,
+    mut body: Value,
+    stream: bool,
+    reasoning_level: Option<&str>,
+) -> Value {
     if let Some(object) = body.as_object_mut() {
         object.insert(
             "model".to_string(),
             Value::String(model.model.model_id.clone()),
         );
         object.insert("stream".to_string(), Value::Bool(stream));
+
+        if model_supports_reasoning(model) {
+            if let Some(effort) = reasoning_level.and_then(resolve_reasoning_effort) {
+                // Prefer the desktop UI selection over any stale body field.
+                object.insert("reasoning_effort".to_string(), Value::String(effort));
+            }
+        }
     }
 
     body
@@ -258,6 +292,7 @@ async fn post_chat_completion(
     resolved_model: &ProviderResolvedModel,
     body: Value,
     stream: bool,
+    reasoning_level: Option<&str>,
 ) -> Result<reqwest::Response, ProviderRequestError> {
     if !matches!(
         resolved_model.provider.provider_type.as_str(),
@@ -275,7 +310,12 @@ async fn post_chat_completion(
             &format!("{OPENAI_API_PREFIX}{OPENAI_CHAT_COMPLETIONS_PATH}"),
         ))
         .header(CONTENT_TYPE, "application/json")
-        .json(&build_request_body(resolved_model, body, stream));
+        .json(&build_request_body(
+            resolved_model,
+            body,
+            stream,
+            reasoning_level,
+        ));
 
     if let Some(api_key) = resolved_model.provider.api_key.as_deref() {
         request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
@@ -356,11 +396,20 @@ pub async fn complete_chat(
     client: &reqwest::Client,
     resolved_model: &ProviderResolvedModel,
     body: Value,
+    reasoning_level: Option<&str>,
 ) -> Result<String, String> {
     let mut attempt = 0;
 
     loop {
-        match post_chat_completion(client, resolved_model, body.clone(), false).await {
+        match post_chat_completion(
+            client,
+            resolved_model,
+            body.clone(),
+            false,
+            reasoning_level,
+        )
+        .await
+        {
             Ok(response) => {
                 return response
                     .text()
@@ -382,12 +431,20 @@ pub async fn stream_chat(
     request_id: &str,
     resolved_model: &ProviderResolvedModel,
     body: Value,
+    reasoning_level: Option<&str>,
 ) -> Result<(), String> {
     let mut attempt = 0;
     let mut emitted_any_chunks = false;
 
     'retry: loop {
-        let response = match post_chat_completion(client, resolved_model, body.clone(), true).await
+        let response = match post_chat_completion(
+            client,
+            resolved_model,
+            body.clone(),
+            true,
+            reasoning_level,
+        )
+        .await
         {
             Ok(response) => response,
             Err(error)
@@ -516,7 +573,33 @@ pub async fn fetch_models(
 
 #[cfg(test)]
 mod tests {
-    use super::map_provider_error;
+    use super::{
+        build_request_body, map_provider_error, resolve_reasoning_effort,
+    };
+    use crate::providers::types::{ProviderModelRecord, ProviderResolvedModel, ProviderSecretRecord};
+    use serde_json::{json, Value};
+
+    fn sample_model(reasoning_levels: Vec<String>) -> ProviderResolvedModel {
+        ProviderResolvedModel {
+            model: ProviderModelRecord {
+                capabilities: vec!["text".to_string()],
+                display_name: None,
+                max_context: 128_000,
+                max_output_tokens: None,
+                model_id: "test-model".to_string(),
+                reasoning_levels,
+                tokenizer_kind: Some("heuristic".to_string()),
+            },
+            model_uuid: "uuid-1".to_string(),
+            provider: ProviderSecretRecord {
+                api_key: Some("key".to_string()),
+                endpoint: "https://example.com".to_string(),
+                id: "provider-1".to_string(),
+                name: "Example".to_string(),
+                provider_type: "openai_compatible".to_string(),
+            },
+        }
+    }
 
     #[test]
     fn maps_authentication_errors() {
@@ -539,5 +622,59 @@ mod tests {
 
         assert_eq!(error.message, "Prompt is too long for the selected model.");
         assert!(!error.retryable);
+    }
+
+    #[test]
+    fn resolves_wizzle_and_provider_reasoning_levels() {
+        assert_eq!(
+            resolve_reasoning_effort("fast").as_deref(),
+            Some("low")
+        );
+        assert_eq!(
+            resolve_reasoning_effort("balanced").as_deref(),
+            Some("medium")
+        );
+        assert_eq!(resolve_reasoning_effort("max").as_deref(), Some("max"));
+        assert_eq!(resolve_reasoning_effort("high").as_deref(), Some("high"));
+        assert_eq!(resolve_reasoning_effort("  ").as_deref(), None);
+    }
+
+    #[test]
+    fn injects_reasoning_effort_when_model_supports_reasoning() {
+        let model = sample_model(vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "max".to_string(),
+        ]);
+        let body = build_request_body(
+            &model,
+            json!({
+                "messages": [],
+                "model": "ignored",
+            }),
+            true,
+            Some("balanced"),
+        );
+
+        assert_eq!(
+            body.get("reasoning_effort").and_then(Value::as_str),
+            Some("medium")
+        );
+        assert_eq!(body.get("model").and_then(Value::as_str), Some("test-model"));
+        assert_eq!(body.get("stream").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn skips_reasoning_effort_when_model_has_no_levels() {
+        let model = sample_model(vec![]);
+        let body = build_request_body(
+            &model,
+            json!({ "messages": [] }),
+            false,
+            Some("max"),
+        );
+
+        assert!(body.get("reasoning_effort").is_none());
     }
 }
