@@ -65,6 +65,13 @@ import {
   type SettledTurnPersistResult,
 } from "../lib/settle-turn-persist";
 import { resolveHydratedSessionSelection } from "../lib/session-selection";
+import {
+  clearSessionStreamErrorMap,
+  formatStreamStepUserMessage,
+  setSessionStreamErrorMap,
+  turnHasPartialAssistantContent,
+  type SessionStreamError,
+} from "../lib/stream-step-error";
 import { settleNonToolTurnMessage } from "../lib/settle-turn-status";
 import {
   addSendingSessionId,
@@ -117,6 +124,11 @@ interface WorkspaceState {
   /** Inline context compaction status per session (#81). */
   sessionContextStatus: Record<string, ContextCompactionStatus>;
   /**
+   * Stream/step failure under the assistant bubble for this session (#19 C).
+   * Cleared when the user sends another message.
+   */
+  sessionStreamErrors: Record<string, SessionStreamError | undefined>;
+  /**
    * Pending tool approvals keyed by session id.
    * Survive session switches; only the selected session's entry is shown in UI (#26/#28).
    */
@@ -130,6 +142,7 @@ interface WorkspaceState {
   reasoningLevel: string;
   permissionMode: PermissionMode;
   clearChatError: () => void;
+  clearSessionStreamError: (sessionId: string) => void;
   clearProviderModelsError: () => void;
   hydrateWorkspace: (snapshot: WorkspaceSnapshot) => void;
   toggleProjectExpanded: (projectId: string) => void;
@@ -698,6 +711,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   isSendingMessage: false,
   sendingSessionIds: [],
   sessionContextStatus: {},
+  sessionStreamErrors: {},
   isSidebarOpen: true,
   loadingSessionId: null,
   modelId: "",
@@ -714,6 +728,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   selectedProjectId: "",
   selectedSessionId: null,
   clearChatError: () => set({ chatError: null }),
+  clearSessionStreamError: (sessionId) =>
+    set((state) => ({
+      sessionStreamErrors: clearSessionStreamErrorMap(state.sessionStreamErrors, sessionId),
+    })),
   hydrateWorkspace: (snapshot) => {
     const currentState = useWorkspaceStore.getState();
     const didChangeWorkspaceContext =
@@ -1288,6 +1306,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         delete nextDraftSessions[targetProjectId];
 
         const sendingSessionIds = addSendingSessionId(targetSessionId, state.sendingSessionIds);
+        // #19 C: new send clears prior stream-step error under the bubble.
+        let sessionStreamErrors = clearSessionStreamErrorMap(
+          state.sessionStreamErrors,
+          draftSessionId,
+        );
+        sessionStreamErrors = clearSessionStreamErrorMap(sessionStreamErrors, targetSessionId);
 
         return {
           chatError: null,
@@ -1296,6 +1320,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           projects: nextProjects,
           selectedProjectId: targetProjectId,
           selectedSessionId: targetSessionId,
+          sessionStreamErrors,
           ...withSendingSessionState(targetSessionId, sendingSessionIds),
         };
       });
@@ -1371,6 +1396,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           chatError: null,
           previewFiles: nextPreviewFiles,
           projects: nextProjects,
+          // #19 C: new send hides prior stream-step error under the bubble.
+          sessionStreamErrors: clearSessionStreamErrorMap(
+            state.sessionStreamErrors,
+            targetSessionId as string,
+          ),
           ...withSendingSessionState(state.selectedSessionId, sendingSessionIds),
         };
       });
@@ -2991,8 +3021,27 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       if (isActiveRunRequest()) {
         activeRunRequestIdsBySession.delete(targetSessionId);
       }
+
+      // #19 C: show under the assistant bubble (not a global banner); no mid-stream retry.
+      const settledSession = resolvePersistedSession(
+        useWorkspaceStore.getState().projects,
+        targetProjectId,
+        targetSessionId as string,
+      );
+      const hadPartialContent = turnHasPartialAssistantContent(
+        settledSession?.messages ?? [],
+        turnId,
+      );
+      const streamErrorMessage = formatStreamStepUserMessage(errorMessage, {
+        hadPartialContent,
+      });
+
       set((state) => ({
-        chatError: errorMessage,
+        chatError: null,
+        sessionStreamErrors: setSessionStreamErrorMap(state.sessionStreamErrors, targetSessionId, {
+          message: streamErrorMessage,
+          turnId,
+        }),
         ...withSendingSessionState(
           state.selectedSessionId,
           removeSendingSessionId(targetSessionId, state.sendingSessionIds),
@@ -3000,7 +3049,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       }));
       requestComposerQueueDrain(targetSessionId);
       // Message was accepted into the session; keep accepted so composer does not restore draft (#79).
-      return { accepted: true, error: errorMessage, ok: false, turnId };
+      return { accepted: true, error: streamErrorMessage, ok: false, turnId };
     }
   },
 }));

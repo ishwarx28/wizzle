@@ -12,6 +12,8 @@ import { formatExactMessageTimestamp } from "../../utils/time";
 interface MessageBubbleProps {
   canEditUserMessage: boolean;
   fileMap: Map<string, PreviewFile>;
+  /** Stream/step failure for this turn (#19 C); cleared when user sends again. */
+  inlineStreamError?: string | null;
   isEditingUserMessage: boolean;
   isLatest: boolean;
   message: DisplayMessage;
@@ -162,6 +164,7 @@ function ActivityContentItem({
 export function MessageBubble({
   canEditUserMessage,
   fileMap,
+  inlineStreamError = null,
   isEditingUserMessage,
   isLatest,
   message,
@@ -454,6 +457,18 @@ export function MessageBubble({
               </span>
             ) : null}
             <span>{timestampLabel}</span>
+          </div>
+        ) : null}
+
+        {inlineStreamError ? (
+          <div
+            className={[
+              "mt-2 rounded-xl border border-[color-mix(in_srgb,var(--color-danger)_35%,var(--color-border))] bg-[color-mix(in_srgb,var(--color-danger)_8%,var(--color-panel))] px-3 py-2 text-[13px] leading-5 text-[var(--color-danger)]",
+              isUser ? "text-right" : "",
+            ].join(" ")}
+            role="alert"
+          >
+            {inlineStreamError}
           </div>
         ) : null}
       </div>

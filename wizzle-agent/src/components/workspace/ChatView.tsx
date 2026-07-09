@@ -25,6 +25,7 @@ export function ChatView() {
   const activeMessageEdit = useWorkspaceStore((state) => state.activeMessageEdit);
   const isSendingMessage = useWorkspaceStore((state) => state.isSendingMessage);
   const sessionContextStatus = useWorkspaceStore((state) => state.sessionContextStatus);
+  const sessionStreamErrors = useWorkspaceStore((state) => state.sessionStreamErrors);
   const loadingSessionId = useWorkspaceStore((state) => state.loadingSessionId);
   const previewFiles = useWorkspaceStore((state) => state.previewFiles);
   const draftSessions = useWorkspaceStore((state) => state.draftSessions);
@@ -155,6 +156,13 @@ export function ChatView() {
     !isSendingMessage &&
     !latestUserTurnIsStreaming &&
     !isDraftSession;
+  const sessionStreamError = useMemo(() => {
+    const sessionId = currentSession?.id ?? selectedSessionId;
+    if (!sessionId) {
+      return null;
+    }
+    return sessionStreamErrors[sessionId] ?? null;
+  }, [currentSession?.id, selectedSessionId, sessionStreamErrors]);
 
   useEffect(() => {
     function handleComposerSend() {
@@ -472,6 +480,26 @@ export function ChatView() {
                     activeMessageEdit?.messageId !== message.id
                   }
                   fileMap={fileMap}
+                  inlineStreamError={
+                    sessionStreamError &&
+                    (message.id === sessionStreamError.turnId ||
+                      message.messages.some(
+                        (entry) => entry.turnId === sessionStreamError.turnId,
+                      ))
+                      ? // Prefer the last bubble of the failed turn (assistant if present).
+                        message.role === "assistant" ||
+                        !visibleMessages.some(
+                          (other) =>
+                            other.role === "assistant" &&
+                            (other.id === sessionStreamError.turnId ||
+                              other.messages.some(
+                                (entry) => entry.turnId === sessionStreamError.turnId,
+                              )),
+                        )
+                        ? sessionStreamError.message
+                        : null
+                      : null
+                  }
                   isEditingUserMessage={activeMessageEdit?.messageId === message.id}
                   isLatest={index === chatItems.length - 1}
                   key={message.id}
