@@ -1,14 +1,15 @@
 import { Eye, EyeOff } from "lucide-react";
-import { forwardRef, useState } from "react";
-import type { InputHTMLAttributes } from "react";
+import { useState } from "react";
+import type { InputHTMLAttributes, Ref } from "react";
 
 interface TextFieldProps extends InputHTMLAttributes<HTMLInputElement> {
+  inputRef?: Ref<HTMLInputElement>;
   label: string;
   revealablePassword?: boolean;
 }
 
-export const TextField = forwardRef<HTMLInputElement, TextFieldProps>(function TextField(props, ref) {
-  const { label, revealablePassword = false, type, ...fieldProps } = props;
+export function TextField(props: TextFieldProps) {
+  const { inputRef, label, revealablePassword = false, type, ...fieldProps } = props;
   const [isPasswordVisible, setIsPasswordVisible] = useState(false);
   const isPasswordField = revealablePassword && type === "password";
   const resolvedType = isPasswordField && isPasswordVisible ? "text" : type;
@@ -25,7 +26,7 @@ export const TextField = forwardRef<HTMLInputElement, TextFieldProps>(function T
             commonClassName,
             isPasswordField ? "px-7 pr-14" : "px-7",
           ].join(" ")}
-          ref={ref}
+          ref={inputRef}
           type={resolvedType}
         />
         {isPasswordField ? (
@@ -45,4 +46,4 @@ export const TextField = forwardRef<HTMLInputElement, TextFieldProps>(function T
       </div>
     </label>
   );
-});
+}

@@ -6,22 +6,29 @@ import {
   ChevronRight,
   Copy,
   Folder,
+  FolderOpenDot,
   FolderPlus,
   Laptop,
-  LogOut,
-  Mail,
   Moon,
   MoreHorizontal,
   PanelLeftClose,
   Pencil,
+  Power,
+  Settings,
   Sun,
   SquarePen,
   Trash2,
 } from "lucide-react";
 import { createPortal } from "react-dom";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
-import { useAuth } from "../../auth/auth-context";
+import { useWindowDrag } from "../../hooks/use-window-drag";
 import { useScrollActivity } from "../../hooks/use-scroll-activity";
+import {
+  addProjectFromPath,
+  removeProjectById,
+  selectProjectFolder,
+} from "../../lib/local-workspace";
 import { useWorkspaceStore } from "../../store/workspace-store";
 import { copyText } from "../../utils/clipboard";
 import type { ThemePreference } from "../../utils/theme";
@@ -34,8 +41,7 @@ import { AppDialog } from "../common/AppDialog";
 import { LogoMark } from "../common/LogoMark";
 
 type DialogState =
-  | { type: "add-project"; value: string }
-  | { type: "confirm-logout" }
+  | { type: "confirm-exit" }
   | { projectId: string; projectName: string; type: "remove-project" }
   | { projectId: string; sessionId: string; sessionTitle: string; type: "delete-session" }
   | { projectId: string; sessionId: string; value: string; type: "rename-session" };
@@ -49,28 +55,34 @@ type MenuState = {
   y: number;
 };
 
-export function Sidebar() {
-  const account = useWorkspaceStore((state) => state.account);
-  const { signOut } = useAuth();
+export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
+  const draftSessions = useWorkspaceStore((state) => state.draftSessions);
   const projects = useWorkspaceStore((state) => state.projects);
+  const hydrateWorkspace = useWorkspaceStore((state) => state.hydrateWorkspace);
   const selectedProjectId = useWorkspaceStore((state) => state.selectedProjectId);
   const selectedSessionId = useWorkspaceStore((state) => state.selectedSessionId);
-  const draftSessionProjectId = useWorkspaceStore((state) => state.draftSessionProjectId);
-  const addProject = useWorkspaceStore((state) => state.addProject);
   const createSession = useWorkspaceStore((state) => state.createSession);
+  const deleteDraftSession = useWorkspaceStore((state) => state.deleteDraftSession);
   const deleteSession = useWorkspaceStore((state) => state.deleteSession);
-  const removeProject = useWorkspaceStore((state) => state.removeProject);
+  const renameDraftSession = useWorkspaceStore((state) => state.renameDraftSession);
   const renameSession = useWorkspaceStore((state) => state.renameSession);
   const selectSession = useWorkspaceStore((state) => state.selectSession);
   const toggleProjectExpanded = useWorkspaceStore((state) => state.toggleProjectExpanded);
   const toggleSidebar = useWorkspaceStore((state) => state.toggleSidebar);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [isAddingProject, setIsAddingProject] = useState(false);
+  const [isRemovingProject, setIsRemovingProject] = useState(false);
   const [isThemeExpanded, setIsThemeExpanded] = useState(false);
   const [themePreference, setThemePreference] = useState<ThemePreference>(() => getStoredThemePreference());
   const { handleScrollActivity, isScrolling } = useScrollActivity();
+  const windowDrag = useWindowDrag();
 
   const menuKey = menu?.key ?? null;
+
+  function isDraftSessionId(sessionId: string) {
+    return sessionId.startsWith("draft-");
+  }
 
   useEffect(() => {
     if (!menu) {
@@ -116,6 +128,27 @@ export function Sidebar() {
 
   function closeDialog() {
     setDialog(null);
+  }
+
+  async function handleAddProject() {
+    if (isAddingProject) {
+      return;
+    }
+
+    setIsAddingProject(true);
+
+    try {
+      const selectedPath = await selectProjectFolder();
+
+      if (!selectedPath) {
+        return;
+      }
+
+      const snapshot = await addProjectFromPath(selectedPath);
+      hydrateWorkspace(snapshot);
+    } finally {
+      setIsAddingProject(false);
+    }
   }
 
   function openAnchoredMenu(key: string, element: HTMLElement) {
@@ -195,10 +228,10 @@ export function Sidebar() {
     <>
       <aside className="flex h-full w-full flex-col border-r border-[var(--color-border)] bg-[var(--color-panel-sidebar)]">
         <div
-          className="app-titlebar-region app-titlebar-sidebar flex items-center justify-between pb-2 pr-4 pt-4"
-          data-tauri-drag-region
+          className="app-titlebar-region app-titlebar-sidebar relative flex items-center justify-between pb-2 pr-4 pt-4"
+          onPointerDownCapture={windowDrag.onPointerDownCapture}
         >
-          <div className="flex items-center gap-3">
+          <div className="relative z-10 flex items-center gap-3 select-none">
             <LogoMark className="h-7 w-7 object-contain" />
             <div>
               <p className="text-sm font-semibold text-[var(--color-text)]">Wizzle</p>
@@ -206,22 +239,29 @@ export function Sidebar() {
           </div>
           <button
             aria-label="Collapse sidebar"
-            className="rounded-xl p-2 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+            className="relative z-10 rounded-xl p-2 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
             onClick={toggleSidebar}
           >
             <PanelLeftClose className="h-4 w-4" />
           </button>
         </div>
 
-        <div className="px-3">
-          <button
-            className="flex h-8 w-full items-center gap-3 rounded-lg px-2 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
-            onClick={() => setDialog({ type: "add-project", value: "" })}
-          >
-            <FolderPlus className="h-4 w-4" />
-            <span className="text-[15px] font-normal leading-[1.1]">Add new project</span>
-          </button>
-        </div>
+        {projects.length > 0 ? (
+          <div className="px-3">
+            <button
+              className="flex h-8 w-full items-center gap-3 rounded-lg px-2 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+              disabled={isAddingProject}
+              onClick={() => {
+                void handleAddProject();
+              }}
+            >
+              <FolderPlus className="h-4 w-4" />
+              <span className="text-[15px] font-normal leading-[1.1]">
+                {isAddingProject ? "Selecting project..." : "Add new project"}
+              </span>
+            </button>
+          </div>
+        ) : null}
 
         <div
           className={[
@@ -230,19 +270,46 @@ export function Sidebar() {
           ].join(" ")}
           onScroll={handleScrollActivity}
         >
-          <div className="mb-1.5 mt-1 px-2 text-[13px] font-medium text-[var(--color-text-tertiary)]">
-            Projects
-          </div>
-          <div className="space-y-1">
-            {projects.map((project) => {
+          {projects.length === 0 ? (
+            <div className="flex h-full min-h-full items-center justify-center px-6 pb-10">
+              <div className="max-w-[220px] text-center">
+                <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-[20px] bg-[var(--color-panel-muted)] ring-1 ring-[var(--color-border)]">
+                  <FolderOpenDot className="h-6 w-6 text-[var(--color-text-secondary)]" />
+                </div>
+                <p className="text-[15px] font-medium text-[var(--color-text)]">No projects yet</p>
+                <p className="mt-2 text-[13px] leading-6 text-[var(--color-text-secondary)]">
+                  Add a local folder to start a workspace.
+                </p>
+                <button
+                  className="mt-5 inline-flex h-9 items-center justify-center rounded-xl bg-[var(--color-text)] px-4 text-[var(--color-app-bg)] transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={isAddingProject}
+                  onClick={() => {
+                    void handleAddProject();
+                  }}
+                >
+                  <span className="text-[11px] font-medium leading-none">
+                    {isAddingProject ? "Selecting..." : "Add Project"}
+                  </span>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="mb-1.5 mt-1 px-2 text-[13px] font-medium text-[var(--color-text-tertiary)]">
+                Projects
+              </div>
+              <div className="space-y-1">
+                {projects.map((project) => {
               const projectMenuKey = project.id;
-              const projectHasDraft = project.id === draftSessionProjectId && selectedSessionId === null;
+              const draftSession = draftSessions[project.id] ?? null;
+              const isDraftActive =
+                project.id === selectedProjectId && draftSession?.id === selectedSessionId;
 
               return (
                 <div className="px-1 py-0.5" key={project.id}>
                   <div
                     className={[
-                      "group/project relative flex items-center gap-1 rounded-2xl px-1 py-0.5 transition",
+                      "group/project relative flex min-w-0 items-center gap-1 rounded-2xl px-1 py-0.5 transition",
                       menuKey === projectMenuKey ? "z-20 bg-[var(--color-panel-hover)]" : "hover:bg-[var(--color-panel-hover)]",
                     ].join(" ")}
                     onContextMenu={(event) => {
@@ -251,48 +318,55 @@ export function Sidebar() {
                     }}
                   >
                     <button
-                      className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1 text-left text-[var(--color-text-secondary)]"
+                      className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden px-2 py-1.5 text-left text-[var(--color-text-secondary)]"
                       onClick={() => toggleProjectExpanded(project.id)}
                     >
-                      <Folder className="h-3.25 w-3.25 shrink-0 text-[var(--color-text-secondary)]" />
-                      <span className="truncate text-[15px] font-normal leading-[1.1]">{project.name}</span>
-                      <ChevronRight
+                      <Folder className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-secondary)]" />
+                      <span className="min-w-0 truncate text-[15px] font-normal leading-none">
+                        {project.name}
+                      </span>
+                      <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                        <ChevronRight
                         className={[
-                          "h-3.25 w-3.25 shrink-0 text-[var(--color-text-secondary)] opacity-0 transition-all duration-200 group-hover/project:opacity-100",
+                            "h-3.5 w-3.5 text-[var(--color-text-secondary)] transition-transform duration-200",
                           project.isExpanded ? "rotate-90" : "rotate-0",
                         ].join(" ")}
-                      />
+                        />
+                      </span>
                     </button>
 
-                    <button
-                      aria-label="Project options"
+                    <div
                       className={[
-                        "rounded-lg p-1.5 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-subtle)] hover:text-[var(--color-text)]",
-                        menuKey === projectMenuKey ? "opacity-100" : "opacity-0 group-hover/project:opacity-100",
+                        "flex shrink-0 items-center gap-1 overflow-hidden transition-[width,opacity] duration-150 ease-out",
+                        menuKey === projectMenuKey
+                          ? "w-[4.5rem] opacity-100"
+                          : "w-0 opacity-0 group-hover/project:w-[4.5rem] group-hover/project:opacity-100",
                       ].join(" ")}
-                      data-sidebar-menu-trigger
-                      onClick={(event) => {
-                        if (menuKey === projectMenuKey) {
-                          setMenu(null);
-                          return;
-                        }
-
-                        openAnchoredMenu(projectMenuKey, event.currentTarget);
-                      }}
                     >
-                      <MoreHorizontal className="h-3.5 w-3.5" />
-                    </button>
+                      <button
+                        aria-label="Project options"
+                        className="rounded-lg p-1.5 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-subtle)] hover:text-[var(--color-text)]"
+                        data-sidebar-menu-trigger
+                        onClick={(event) => {
+                          if (menuKey === projectMenuKey) {
+                            setMenu(null);
+                            return;
+                          }
 
-                    <button
-                      aria-label="Create session"
-                      className={[
-                        "rounded-lg p-1.5 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-subtle)] hover:text-[var(--color-text)]",
-                        "opacity-0 group-hover/project:opacity-100",
-                      ].join(" ")}
-                      onClick={() => createSession(project.id)}
-                    >
-                      <SquarePen className="h-3.5 w-3.5" />
-                    </button>
+                          openAnchoredMenu(projectMenuKey, event.currentTarget);
+                        }}
+                      >
+                        <MoreHorizontal className="h-3.5 w-3.5" />
+                      </button>
+
+                      <button
+                        aria-label="Create session"
+                        className="rounded-lg p-1.5 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-subtle)] hover:text-[var(--color-text)]"
+                        onClick={() => createSession(project.id)}
+                      >
+                        <SquarePen className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
                   </div>
 
                   {renderFloatingMenu(projectMenuKey, [
@@ -335,16 +409,93 @@ export function Sidebar() {
                           project.isExpanded ? "translate-y-0 pt-0.5" : "-translate-y-1 pt-0",
                         ].join(" ")}
                       >
-                        {projectHasDraft ? (
-                          <div className="group/session flex items-center gap-1">
-                            <div className="flex min-w-0 flex-1 items-center rounded-xl bg-[var(--color-panel-active)]">
-                              <div className="min-w-0 flex-1 rounded-xl px-3 py-1.5 text-left text-[var(--color-text)]">
+                        {draftSession ? (
+                          <div
+                            className={[
+                              "group/session relative flex min-w-0 items-center gap-1",
+                              menuKey === `${project.id}:${draftSession.id}` ? "z-20" : "",
+                            ].join(" ")}
+                            onDoubleClick={(event) => {
+                              openContextMenu(`${project.id}:${draftSession.id}`, event.clientX, event.clientY);
+                            }}
+                            onContextMenu={(event) => {
+                              event.preventDefault();
+                              openContextMenu(`${project.id}:${draftSession.id}`, event.clientX, event.clientY);
+                            }}
+                          >
+                            <div
+                              className={[
+                                "flex min-w-0 w-0 flex-1 items-center overflow-hidden rounded-xl transition",
+                                isDraftActive
+                                  ? "bg-[var(--color-panel-active)]"
+                                  : "hover:bg-[var(--color-panel-hover)]",
+                              ].join(" ")}
+                            >
+                              <button
+                                className={[
+                                  "min-w-0 w-0 flex-1 overflow-hidden rounded-xl px-3 py-1.5 text-left transition",
+                                  isDraftActive
+                                    ? "text-[var(--color-text)]"
+                                    : "text-[var(--color-text-secondary)] hover:text-[var(--color-text)]",
+                                ].join(" ")}
+                                onClick={() => {
+                                  if (draftSession) {
+                                    selectSession(project.id, draftSession.id);
+                                  }
+                                }}
+                              >
                                 <span className="block truncate text-[15px] font-normal leading-[1.1]">
-                                  New session
+                                  {draftSession?.title ?? "New session"}
                                 </span>
+                              </button>
+                              <div className="relative ml-auto mr-2 h-8 w-8 shrink-0">
+                                <button
+                                  aria-label="Session options"
+                                  className={[
+                                    "absolute inset-0 flex items-center justify-center rounded-lg text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]",
+                                    menuKey === `${project.id}:${draftSession.id}`
+                                      ? "opacity-100"
+                                      : "opacity-0 group-hover/session:opacity-100",
+                                  ].join(" ")}
+                                  data-sidebar-menu-trigger
+                                  onClick={(event) => {
+                                    const draftSessionMenuKey = `${project.id}:${draftSession.id}`;
+
+                                    if (menuKey === draftSessionMenuKey) {
+                                      setMenu(null);
+                                      return;
+                                    }
+
+                                    openAnchoredMenu(draftSessionMenuKey, event.currentTarget);
+                                  }}
+                                >
+                                  <MoreHorizontal className="h-3.5 w-3.5" />
+                                </button>
                               </div>
-                              <div className="mr-2 h-8 w-8 shrink-0" />
                             </div>
+
+                            {renderFloatingMenu(`${project.id}:${draftSession.id}`, [
+                              {
+                                icon: <Pencil className="h-4 w-4" />,
+                                label: "Rename session",
+                                onSelect: () => {
+                                  setDialog({
+                                    type: "rename-session",
+                                    projectId: project.id,
+                                    sessionId: draftSession.id,
+                                    value: draftSession.title,
+                                  });
+                                },
+                              },
+                              {
+                                danger: true,
+                                icon: <Trash2 className="h-4 w-4" />,
+                                label: "Delete session",
+                                onSelect: () => {
+                                  deleteDraftSession(project.id);
+                                },
+                              },
+                            ])}
                           </div>
                         ) : null}
 
@@ -356,9 +507,12 @@ export function Sidebar() {
                           return (
                             <div
                               className={[
-                                "group/session relative flex items-center gap-1",
+                                "group/session relative flex min-w-0 items-center gap-1",
                                 menuKey === sessionMenuKey ? "z-20" : "",
                               ].join(" ")}
+                              onDoubleClick={(event) => {
+                                openContextMenu(sessionMenuKey, event.clientX, event.clientY);
+                              }}
                               key={session.id}
                               onContextMenu={(event) => {
                                 event.preventDefault();
@@ -367,13 +521,13 @@ export function Sidebar() {
                             >
                               <div
                                 className={[
-                                  "flex min-w-0 flex-1 items-center rounded-xl transition",
+                                  "flex min-w-0 w-0 flex-1 items-center overflow-hidden rounded-xl transition",
                                   isActive ? "bg-[var(--color-panel-active)]" : "hover:bg-[var(--color-panel-hover)]",
                                 ].join(" ")}
                               >
                                 <button
                                   className={[
-                                    "min-w-0 flex-1 rounded-xl px-3 py-1.5 text-left transition",
+                                    "min-w-0 w-0 flex-1 overflow-hidden rounded-xl px-3 py-1.5 text-left transition",
                                     isActive
                                       ? "text-[var(--color-text)]"
                                       : "text-[var(--color-text-secondary)] hover:text-[var(--color-text)]",
@@ -388,7 +542,7 @@ export function Sidebar() {
                                   <span
                                     className={[
                                       "pointer-events-none absolute inset-0 flex items-center justify-center text-[13px] text-[var(--color-text-tertiary)] transition-opacity",
-                                      menuKey === sessionMenuKey
+                                      menuKey === sessionMenuKey || isActive
                                         ? "opacity-0"
                                         : "opacity-100 group-hover/session:opacity-0",
                                     ].join(" ")}
@@ -399,7 +553,7 @@ export function Sidebar() {
                                     aria-label="Session options"
                                     className={[
                                       "absolute inset-0 flex items-center justify-center rounded-lg text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]",
-                                      menuKey === sessionMenuKey
+                                      menuKey === sessionMenuKey || isActive
                                         ? "opacity-100"
                                         : "opacity-0 group-hover/session:opacity-100",
                                     ].join(" ")}
@@ -453,8 +607,10 @@ export function Sidebar() {
                   </div>
                 </div>
               );
-            })}
-          </div>
+                })}
+              </div>
+            </>
+          )}
         </div>
 
         <div className="border-t border-[var(--color-border)] px-3 py-3">
@@ -464,7 +620,7 @@ export function Sidebar() {
             onClick={(event) => {
               const rect = event.currentTarget.getBoundingClientRect();
 
-              if (menuKey === "account") {
+              if (menuKey === "settings") {
                 setMenu(null);
                 setIsThemeExpanded(false);
                 return;
@@ -474,7 +630,7 @@ export function Sidebar() {
               const sidebarRect = sidebar?.getBoundingClientRect();
 
               setMenu({
-                key: "account",
+                key: "settings",
                 x: sidebarRect ? sidebarRect.left + 14 : rect.left,
                 y: rect.top - 12,
                 align: "start",
@@ -483,26 +639,16 @@ export function Sidebar() {
               });
             }}
           >
-          <div className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full bg-[var(--color-avatar-bg)] text-[12px] font-semibold text-white">
-            {account.avatarUrl ? (
-              <img
-                alt={account.name}
-                className="h-full w-full object-cover"
-                src={account.avatarUrl}
-              />
-            ) : (
-              account.avatarLabel
-            )}
-          </div>
+          <LogoMark className="h-9 w-9 shrink-0" />
           <div className="min-w-0">
-            <p className="truncate text-[15px] font-normal text-[var(--color-text)]">{account.name}</p>
-            <p className="text-[12px] text-[var(--color-text-tertiary)]">{account.plan}</p>
+            <p className="truncate text-[15px] font-normal text-[var(--color-text)]">Wizzle</p>
+            <p className="text-[12px] text-[var(--color-text-tertiary)]">Click for settings</p>
           </div>
           </button>
         </div>
       </aside>
 
-      {menuKey === "account" && menu ? createPortal(
+      {menuKey === "settings" && menu ? createPortal(
         <div
           className="fixed z-[300] rounded-[24px] border border-[var(--color-border-strong)] bg-[var(--color-panel)] p-3 shadow-[0_18px_40px_rgba(0,0,0,0.22)] backdrop-blur-xl"
           data-sidebar-menu
@@ -514,12 +660,13 @@ export function Sidebar() {
           }}
         >
           <div className="flex items-center gap-3 rounded-[18px] px-3 py-2.5">
-            <div className="flex h-7 w-7 items-center justify-center rounded-full border border-[var(--color-border)] text-[var(--color-text-secondary)]">
-              <Mail className="h-3.5 w-3.5" />
-            </div>
+            <LogoMark className="h-7 w-7" />
             <div className="min-w-0">
               <p className="truncate text-[13px] font-normal leading-none tracking-normal text-[var(--color-text)]">
-                {account.email}
+                Wizzle
+              </p>
+              <p className="mt-1 truncate text-[12px] leading-none text-[var(--color-text-tertiary)]">
+                Settings
               </p>
             </div>
           </div>
@@ -597,59 +744,29 @@ export function Sidebar() {
             onClick={() => {
               setMenu(null);
               setIsThemeExpanded(false);
-              setDialog({ type: "confirm-logout" });
+              onOpenProviders?.();
             }}
           >
-            <LogOut className="h-4 w-4" />
-            <span className="text-[13px] font-normal leading-none tracking-normal">Log out</span>
+            <Settings className="h-4 w-4" />
+            <span className="text-[13px] font-normal leading-none tracking-normal">Providers</span>
+          </button>
+          <div className="mx-3 my-2 h-px bg-[var(--color-border)]" />
+          <button
+            className="flex w-full items-center gap-3 rounded-[18px] px-3 py-2.5 text-[var(--color-text)] transition hover:bg-[var(--color-panel-hover)]"
+            onClick={() => {
+              setMenu(null);
+              setIsThemeExpanded(false);
+              setDialog({ type: "confirm-exit" });
+            }}
+          >
+            <Power className="h-4 w-4" />
+            <span className="text-[13px] font-normal leading-none tracking-normal">Exit Wizzle</span>
           </button>
         </div>,
         document.body,
       ) : null}
 
-      {dialog?.type === "add-project" ? (
-        <AppDialog
-          actions={
-            <>
-              <button
-                className="h-10 rounded-full px-4 text-[14px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
-                onClick={closeDialog}
-              >
-                Cancel
-              </button>
-              <button
-                className="h-10 rounded-full bg-[var(--color-accent)] px-4 text-[14px] font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={!dialog.value.trim()}
-                onClick={() => {
-                  addProject(dialog.value);
-                  closeDialog();
-                }}
-              >
-                Add project
-              </button>
-            </>
-          }
-          description="Add a local project to the sidebar."
-          onClose={closeDialog}
-          title="Add project"
-        >
-          <input
-            autoFocus
-            className="h-11 w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-4 text-[14px] text-[var(--color-text)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-border-strong)]"
-            onChange={(event) => setDialog({ ...dialog, value: event.currentTarget.value })}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && dialog.value.trim()) {
-                addProject(dialog.value);
-                closeDialog();
-              }
-            }}
-            placeholder="Project name"
-            value={dialog.value}
-          />
-        </AppDialog>
-      ) : null}
-
-      {dialog?.type === "confirm-logout" ? (
+      {dialog?.type === "confirm-exit" ? (
         <AppDialog
           actions={
             <>
@@ -663,16 +780,16 @@ export function Sidebar() {
                 className="h-10 rounded-full bg-[var(--color-accent)] px-4 text-[14px] font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)]"
                 onClick={async () => {
                   closeDialog();
-                  await signOut();
+                  await getCurrentWindow().close();
                 }}
               >
-                Log out
+                Exit
               </button>
             </>
           }
-          description="You will be returned to the login screen."
+          description="Close the Wizzle desktop app?"
           onClose={closeDialog}
-          title="Log out?"
+          title="Exit Wizzle?"
         />
       ) : null}
 
@@ -690,7 +807,11 @@ export function Sidebar() {
                 className="h-10 rounded-full bg-[var(--color-accent)] px-4 text-[14px] font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={!dialog.value.trim()}
                 onClick={() => {
-                  renameSession(dialog.projectId, dialog.sessionId, dialog.value);
+                  if (isDraftSessionId(dialog.sessionId)) {
+                    renameDraftSession(dialog.projectId, dialog.value);
+                  } else {
+                    renameSession(dialog.projectId, dialog.sessionId, dialog.value);
+                  }
                   closeDialog();
                 }}
               >
@@ -708,7 +829,11 @@ export function Sidebar() {
             onChange={(event) => setDialog({ ...dialog, value: event.currentTarget.value })}
             onKeyDown={(event) => {
               if (event.key === "Enter" && dialog.value.trim()) {
-                renameSession(dialog.projectId, dialog.sessionId, dialog.value);
+                if (isDraftSessionId(dialog.sessionId)) {
+                  renameDraftSession(dialog.projectId, dialog.value);
+                } else {
+                  renameSession(dialog.projectId, dialog.sessionId, dialog.value);
+                }
                 closeDialog();
               }
             }}
@@ -757,12 +882,20 @@ export function Sidebar() {
               </button>
               <button
                 className="h-10 rounded-full bg-[var(--color-danger)] px-4 text-[14px] font-medium text-white transition hover:opacity-90"
-                onClick={() => {
-                  removeProject(dialog.projectId);
-                  closeDialog();
+                disabled={isRemovingProject}
+                onClick={async () => {
+                  setIsRemovingProject(true);
+
+                  try {
+                    const snapshot = await removeProjectById(dialog.projectId);
+                    hydrateWorkspace(snapshot);
+                    closeDialog();
+                  } finally {
+                    setIsRemovingProject(false);
+                  }
                 }}
               >
-                Remove
+                {isRemovingProject ? "Removing..." : "Remove"}
               </button>
             </>
           }

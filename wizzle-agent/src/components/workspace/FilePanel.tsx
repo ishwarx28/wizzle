@@ -1,17 +1,11 @@
 import { useEffect, useState } from "react";
 import { Copy, FileCode2, FileImage, FileText, PanelRightClose, X } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { oneDark, oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
 
+import { MarkdownRenderer } from "../common/MarkdownRenderer";
+import { useWindowDrag } from "../../hooks/use-window-drag";
 import { useScrollActivity } from "../../hooks/use-scroll-activity";
 import { useWorkspaceStore } from "../../store/workspace-store";
 import { copyImage, copyText } from "../../utils/clipboard";
-import {
-  getStoredThemePreference,
-  getThemeChangeEventName,
-  resolveEffectiveTheme,
-} from "../../utils/theme";
 
 function fileIcon(kind: "markdown" | "text" | "image" | "other") {
   switch (kind) {
@@ -26,49 +20,6 @@ function fileIcon(kind: "markdown" | "text" | "image" | "other") {
   }
 }
 
-function resolveLanguage(language?: string, fileName?: string) {
-  if (language === "ts") {
-    return "typescript";
-  }
-
-  if (language === "js") {
-    return "javascript";
-  }
-
-  if (language) {
-    return language;
-  }
-
-  if (!fileName || !fileName.includes(".")) {
-    return "text";
-  }
-
-  const extension = fileName.split(".").pop()?.toLowerCase();
-
-  switch (extension) {
-    case "ts":
-      return "typescript";
-    case "tsx":
-      return "tsx";
-    case "js":
-      return "javascript";
-    case "jsx":
-      return "jsx";
-    case "json":
-      return "json";
-    case "md":
-      return "markdown";
-    case "sh":
-      return "bash";
-    case "css":
-      return "css";
-    case "html":
-      return "markup";
-    default:
-      return "text";
-  }
-}
-
 export function FilePanel() {
   const previewFiles = useWorkspaceStore((state) => state.previewFiles);
   const activeFileId = useWorkspaceStore((state) => state.activeFileId);
@@ -76,10 +27,8 @@ export function FilePanel() {
   const closeFile = useWorkspaceStore((state) => state.closeFile);
   const openFile = useWorkspaceStore((state) => state.openFile);
   const toggleFilePanel = useWorkspaceStore((state) => state.toggleFilePanel);
-  const [isDarkMode, setIsDarkMode] = useState(
-    () => resolveEffectiveTheme(getStoredThemePreference()) === "dark",
-  );
   const [isCopied, setIsCopied] = useState(false);
+  const windowDrag = useWindowDrag();
   const tabsScroll = useScrollActivity();
   const contentScroll = useScrollActivity();
 
@@ -87,18 +36,6 @@ export function FilePanel() {
     .map((fileId) => previewFiles.find((file) => file.id === fileId))
     .filter((file): file is NonNullable<typeof file> => Boolean(file));
   const activeFile = previewFiles.find((file) => file.id === activeFileId) ?? openedFiles[0] ?? null;
-
-  useEffect(() => {
-    function syncTheme() {
-      setIsDarkMode(resolveEffectiveTheme(getStoredThemePreference()) === "dark");
-    }
-
-    window.addEventListener(getThemeChangeEventName(), syncTheme);
-
-    return () => {
-      window.removeEventListener(getThemeChangeEventName(), syncTheme);
-    };
-  }, []);
 
   useEffect(() => {
     if (!isCopied) {
@@ -139,14 +76,17 @@ export function FilePanel() {
   }
 
   return (
-    <aside className="flex h-full w-full shrink-0 flex-col border-l border-[var(--color-border)] bg-[var(--color-panel-sidebar)]">
+    <aside
+      className="flex h-full w-full shrink-0 flex-col border-l border-[var(--color-border)] bg-[var(--color-panel-sidebar)]"
+      data-file-panel
+    >
       <div
-        className="app-titlebar-region flex h-[calc(2.75rem+var(--titlebar-top-padding))] items-center gap-2 border-b border-[var(--color-border)] px-3"
-        data-tauri-drag-region
+        className="app-titlebar-region relative flex h-[calc(2.75rem+var(--titlebar-top-padding))] items-center gap-2 border-b border-[var(--color-border)] px-3"
+        onPointerDownCapture={windowDrag.onPointerDownCapture}
       >
         <div
           className={[
-            "no-scrollbar flex min-w-0 flex-1 gap-1 overflow-x-auto whitespace-nowrap",
+            "no-scrollbar relative z-10 flex min-w-0 flex-1 gap-1 overflow-x-auto whitespace-nowrap",
           ].join(" ")}
           onScroll={tabsScroll.handleScrollActivity}
         >
@@ -189,7 +129,7 @@ export function FilePanel() {
         </div>
         <button
           aria-label="Collapse file panel"
-          className="rounded-xl p-2 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+          className="relative z-10 rounded-xl p-2 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
           onClick={toggleFilePanel}
         >
           <PanelRightClose className="h-4 w-4" />
@@ -229,50 +169,23 @@ export function FilePanel() {
                 >
                   <Copy className="h-3 w-3" />
                   <span className="text-[11px] font-normal uppercase leading-none tracking-[0.08em]">
-                    {isCopied ? "Copied" : activeFile.kind}
+                    {isCopied ? "Copied" : "Copy"}
                   </span>
                 </button>
-              ) : (
-                <div className="shrink-0 text-[11px] uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                  {activeFile.kind}
-                </div>
-              )}
+              ) : null}
             </div>
 
             {activeFile.kind === "markdown" ? (
-              <div className="markdown-body">
-                <ReactMarkdown>{activeFile.content ?? ""}</ReactMarkdown>
-              </div>
+              <MarkdownRenderer content={activeFile.content ?? ""} />
             ) : null}
 
             {activeFile.kind === "text" ? (
-              <SyntaxHighlighter
-                PreTag="div"
-                codeTagProps={{
-                  style: {
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
-                    overflowWrap: "anywhere",
-                  },
-                }}
-                customStyle={{
-                  background: "transparent",
-                  margin: 0,
-                  padding: 0,
-                  fontSize: "13px",
-                  lineHeight: "1.75",
-                  overflowX: "hidden",
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-word",
-                  overflowWrap: "anywhere",
-                }}
-                language={resolveLanguage(activeFile.language, activeFile.name)}
-                showLineNumbers={false}
-                style={isDarkMode ? oneDark : oneLight}
-                wrapLongLines
+              <pre
+                className="overflow-x-auto whitespace-pre-wrap break-words bg-transparent p-0 font-mono text-[12px] leading-6 text-[var(--color-text)]"
+                data-terminal-output
               >
                 {activeFile.content ?? ""}
-              </SyntaxHighlighter>
+              </pre>
             ) : null}
 
             {activeFile.kind === "image" ? (
@@ -290,7 +203,7 @@ export function FilePanel() {
 
             {activeFile.kind === "other" ? (
               <div className="border border-dashed border-[var(--color-border)] px-4 py-4 text-sm text-[var(--color-text-secondary)]">
-                Preview is not available for this file type yet.
+                {activeFile.summary || "Preview is not available for this file type yet."}
               </div>
             ) : null}
           </div>

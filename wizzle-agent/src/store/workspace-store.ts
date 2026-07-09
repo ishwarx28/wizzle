@@ -1,208 +1,161 @@
 import { create } from "zustand";
 
-import logoSrc from "../assets/brand/wizzle-logo.png";
+import { runWorkspaceAgent } from "../lib/agent-runner";
+import { loadPreviewFilesFromPaths } from "../lib/attachments";
+import {
+  generateWorkspaceSessionTitle,
+  INTERRUPTED_WORKSPACE_CHAT_ERROR,
+  interruptWorkspaceChat,
+  isInterruptedWorkspaceChatError,
+} from "../lib/chat-stream";
+import {
+  appendOrUpdateMessage,
+  beginSessionRun,
+  createSessionIfNeeded,
+  deleteWorkspaceSession,
+  finalizeTurn,
+  finishSessionRun,
+  loadWorkspaceSession,
+  reconcileEntireSessionForExplicitEditOrRepair,
+  renameWorkspaceSession,
+  saveWorkspaceSettings,
+  setProjectExpanded,
+  updateSessionSelection,
+  updateSessionTitle,
+  upsertTurnSummary as persistTurnSummary,
+} from "../lib/local-workspace";
+import {
+  appendMessagePart,
+  synchronizeMessageFromParts,
+  updateMatchingMessagePart,
+} from "../lib/message-parts";
+import { buildTurnReplaySummary } from "../lib/context-budget";
+import { resolveMaxPromptSize } from "../lib/env";
+import { frontendLogger } from "../lib/logger";
+import { extractLinkedFileFromToolResult } from "../lib/tool-activity";
 import type {
-  AccountProfile,
   Message,
+  MessageEditState,
+  MessagePart,
   ModelId,
   PermissionMode,
+  PersistedTurnSummaryRecord,
   PreviewFile,
   Project,
+  ProviderInfo,
+  ProviderModelInfo,
+  Session,
+  ToolApprovalRequest,
+  WorkspaceSnapshot,
 } from "../types/workspace";
+import { formatExactMessageTimestamp } from "../utils/time";
 
 interface WorkspaceState {
-  account: AccountProfile;
+  activeMessageEdit: MessageEditState | null;
+  chatError: string | null;
+  draftSessions: Record<string, Session>;
   projects: Project[];
   previewFiles: PreviewFile[];
   selectedProjectId: string;
   selectedSessionId: string | null;
-  draftSessionProjectId: string | null;
+  loadingSessionId: string | null;
   activeFileId: string | null;
   openedFileIds: string[];
   isSidebarOpen: boolean;
   isFilePanelOpen: boolean;
+  hasHydratedWorkspace: boolean;
+  isSendingMessage: boolean;
+  pendingToolApproval: ToolApprovalRequest | null;
+  providerModels: ProviderModelInfo[];
+  providerModelsError: string | null;
+  providers: ProviderInfo[];
   modelId: ModelId;
+  reasoningLevel: string;
   permissionMode: PermissionMode;
-  addProject: (projectName: string) => void;
+  clearChatError: () => void;
+  clearProviderModelsError: () => void;
+  hydrateWorkspace: (snapshot: WorkspaceSnapshot) => void;
   toggleProjectExpanded: (projectId: string) => void;
   createSession: (projectId: string) => void;
-  renameSession: (projectId: string, sessionId: string, title: string) => void;
-  deleteSession: (projectId: string, sessionId: string) => void;
-  removeProject: (projectId: string) => void;
+  renameDraftSession: (projectId: string, title: string) => void;
+  deleteDraftSession: (projectId: string) => void;
+  renameSession: (projectId: string, sessionId: string, title: string) => Promise<void>;
+  deleteSession: (projectId: string, sessionId: string) => Promise<void>;
   selectSession: (projectId: string, sessionId: string) => void;
   openFile: (fileId: string) => void;
   closeFile: (fileId: string) => void;
   toggleSidebar: () => void;
   toggleFilePanel: () => void;
   setModelId: (modelId: ModelId) => void;
+  setReasoningLevel: (reasoningLevel: string) => void;
+  setProviderConfig: (config: { models: ProviderModelInfo[]; providers: ProviderInfo[] }) => void;
   setPermissionMode: (permissionMode: PermissionMode) => void;
-  setAccount: (account: AccountProfile) => void;
-  sendPrompt: (prompt: string, attachments?: PreviewFile[]) => void;
+  requestToolApproval: (request: ToolApprovalRequest) => Promise<boolean>;
+  resolveToolApproval: (approved: boolean, toolCallId?: string) => void;
+  startMessageEdit: (edit: MessageEditState) => void;
+  cancelMessageEdit: () => void;
+  interruptPrompt: () => Promise<void>;
+  sendPrompt: (prompt: string, attachments?: PreviewFile[]) => Promise<SubmitPromptResult>;
 }
-
-const previewFiles: PreviewFile[] = [
-  {
-    id: "file-architecture",
-    name: "architecture.md",
-    kind: "markdown",
-    path: "/Users/mrdev.288/StudioProjects/wizzle/wizzle-agent/architecture.md",
-    summary: "High-level app architecture and implementation phases.",
-    content: `# Wizzle Agent
-
-## Goal
-
-Cross-platform desktop app for coding with AI.
-
-## MVP UI Notes
-
-- Three-column layout
-- Local projects and sessions
-- Composer with permission mode and model picker
-- Right-side file preview for markdown, images, and text
-
-## Phase 1
-
-Build the app shell, mock state, and all core surfaces before wiring real auth, filesystem access, and proxy streaming.`,
-  },
-  {
-    id: "file-login-flow",
-    name: "firebase-auth-notes.txt",
-    kind: "text",
-    path: "/Users/mrdev.288/StudioProjects/wizzle/wizzle-agent/docs/firebase-auth-notes.txt",
-    summary: "Placeholder notes for the upcoming auth phase.",
-    language: "text",
-    content: `MVP auth surface:
-- Email + password
-- Auto-create account if email does not exist
-- Require verified email before entering the app
-- Password reset via email
-- Continue with Google`,
-  },
-  {
-    id: "file-logo",
-    name: "wizzle-logo.png",
-    kind: "image",
-    path: "/Users/mrdev.288/StudioProjects/wizzle/wizzle-agent/src/assets/brand/wizzle-logo.png",
-    summary: "Primary brand mark used for favicon and empty states.",
-    imageSrc: logoSrc,
-  },
-  {
-    id: "file-harness",
-    name: "harness.ts",
-    kind: "text",
-    path: "/Users/mrdev.288/StudioProjects/wizzle/wizzle-agent/src/lib/harness.ts",
-    summary: "Mock harness shape for the phase 3 tool surface.",
-    language: "ts",
-    content: `export type BuiltInTool = "read" | "write" | "edit" | "bash";
-
-export interface HarnessContext {
-  projectRoot: string;
-  permissionMode: "ask" | "full-access";
-}
-
-export function listBuiltInTools(): BuiltInTool[] {
-  return ["read", "write", "edit", "bash"];
-}`,
-  },
-];
-
-const initialProjects: Project[] = [
-  {
-    id: "project-wizzle",
-    name: "wizzle",
-    rootPath: "/Users/mrdev.288/StudioProjects/wizzle",
-    isExpanded: true,
-    sessions: [
-      {
-        id: "session-phase1",
-        title: "Phase 1 frontend shell",
-        updatedAtLabel: "12m",
-        messages: [
-          {
-            id: "message-user-1",
-            role: "user",
-            content:
-              "Build the three required phase 1 pages and keep the layout close to the reference screenshots.",
-            createdAtLabel: "10:04 PM",
-          },
-          {
-            id: "message-assistant-1",
-            role: "assistant",
-            content: `I mapped the app into three surfaces:
-
-- auth pages for login and password reset
-- a central chat workspace with a structured composer
-- a right-side preview drawer for opened files
-
-The files below are already attached to the workspace for quick review.`,
-            createdAtLabel: "10:05 PM",
-            linkedFileIds: ["file-architecture", "file-logo", "file-harness"],
-          },
-        ],
-      },
-      {
-        id: "session-empty",
-        title: "New session",
-        updatedAtLabel: "now",
-        messages: [],
-      },
-    ],
-  },
-  {
-    id: "project-tradesocial",
-    name: "TradeSocial",
-    rootPath: "/Users/mrdev.288/StudioProjects/TradeSocial",
-    isExpanded: false,
-    sessions: [
-      {
-        id: "session-audit",
-        title: "Sidebar redesign ideas",
-        updatedAtLabel: "1h",
-        messages: [],
-      },
-    ],
-  },
-  {
-    id: "project-oviioo",
-    name: "oviioo",
-    rootPath: "/Users/mrdev.288/StudioProjects/Personal/oviioo",
-    isExpanded: false,
-    sessions: [
-      {
-        id: "session-feed",
-        title: "Feed polish",
-        updatedAtLabel: "2d",
-        messages: [],
-      },
-    ],
-  },
-];
-
-const account: AccountProfile = {
-  email: "mrdev.288@gmail.com",
-  name: "Ishwar Meghwal",
-  avatarLabel: "IM",
-  avatarUrl: null,
-  plan: "Free",
-};
 
 const DRAFT_SESSION_TITLE = "New session";
+const SESSION_TITLE_MAX_LENGTH = 48;
+const STREAM_FLUSH_INTERVAL_MS = 64;
+const STREAM_PERSIST_INTERVAL_MS = 750;
+const STREAM_PERSIST_CHAR_THRESHOLD = 2_000;
+const MAX_TOOL_OUTPUT_BUFFER_LENGTH = 120_000;
+const MAX_TOOL_STREAM_BUFFER_LENGTH = MAX_TOOL_OUTPUT_BUFFER_LENGTH / 2;
+const MAX_PROMPT_SIZE = resolveMaxPromptSize();
 
-function createAssistantReply(prompt: string): Message {
-  const normalizedPrompt = prompt.trim();
+type BufferedToolOutput = {
+  combinedOutput: string;
+  stderr: string;
+  stdout: string;
+};
+
+type PendingToolApprovalResolution = {
+  approved: boolean;
+  interrupted: boolean;
+};
+
+type PendingToolApprovalResolver = {
+  resolve: (resolution: PendingToolApprovalResolution) => void;
+  toolCallId: string;
+};
+
+type SubmitPromptResult =
+  | { ok: true; accepted: true; turnId: string }
+  | { ok: false; accepted: false; error: string };
+
+let pendingToolApprovalResolver: PendingToolApprovalResolver | null = null;
+const activeRunRequestIdsBySession = new Map<string, string>();
+
+function rejectPendingToolApproval(interrupted = false) {
+  if (pendingToolApprovalResolver) {
+    pendingToolApprovalResolver.resolve({
+      approved: false,
+      interrupted,
+    });
+    pendingToolApprovalResolver = null;
+  }
+}
+
+function nowLabel() {
+  return "now";
+}
+
+function buildDraftSession(projectId: string): Session {
+  const timestamp = Date.now();
 
   return {
-    id: `message-assistant-${Date.now()}`,
-    role: "assistant",
-    createdAtLabel: "just now",
-    content: `Here is a mocked phase 1 response for:
-
-> ${normalizedPrompt}
-
-I would keep the UI inside the existing shell, preserve the device theme, and route any clicked files into the right preview panel.`,
-    linkedFileIds: normalizedPrompt.toLowerCase().includes("logo")
-      ? ["file-logo", "file-architecture"]
-      : ["file-login-flow"],
+    createdAtMs: timestamp,
+    id: `draft-${projectId}`,
+    messagesLoaded: true,
+    messages: [],
+    replayTurnSummaries: [],
+    title: DRAFT_SESSION_TITLE,
+    updatedAtLabel: nowLabel(),
+    updatedAtMs: timestamp,
   };
 }
 
@@ -210,212 +163,665 @@ function createAttachmentFallback(attachments: PreviewFile[]) {
   return attachments.length === 1 ? "Attached 1 file." : `Attached ${attachments.length} files.`;
 }
 
-function createUserMessage(prompt: string, attachments: PreviewFile[]): Message {
-  const normalizedPrompt = prompt.trim();
-
-  return {
-    id: `message-user-${Date.now()}`,
-    role: "user",
-    content: normalizedPrompt || createAttachmentFallback(attachments),
-    createdAtLabel: "just now",
-    linkedFileIds: attachments.map((attachment) => attachment.id),
-  };
-}
-
-function createAssistantReplyWithAttachments(prompt: string, attachments: PreviewFile[]): Message {
+function createAttachmentTitle(attachments: PreviewFile[]) {
   if (attachments.length === 0) {
-    return createAssistantReply(prompt);
+    return DRAFT_SESSION_TITLE;
   }
 
+  if (attachments.length === 1) {
+    return attachments[0]?.name || DRAFT_SESSION_TITLE;
+  }
+
+  return `${attachments[0]?.name || "Files"} +${attachments.length - 1}`;
+}
+
+function deriveSessionTitle(prompt: string, attachments: PreviewFile[]) {
+  const normalizedPrompt = prompt.replace(/\s+/g, " ").trim();
+
+  if (!normalizedPrompt) {
+    return createAttachmentTitle(attachments);
+  }
+
+  if (normalizedPrompt.length <= SESSION_TITLE_MAX_LENGTH) {
+    return normalizedPrompt;
+  }
+
+  return `${normalizedPrompt.slice(0, SESSION_TITLE_MAX_LENGTH).trimEnd()}…`;
+}
+
+function normalizeGeneratedSessionTitle(title: string, fallbackTitle: string) {
+  const normalizedTitle = title
+    .split("\n")[0]
+    ?.replace(/^title\s*:\s*/i, "")
+    .replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!normalizedTitle) {
+    return fallbackTitle;
+  }
+
+  if (normalizedTitle.length <= SESSION_TITLE_MAX_LENGTH) {
+    return normalizedTitle;
+  }
+
+  return `${normalizedTitle.slice(0, SESSION_TITLE_MAX_LENGTH).trimEnd()}…`;
+}
+
+function createUserMessage(
+  prompt: string,
+  attachments: PreviewFile[],
+  options?: {
+    editedAtMs?: number;
+  },
+): Message {
+  const createdAtMs = Date.now();
   const normalizedPrompt = prompt.trim();
-  const attachmentLine =
-    attachments.length === 1
-      ? "I kept your attached file available in the preview panel."
-      : `I kept your ${attachments.length} attached files available in the preview panel.`;
+  const turnId = `turn-${crypto.randomUUID()}`;
 
   return {
-    id: `message-assistant-${Date.now()}`,
-    role: "assistant",
-    createdAtLabel: "just now",
-    content: normalizedPrompt
-      ? `Here is a mocked phase 1 response for:
-
-> ${normalizedPrompt}
-
-${attachmentLine}`
-      : `${attachmentLine}
-
-You can open any of them from the message and inspect them in the right panel.`,
+    content: normalizedPrompt || createAttachmentFallback(attachments),
+    createdAtLabel: formatExactMessageTimestamp(createdAtMs),
+    createdAtMs,
+    editedAtMs: options?.editedAtMs,
+    id: `message-user-${crypto.randomUUID()}`,
+    isStored: false,
+    linkedFileIds: attachments.map((attachment) => attachment.id),
+    role: "user",
+    status: "done",
+    toolCalls: [],
+    toolResults: [],
+    turnId,
   };
 }
 
-function withSelectedSession<T>(
-  projects: Project[],
-  selectedProjectId: string,
-  selectedSessionId: string | null,
-  updater: (projectIndex: number, sessionIndex: number, nextProjects: Project[]) => T,
-): T | null {
-  if (!selectedSessionId) {
+function createMessagePartId(messageId: string, kind: MessagePart["type"]) {
+  return `${messageId}-${kind}-${crypto.randomUUID()}`;
+}
+
+function upsertStreamingPart(
+  message: Message,
+  part: MessagePart,
+  chunkText: string,
+) {
+  const existingPart = message.parts?.find((entry) => entry.id === part.id);
+
+  if (!existingPart) {
+    return appendMessagePart(message.parts, {
+      ...part,
+      content: chunkText,
+    });
+  }
+
+  return updateMatchingMessagePart(message.parts, (entry) => entry.id === part.id, (entry) => ({
+    ...entry,
+    content: `${entry.content ?? ""}${chunkText}`,
+    status: part.status ?? entry.status,
+  }));
+}
+
+function appendLimitedText(existing: string, chunk: string, maxLength: number) {
+  if (!chunk || existing.length >= maxLength) {
+    return existing;
+  }
+
+  return `${existing}${chunk}`.slice(0, maxLength);
+}
+
+function appendBufferedToolChunk(
+  buffer: BufferedToolOutput,
+  stream: "stderr" | "stdout",
+  chunk: string,
+): BufferedToolOutput {
+  return {
+    combinedOutput: appendLimitedText(
+      buffer.combinedOutput,
+      chunk,
+      MAX_TOOL_OUTPUT_BUFFER_LENGTH,
+    ),
+    stderr:
+      stream === "stderr"
+        ? appendLimitedText(buffer.stderr, chunk, MAX_TOOL_STREAM_BUFFER_LENGTH)
+        : buffer.stderr,
+    stdout:
+      stream === "stdout"
+        ? appendLimitedText(buffer.stdout, chunk, MAX_TOOL_STREAM_BUFFER_LENGTH)
+        : buffer.stdout,
+  };
+}
+
+function createToolStreamOutput(buffer: BufferedToolOutput) {
+  return JSON.stringify({
+    combinedOutput: buffer.combinedOutput,
+    stderr: buffer.stderr,
+    stdout: buffer.stdout,
+  });
+}
+
+function upsertSessionMessage(messages: Message[], message: Message) {
+  const existingIndex = messages.findIndex((entry) => entry.id === message.id);
+
+  if (existingIndex < 0) {
+    messages.push(message);
+    return;
+  }
+
+  const existingMessage = messages[existingIndex]!;
+  messages[existingIndex] = {
+    ...message,
+    createdAtLabel: existingMessage.createdAtLabel || message.createdAtLabel,
+    createdAtMs: existingMessage.createdAtMs ?? message.createdAtMs,
+    startedAtMs: existingMessage.startedAtMs ?? message.startedAtMs,
+  };
+}
+
+function upsertTurnSummary(
+  turnSummaries: PersistedTurnSummaryRecord[] | undefined,
+  nextSummary: PersistedTurnSummaryRecord,
+) {
+  const nextTurnSummaries = [...(turnSummaries ?? [])];
+  const existingIndex = nextTurnSummaries.findIndex((summary) => summary.turnId === nextSummary.turnId);
+
+  if (existingIndex < 0) {
+    nextTurnSummaries.push(nextSummary);
+    nextTurnSummaries.sort((left, right) => left.completedAtMs - right.completedAtMs);
+    return nextTurnSummaries;
+  }
+
+  nextTurnSummaries[existingIndex] = nextSummary;
+  return nextTurnSummaries;
+}
+
+function mergePreviewFiles(existing: PreviewFile[], incoming: PreviewFile[]) {
+  const map = new Map(existing.map((file) => [file.id, file] as const));
+
+  for (const file of incoming) {
+    map.set(file.id, file);
+  }
+
+  return Array.from(map.values());
+}
+
+function mergeLinkedFileIds(...groups: Array<string[] | undefined>) {
+  const mergedIds = new Set<string>();
+
+  for (const group of groups) {
+    for (const id of group ?? []) {
+      mergedIds.add(id);
+    }
+  }
+
+  return Array.from(mergedIds);
+}
+
+function getTurnMessageRange(messages: Message[], target: Pick<MessageEditState, "messageId" | "turnId">) {
+  const messageIndex = messages.findIndex((message) => message.id === target.messageId);
+
+  if (messageIndex < 0) {
     return null;
   }
 
-  const projectIndex = projects.findIndex((project) => project.id === selectedProjectId);
-  if (projectIndex === -1) {
-    return null;
+  if (target.turnId) {
+    return {
+      end: messages.length,
+      start: messages.findIndex((message) => message.turnId === target.turnId),
+    };
   }
 
-  const sessionIndex = projects[projectIndex].sessions.findIndex(
-    (session) => session.id === selectedSessionId,
+  return {
+    end: messages.length,
+    start: messageIndex,
+  };
+}
+
+function replaceEditedTurnMessages(
+  session: Session,
+  target: Pick<MessageEditState, "messageId" | "turnId">,
+  nextUserMessage: Message,
+) {
+  const turnRange = getTurnMessageRange(session.messages, target);
+
+  if (!turnRange || turnRange.start < 0) {
+    return false;
+  }
+
+  session.messages = [
+    ...session.messages.slice(0, turnRange.start),
+    nextUserMessage,
+  ];
+
+  if (target.turnId) {
+    session.replayTurnSummaries = (session.replayTurnSummaries ?? []).filter(
+      (summary) => summary.turnId !== target.turnId,
+    );
+  }
+
+  return true;
+}
+
+function collectDraftPreviewIds(draftSessions: Record<string, Session>) {
+  const ids = new Set<string>();
+
+  for (const session of Object.values(draftSessions)) {
+    for (const message of session.messages) {
+      for (const fileId of message.linkedFileIds ?? []) {
+        ids.add(fileId);
+      }
+    }
+  }
+
+  return ids;
+}
+
+function mergeHydratedPreviewFiles(
+  snapshotPreviewFiles: PreviewFile[],
+  existingPreviewFiles: PreviewFile[],
+  draftSessions: Record<string, Session>,
+) {
+  const draftPreviewIds = collectDraftPreviewIds(draftSessions);
+  return mergePreviewFiles(
+    snapshotPreviewFiles,
+    existingPreviewFiles.filter((file) => draftPreviewIds.has(file.id)),
   );
-  if (sessionIndex === -1) {
+}
+
+function resolvePersistedSession(projects: Project[], projectId: string, sessionId: string) {
+  return projects
+    .find((project) => project.id === projectId)
+    ?.sessions.find((session) => session.id === sessionId);
+}
+
+function isDraftSessionSelection(state: WorkspaceState) {
+  const draftSession = state.draftSessions[state.selectedProjectId];
+  return draftSession?.id === state.selectedSessionId;
+}
+
+function applyWorkspaceSnapshotToState(
+  state: WorkspaceState,
+  snapshot: WorkspaceSnapshot,
+): Partial<WorkspaceState> {
+  const nextDraftSessions = state.hasHydratedWorkspace
+    ? Object.fromEntries(
+        Object.entries(state.draftSessions).filter(([projectId]) =>
+          snapshot.projects.some((project) => project.id === projectId),
+        ),
+      )
+    : {};
+
+  const selectedProjectId = snapshot.selectedProjectId;
+  const selectedDraftSessionId =
+    selectedProjectId && nextDraftSessions[selectedProjectId] && !snapshot.selectedSessionId
+      ? nextDraftSessions[selectedProjectId]?.id ?? null
+      : snapshot.selectedSessionId;
+
+  return {
+    activeFileId: null,
+    draftSessions: nextDraftSessions,
+    hasHydratedWorkspace: true,
+    isFilePanelOpen: snapshot.isFilePanelOpen,
+    isSidebarOpen: snapshot.isSidebarOpen,
+    loadingSessionId: null,
+    modelId: snapshot.modelId,
+    openedFileIds: [],
+    permissionMode: snapshot.permissionMode,
+    previewFiles: mergeHydratedPreviewFiles(snapshot.previewFiles, state.previewFiles, nextDraftSessions),
+    projects: snapshot.projects.map((project) => {
+      const currentProject = state.projects.find((p) => p.id === project.id);
+      return currentProject
+        ? { ...project, isExpanded: currentProject.isExpanded }
+        : project;
+    }),
+    selectedProjectId,
+    selectedSessionId: selectedDraftSessionId,
+  };
+}
+
+function updatePersistedSession(
+  projects: Project[],
+  projectId: string,
+  sessionId: string,
+  updater: (session: Session) => void,
+) {
+  const projectIndex = projects.findIndex((entry) => entry.id === projectId);
+
+  if (projectIndex < 0) {
     return null;
   }
 
-  const nextProjects = structuredClone(projects);
-  return updater(projectIndex, sessionIndex, nextProjects);
+  const project = projects[projectIndex]!;
+  const sessionIndex = project.sessions.findIndex((entry) => entry.id === sessionId);
+
+  if (sessionIndex < 0) {
+    return null;
+  }
+
+  const nextProjects = [...projects];
+  const nextProject = { ...project, sessions: [...project.sessions] };
+  const nextSession = structuredClone(project.sessions[sessionIndex]!);
+
+  updater(nextSession);
+  nextProject.sessions[sessionIndex] = nextSession;
+  nextProject.isExpanded = true;
+  nextProject.updatedAtMs = Date.now();
+  nextProjects[projectIndex] = nextProject;
+
+  return nextProjects;
+}
+
+function replacePersistedSession(
+  projects: Project[],
+  projectId: string,
+  sessionId: string,
+  nextSession: Session,
+) {
+  const projectIndex = projects.findIndex((entry) => entry.id === projectId);
+
+  if (projectIndex < 0) {
+    return null;
+  }
+
+  const project = projects[projectIndex]!;
+  const sessionIndex = project.sessions.findIndex((entry) => entry.id === sessionId);
+
+  if (sessionIndex < 0) {
+    return null;
+  }
+
+  const nextProjects = [...projects];
+  const nextProject = { ...project, sessions: [...project.sessions] };
+  nextProject.sessions[sessionIndex] = nextSession;
+  nextProjects[projectIndex] = nextProject;
+
+  return nextProjects;
+}
+
+function prependPersistedSession(projects: Project[], projectId: string, session: Session) {
+  const projectIndex = projects.findIndex((entry) => entry.id === projectId);
+
+  if (projectIndex < 0) {
+    return null;
+  }
+
+  const project = projects[projectIndex]!;
+  const timestamp = Date.now();
+  const nextProjects = [...projects];
+  nextProjects[projectIndex] = {
+    ...project,
+    isExpanded: true,
+    sessions: [session, ...project.sessions],
+    updatedAtMs: timestamp,
+  };
+
+  return nextProjects;
+}
+
+async function persistWorkspaceSettingsForCurrentState() {
+  const state = useWorkspaceStore.getState();
+  const selectedSessionId = isDraftSessionSelection(state) ? null : state.selectedSessionId;
+
+  await saveWorkspaceSettings({
+    isFilePanelOpen: state.isFilePanelOpen,
+    isSidebarOpen: state.isSidebarOpen,
+    modelId: state.modelId,
+    permissionMode: state.permissionMode,
+    selectedProjectId: state.selectedProjectId || null,
+    selectedSessionId,
+  });
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set) => ({
-  account,
-  projects: initialProjects,
-  previewFiles,
-  selectedProjectId: "project-wizzle",
-  selectedSessionId: "session-phase1",
-  draftSessionProjectId: null,
-  activeFileId: "file-architecture",
-  openedFileIds: ["file-architecture"],
-  isSidebarOpen: true,
+  activeMessageEdit: null,
+  activeFileId: null,
+  chatError: null,
+  draftSessions: {},
+  hasHydratedWorkspace: false,
   isFilePanelOpen: true,
-  modelId: "wizzle-1-thinking",
-  permissionMode: "full-access",
-  addProject: (projectName) =>
-    set((state) => {
-      const normalizedName = projectName.trim();
+  isSendingMessage: false,
+  isSidebarOpen: true,
+  loadingSessionId: null,
+  modelId: "",
+  openedFileIds: [],
+  pendingToolApproval: null,
+  permissionMode: "manual-approve",
+  reasoningLevel: "",
+  previewFiles: [],
+  projects: [],
+  providerModels: [],
+  providerModelsError: null,
+  providers: [],
+  selectedProjectId: "",
+  selectedSessionId: null,
+  clearChatError: () => set({ chatError: null }),
+  hydrateWorkspace: (snapshot) => {
+    const currentState = useWorkspaceStore.getState();
+    const didChangeWorkspaceContext =
+      currentState.selectedProjectId !== snapshot.selectedProjectId ||
+      currentState.selectedSessionId !== snapshot.selectedSessionId;
 
-      if (!normalizedName) {
-        return state;
+    if (didChangeWorkspaceContext) {
+      rejectPendingToolApproval();
+    }
+
+    set((state) => ({
+      ...state,
+      ...applyWorkspaceSnapshotToState(state, snapshot),
+      activeMessageEdit: didChangeWorkspaceContext ? null : state.activeMessageEdit,
+      chatError: didChangeWorkspaceContext ? null : state.chatError,
+      pendingToolApproval: didChangeWorkspaceContext ? null : state.pendingToolApproval,
+    }));
+  },
+  toggleProjectExpanded: (projectId) =>
+    set((state) => {
+      const nextProjects = state.projects.map((project) =>
+        project.id === projectId ? { ...project, isExpanded: !project.isExpanded } : project,
+      );
+      const nextProject = nextProjects.find((project) => project.id === projectId);
+
+      if (nextProject) {
+        void setProjectExpanded(projectId, nextProject.isExpanded).catch(() => undefined);
       }
 
-      const newProject: Project = {
-        id: `project-${Date.now()}`,
-        name: normalizedName,
-        rootPath: `/mock/projects/${normalizedName.replace(/ /g, "-").toLowerCase()}`,
-        isExpanded: true,
-        sessions: [
-          {
-            id: `session-${Date.now()}`,
-            title: DRAFT_SESSION_TITLE,
-            updatedAtLabel: "now",
-            messages: [],
-          },
-        ],
-      };
-
-      return {
-        projects: [newProject, ...state.projects],
-        selectedProjectId: newProject.id,
-        selectedSessionId: newProject.sessions[0].id,
-        draftSessionProjectId: null,
-      };
+      return { projects: nextProjects };
     }),
-  toggleProjectExpanded: (projectId) =>
-    set((state) => ({
-      projects: state.projects.map((project) =>
-        project.id === projectId ? { ...project, isExpanded: !project.isExpanded } : project,
-      ),
-    })),
   createSession: (projectId) =>
     set((state) => {
+      const nextDraftSessions = { ...state.draftSessions };
+
+      if (!nextDraftSessions[projectId]) {
+        nextDraftSessions[projectId] = buildDraftSession(projectId);
+      }
+
+      const nextProjects = state.projects.map((project) =>
+        project.id === projectId ? { ...project, isExpanded: true } : project,
+      );
+
+      window.setTimeout(() => {
+        void persistWorkspaceSettingsForCurrentState().catch(() => undefined);
+      }, 0);
+
       return {
-        projects: state.projects.map((project) =>
-          project.id === projectId ? { ...project, isExpanded: true } : project,
-        ),
+        activeMessageEdit: null,
+        draftSessions: nextDraftSessions,
+        projects: nextProjects,
         selectedProjectId: projectId,
-        selectedSessionId: null,
-        draftSessionProjectId: projectId,
+        selectedSessionId: nextDraftSessions[projectId]?.id ?? null,
       };
     }),
-  renameSession: (projectId, sessionId, title) =>
+  renameDraftSession: (projectId, title) =>
+    set((state) => {
+      const normalizedTitle = title.trim();
+
+      if (!normalizedTitle) {
+        return state;
+      }
+
+      const draftSession = state.draftSessions[projectId];
+
+      if (!draftSession) {
+        return state;
+      }
+
+      const nextDraftSessions = {
+        ...state.draftSessions,
+        [projectId]: {
+          ...draftSession,
+          title: normalizedTitle,
+          updatedAtLabel: nowLabel(),
+          updatedAtMs: Date.now(),
+        },
+      };
+
+      window.setTimeout(() => {
+        void persistWorkspaceSettingsForCurrentState().catch(() => undefined);
+      }, 0);
+
+      return {
+        draftSessions: nextDraftSessions,
+      };
+    }),
+  deleteDraftSession: (projectId) =>
+    set((state) => {
+      const draftSession = state.draftSessions[projectId];
+
+      if (!draftSession) {
+        return state;
+      }
+
+      const nextDraftSessions = { ...state.draftSessions };
+      delete nextDraftSessions[projectId];
+
+      const isSelectedDraft =
+        state.selectedProjectId === projectId && state.selectedSessionId === draftSession.id;
+
+      window.setTimeout(() => {
+        void persistWorkspaceSettingsForCurrentState().catch(() => undefined);
+      }, 0);
+
+      return {
+        draftSessions: nextDraftSessions,
+        selectedSessionId: isSelectedDraft ? null : state.selectedSessionId,
+      };
+    }),
+  renameSession: async (projectId, sessionId, title) => {
+    const normalizedTitle = title.trim();
+
+    if (!normalizedTitle) {
+      return;
+    }
+
     set((state) => ({
-      projects: state.projects.map((project) => {
-        if (project.id !== projectId) {
-          return project;
-        }
+      projects: state.projects.map((project) => ({
+        ...project,
+        sessions:
+          project.id === projectId
+            ? project.sessions.map((session) =>
+                session.id === sessionId ? { ...session, title: normalizedTitle } : session,
+              )
+            : project.sessions,
+      })),
+    }));
 
-        return {
-          ...project,
-          sessions: project.sessions.map((session) => {
-            if (session.id !== sessionId) {
-              return session;
-            }
+    const snapshot = await renameWorkspaceSession(projectId, sessionId, normalizedTitle);
+    set((state) => ({
+      ...state,
+      ...applyWorkspaceSnapshotToState(state, snapshot),
+    }));
+  },
+  deleteSession: async (projectId, sessionId) => {
+    const initialState = useWorkspaceStore.getState();
 
-            const normalizedTitle = title.trim();
-            return normalizedTitle ? { ...session, title: normalizedTitle } : session;
-          }),
-        };
-      }),
-    })),
-  deleteSession: (projectId, sessionId) =>
+    if (initialState.selectedProjectId === projectId && initialState.selectedSessionId === sessionId) {
+      rejectPendingToolApproval(true);
+      set({ pendingToolApproval: null });
+    }
+
+    const snapshot = await deleteWorkspaceSession(projectId, sessionId);
+
     set((state) => {
-      const project = state.projects.find((entry) => entry.id === projectId);
+      const snapshotState = applyWorkspaceSnapshotToState(state, snapshot);
+      const isDeletedSessionSelected =
+        state.selectedProjectId === projectId && state.selectedSessionId === sessionId;
 
-      if (!project || project.sessions.length <= 1) {
-        return state;
-      }
+      return {
+        ...state,
+        ...snapshotState,
+        activeMessageEdit:
+          state.activeMessageEdit?.projectId === projectId &&
+          state.activeMessageEdit?.sessionId === sessionId
+            ? null
+            : state.activeMessageEdit,
+        pendingToolApproval: isDeletedSessionSelected ? null : state.pendingToolApproval,
+        selectedProjectId: isDeletedSessionSelected ? projectId : state.selectedProjectId,
+        selectedSessionId: isDeletedSessionSelected ? null : state.selectedSessionId,
+      };
+    });
+  },
+  selectSession: (projectId, sessionId) => {
+    const currentState = useWorkspaceStore.getState();
+    const didChangeSelection =
+      currentState.selectedProjectId !== projectId || currentState.selectedSessionId !== sessionId;
+    const draftSession = currentState.draftSessions[projectId];
+    const isDraftSelection = draftSession?.id === sessionId;
+    const persistedSession = isDraftSelection
+      ? null
+      : resolvePersistedSession(currentState.projects, projectId, sessionId);
+    const needsHydration = Boolean(persistedSession && !persistedSession.messagesLoaded);
 
-      const nextProjects = state.projects.map((entry) => {
-        if (entry.id !== projectId) {
-          return entry;
-        }
+    if (didChangeSelection) {
+      rejectPendingToolApproval();
+    }
 
-        return {
-          ...entry,
-          sessions: entry.sessions.filter((session) => session.id !== sessionId),
-        };
-      });
-
-      const fallbackProject = nextProjects.find((entry) => entry.id === projectId) ?? nextProjects[0];
-      const fallbackSession = fallbackProject?.sessions[0];
-
-      return fallbackProject && fallbackSession
-        ? {
-            projects: nextProjects,
-            selectedProjectId: fallbackProject.id,
-            selectedSessionId: fallbackSession.id,
-            draftSessionProjectId:
-              state.draftSessionProjectId === projectId ? fallbackProject.id : state.draftSessionProjectId,
-          }
-        : state;
-    }),
-  removeProject: (projectId) =>
-    set((state) => {
-      if (state.projects.length <= 1) {
-        return state;
-      }
-
-      const nextProjects = state.projects.filter((project) => project.id !== projectId);
-      const selectedProjectWasRemoved = state.selectedProjectId === projectId;
-      const fallbackProject = nextProjects[0];
-
-      return selectedProjectWasRemoved && fallbackProject
-        ? {
-            projects: nextProjects,
-            selectedProjectId: fallbackProject.id,
-            selectedSessionId: fallbackProject.sessions[0]?.id ?? null,
-            draftSessionProjectId: null,
-          }
-        : {
-            projects: nextProjects,
-            draftSessionProjectId:
-              state.draftSessionProjectId === projectId ? null : state.draftSessionProjectId,
-          };
-    }),
-  selectSession: (projectId, sessionId) =>
-    set({
+    set((state) => ({
+      activeFileId: didChangeSelection ? null : state.activeFileId,
+      activeMessageEdit: didChangeSelection ? null : state.activeMessageEdit,
+      chatError: didChangeSelection ? null : state.chatError,
+      loadingSessionId: needsHydration ? sessionId : null,
+      openedFileIds: didChangeSelection ? [] : state.openedFileIds,
+      pendingToolApproval: didChangeSelection ? null : state.pendingToolApproval,
       selectedProjectId: projectId,
       selectedSessionId: sessionId,
-      draftSessionProjectId: null,
-    }),
+    }));
+    void persistWorkspaceSettingsForCurrentState().catch(() => undefined);
+
+    if (!needsHydration) {
+      return;
+    }
+
+    void loadWorkspaceSession(projectId, sessionId)
+      .then(({ previewFiles, session }) => {
+        set((state) => {
+          const nextProjects = replacePersistedSession(state.projects, projectId, sessionId, session);
+
+          if (!nextProjects) {
+            return state;
+          }
+
+          return {
+            loadingSessionId:
+              state.selectedProjectId === projectId && state.selectedSessionId === sessionId
+                ? null
+                : state.loadingSessionId,
+            previewFiles: mergePreviewFiles(state.previewFiles, previewFiles),
+            projects: nextProjects,
+          };
+        });
+      })
+      .catch((error) => {
+        const message =
+          error instanceof Error && error.message.trim()
+            ? error.message
+            : "Wizzle could not load that session.";
+
+        set((state) =>
+          state.selectedProjectId === projectId && state.selectedSessionId === sessionId
+            ? {
+                chatError: message,
+                loadingSessionId: null,
+              }
+            : state,
+        );
+      });
+  },
   openFile: (fileId) =>
     set((state) => ({
       activeFileId: fileId,
@@ -433,80 +839,1601 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           : state.activeFileId;
 
       return {
-        openedFileIds,
         activeFileId,
         isFilePanelOpen: openedFileIds.length > 0 && state.isFilePanelOpen,
+        openedFileIds,
       };
     }),
-  toggleSidebar: () => set((state) => ({ isSidebarOpen: !state.isSidebarOpen })),
-  toggleFilePanel: () =>
-    set((state) => ({
-      isFilePanelOpen: !state.isFilePanelOpen,
-    })),
-  setModelId: (modelId) => set({ modelId }),
-  setPermissionMode: (permissionMode) => set({ permissionMode }),
-  setAccount: (account) => set({ account }),
-  sendPrompt: (prompt, attachments = []) =>
+  toggleSidebar: () => {
+    set((state) => ({ isSidebarOpen: !state.isSidebarOpen }));
+    void persistWorkspaceSettingsForCurrentState().catch(() => undefined);
+  },
+  toggleFilePanel: () => {
+    set((state) => ({ isFilePanelOpen: !state.isFilePanelOpen }));
+    void persistWorkspaceSettingsForCurrentState().catch(() => undefined);
+  },
+  setModelId: (modelId) => {
     set((state) => {
-      const content = prompt.trim();
+      const selectedModel = state.providerModels.find((model) => model.id === modelId);
 
-      if (!content && attachments.length === 0) {
+      return {
+        modelId,
+        reasoningLevel: selectedModel?.reasoningLevels.includes(state.reasoningLevel)
+          ? state.reasoningLevel
+          : selectedModel?.reasoningLevels[0] ?? "",
+      };
+    });
+    void persistWorkspaceSettingsForCurrentState().catch(() => undefined);
+  },
+  setReasoningLevel: (reasoningLevel) => {
+    set({ reasoningLevel });
+  },
+  setProviderConfig: ({ models, providers }) =>
+    set((state) => {
+      const modelId =
+        state.modelId && models.some((model) => model.id === state.modelId)
+          ? state.modelId
+          : models[0]?.id ?? state.modelId;
+      const selectedModel = models.find((model) => model.id === modelId);
+
+      return {
+        modelId,
+        reasoningLevel: selectedModel?.reasoningLevels.includes(state.reasoningLevel)
+          ? state.reasoningLevel
+          : selectedModel?.reasoningLevels[0] ?? "",
+        providerModels: models,
+        providerModelsError: null,
+        providers,
+      };
+    }),
+  clearProviderModelsError: () => set({ providerModelsError: null }),
+  setPermissionMode: (permissionMode) => {
+    set({ permissionMode });
+    void persistWorkspaceSettingsForCurrentState().catch(() => undefined);
+  },
+  requestToolApproval: async (request) => {
+    rejectPendingToolApproval();
+
+    set({ pendingToolApproval: request });
+
+    const resolution = await new Promise<PendingToolApprovalResolution>((resolve) => {
+      pendingToolApprovalResolver = {
+        resolve,
+        toolCallId: request.toolCallId,
+      };
+    });
+
+    if (resolution.interrupted) {
+      throw new Error(INTERRUPTED_WORKSPACE_CHAT_ERROR);
+    }
+
+    return resolution.approved;
+  },
+  resolveToolApproval: (approved, toolCallId) => {
+    const resolver = pendingToolApprovalResolver;
+    const pendingToolApproval = useWorkspaceStore.getState().pendingToolApproval;
+
+    if (!resolver || !pendingToolApproval) {
+      return;
+    }
+
+    if (toolCallId && pendingToolApproval.toolCallId !== toolCallId) {
+      frontendLogger.info("frontend.workspace", "stale_tool_approval_resolution_ignored", {
+        approved,
+        pendingToolCallIdLength: pendingToolApproval.toolCallId.length,
+        resolvedToolCallIdLength: toolCallId.length,
+      });
+      return;
+    }
+
+    pendingToolApprovalResolver = null;
+    set({ pendingToolApproval: null });
+    resolver.resolve({
+      approved,
+      interrupted: false,
+    });
+  },
+  startMessageEdit: (edit) =>
+    set((state) => {
+      const session = resolvePersistedSession(state.projects, edit.projectId, edit.sessionId);
+
+      if (
+        !session ||
+        state.selectedProjectId !== edit.projectId ||
+        state.selectedSessionId !== edit.sessionId ||
+        state.isSendingMessage
+      ) {
         return state;
       }
 
-      const nextPreviewFiles = attachments.length > 0
-        ? [...state.previewFiles, ...attachments.filter((attachment) => !state.previewFiles.some((file) => file.id === attachment.id))]
-        : state.previewFiles;
+      const latestUserMessage = [...session.messages]
+        .reverse()
+        .find((message) => message.role === "user");
 
-      if (state.draftSessionProjectId) {
-        const projectIndex = state.projects.findIndex(
-          (project) => project.id === state.draftSessionProjectId,
-        );
+      if (
+        !latestUserMessage ||
+        latestUserMessage.id !== edit.messageId ||
+        latestUserMessage.isStored === false
+      ) {
+        return state;
+      }
 
-        if (projectIndex === -1) {
+      const turnRange = getTurnMessageRange(session.messages, edit);
+
+      if (!turnRange) {
+        return state;
+      }
+
+      const turnMessages = session.messages.slice(turnRange.start, turnRange.end);
+
+      if (turnMessages.some((message) => message.status === "streaming")) {
+        return state;
+      }
+
+      return {
+        activeMessageEdit: edit,
+        chatError: null,
+      };
+    }),
+  cancelMessageEdit: () => set({ activeMessageEdit: null }),
+  interruptPrompt: async () => {
+    rejectPendingToolApproval(true);
+    set({ pendingToolApproval: null });
+
+    const sessionId = useWorkspaceStore.getState().selectedSessionId;
+
+    if (sessionId) {
+      await interruptWorkspaceChat({ sessionId });
+      return;
+    }
+
+    await interruptWorkspaceChat();
+  },
+  sendPrompt: async (prompt, attachments = []) => {
+    const initialState = useWorkspaceStore.getState();
+    const content = prompt.trim();
+
+    if (initialState.isSendingMessage || (!content && attachments.length === 0)) {
+      return { accepted: false, error: "The chat is not ready for another message.", ok: false };
+    }
+
+    if (content.length > MAX_PROMPT_SIZE) {
+      const error = `Prompts can be at most ${MAX_PROMPT_SIZE.toLocaleString()} characters.`;
+      set({
+        chatError: error,
+      });
+      return { accepted: false, error, ok: false };
+    }
+
+    if (!initialState.selectedProjectId) {
+      const error = "Choose a project before sending a message.";
+      set({ chatError: error });
+      return { accepted: false, error, ok: false };
+    }
+
+    if (!initialState.modelId || !initialState.providerModels.some((model) => model.id === initialState.modelId)) {
+      const error = "Choose a provider model before sending a message.";
+      set({ chatError: error });
+      return { accepted: false, error, ok: false };
+    }
+    const initialProviderModel =
+      initialState.providerModels.find((model) => model.id === initialState.modelId) ?? null;
+
+    if (initialState.loadingSessionId && initialState.loadingSessionId === initialState.selectedSessionId) {
+      const error = "Wait for the selected session to finish loading.";
+      set({ chatError: error });
+      return { accepted: false, error, ok: false };
+    }
+
+    const activeMessageEdit =
+      initialState.activeMessageEdit &&
+      initialState.activeMessageEdit.projectId === initialState.selectedProjectId &&
+      initialState.activeMessageEdit.sessionId === initialState.selectedSessionId
+        ? initialState.activeMessageEdit
+        : null;
+    const userMessage = createUserMessage(content, attachments, {
+      editedAtMs: activeMessageEdit ? Date.now() : undefined,
+    });
+    const turnId = userMessage.turnId ?? `turn-${crypto.randomUUID()}`;
+    const nextPreviewFiles = mergePreviewFiles(initialState.previewFiles, attachments);
+    const draftSession = initialState.draftSessions[initialState.selectedProjectId];
+    const isDraftSelection = draftSession?.id === initialState.selectedSessionId;
+    const rollbackState = {
+      activeMessageEdit: initialState.activeMessageEdit,
+      draftSessions: initialState.draftSessions,
+      previewFiles: initialState.previewFiles,
+      projects: initialState.projects,
+      selectedProjectId: initialState.selectedProjectId,
+      selectedSessionId: initialState.selectedSessionId,
+    };
+    frontendLogger.info("frontend.workspace", "send_prompt_started", {
+      attachmentCount: attachments.length,
+      isEditingMessage: Boolean(activeMessageEdit),
+      isDraftSelection,
+      promptLength: content.length,
+      selectedProjectIdLength: initialState.selectedProjectId.length,
+      selectedSessionPresent: Boolean(initialState.selectedSessionId),
+      turnIdLength: turnId.length,
+    });
+
+    let targetProjectId = initialState.selectedProjectId;
+    let targetSessionId = initialState.selectedSessionId;
+    let shouldGenerateTitle = false;
+    let fallbackTitle = deriveSessionTitle(content, attachments);
+
+    if (isDraftSelection && draftSession) {
+      targetSessionId = `session-${crypto.randomUUID()}`;
+      shouldGenerateTitle = true;
+
+      set((state) => {
+        if (!targetSessionId) {
           return state;
         }
 
-        const nextProjects = structuredClone(state.projects);
-        const userMessage = createUserMessage(content, attachments);
-        const nextSessionId = `session-${Date.now()}`;
-
-        nextProjects[projectIndex].sessions.unshift({
-          id: nextSessionId,
-          title: DRAFT_SESSION_TITLE,
-          updatedAtLabel: "now",
-          messages: [userMessage, createAssistantReplyWithAttachments(content, attachments)],
+        const timestamp = Date.now();
+        const nextProjects = prependPersistedSession(state.projects, targetProjectId, {
+          createdAtMs: timestamp,
+          id: targetSessionId,
+          messages: [userMessage],
+          messagesLoaded: true,
+          modelId: state.modelId,
+          permissionMode: state.permissionMode,
+          replayTurnSummaries: [],
+          title: fallbackTitle,
+          updatedAtLabel: nowLabel(),
+          updatedAtMs: timestamp,
         });
-        nextProjects[projectIndex].isExpanded = true;
+
+        if (!nextProjects) {
+          return state;
+        }
+
+        const nextDraftSessions = { ...state.draftSessions };
+        delete nextDraftSessions[targetProjectId];
 
         return {
-          projects: nextProjects,
+          chatError: null,
+          draftSessions: nextDraftSessions,
+          isSendingMessage: true,
           previewFiles: nextPreviewFiles,
-          selectedProjectId: nextProjects[projectIndex].id,
-          selectedSessionId: nextSessionId,
-          draftSessionProjectId: null,
+          projects: nextProjects,
+          selectedProjectId: targetProjectId,
+          selectedSessionId: targetSessionId,
         };
+      });
+      frontendLogger.info("frontend.workspace", "draft_session_promoted", {
+        sessionIdLength: targetSessionId.length,
+        turnIdLength: turnId.length,
+      });
+    } else {
+      if (!targetSessionId) {
+        const error = "Choose or create a session before sending a message.";
+        set({ chatError: error });
+        return { accepted: false, error, ok: false };
       }
 
-      const result = withSelectedSession(
-        state.projects,
-        state.selectedProjectId,
-        state.selectedSessionId,
-        (projectIndex, sessionIndex, nextProjects) => {
-          const userMessage = createUserMessage(content, attachments);
-
-          nextProjects[projectIndex].sessions[sessionIndex].messages.push(userMessage);
-          nextProjects[projectIndex].sessions[sessionIndex].messages.push(
-            createAssistantReplyWithAttachments(content, attachments),
-          );
-          nextProjects[projectIndex].sessions[sessionIndex].updatedAtLabel = "now";
-
-          return nextProjects;
-        },
+      const existingSession = resolvePersistedSession(
+        initialState.projects,
+        targetProjectId,
+        targetSessionId,
       );
 
-      return result
-        ? { projects: result, previewFiles: nextPreviewFiles, draftSessionProjectId: null }
-        : state;
-    }),
+      if (!existingSession) {
+        const error = "Could not resolve the active chat.";
+        set({ chatError: error });
+        return { accepted: false, error, ok: false };
+      }
+
+      if (activeMessageEdit) {
+        const turnRange = getTurnMessageRange(existingSession.messages, activeMessageEdit);
+
+        if (!turnRange) {
+          const error = "That message can no longer be edited.";
+          set({
+            activeMessageEdit: null,
+            chatError: error,
+          });
+          return { accepted: false, error, ok: false };
+        }
+      }
+
+      set((state) => {
+        const nextProjects = updatePersistedSession(
+          state.projects,
+          targetProjectId,
+          targetSessionId as string,
+          (session) => {
+            const timestamp = Date.now();
+            if (activeMessageEdit) {
+              replaceEditedTurnMessages(session, activeMessageEdit, userMessage);
+            } else {
+              session.messages.push(userMessage);
+            }
+            session.modelId = state.modelId;
+            session.permissionMode = state.permissionMode;
+            session.updatedAtLabel = nowLabel();
+            session.updatedAtMs = timestamp;
+          },
+        );
+
+        if (!nextProjects) {
+          return state;
+        }
+
+        return {
+          activeMessageEdit: null,
+          chatError: null,
+          isSendingMessage: true,
+          previewFiles: nextPreviewFiles,
+          projects: nextProjects,
+        };
+      });
+      frontendLogger.info(
+        "frontend.workspace",
+        activeMessageEdit ? "message_replaced_in_session" : "message_appended_to_session",
+        {
+          sessionIdLength: targetSessionId.length,
+          turnIdLength: turnId.length,
+        },
+      );
+    }
+
+    if (!targetProjectId || !targetSessionId) {
+      const error = "Could not resolve the active chat.";
+      set({ chatError: error, isSendingMessage: false });
+      return { accepted: false, error, ok: false };
+    }
+
+    const targetProjectRoot =
+      initialState.projects.find((project) => project.id === targetProjectId)?.rootPath ?? "";
+
+    let didBeginRuntimeRun = false;
+    try {
+      await beginSessionRun(targetSessionId);
+      didBeginRuntimeRun = true;
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message.trim()
+          ? error.message
+          : "That session already has an active run.";
+      set({
+        ...rollbackState,
+        chatError: message,
+        isSendingMessage: false,
+      });
+      return { accepted: false, error: message, ok: false };
+    }
+    const runRequestId = crypto.randomUUID();
+    activeRunRequestIdsBySession.set(targetSessionId, runRequestId);
+    const isActiveRunRequest = () => activeRunRequestIdsBySession.get(targetSessionId as string) === runRequestId;
+
+    try {
+      const currentPersistState = useWorkspaceStore.getState();
+      const sessionToPersist = resolvePersistedSession(
+        currentPersistState.projects,
+        targetProjectId,
+        targetSessionId,
+      );
+
+      if (!sessionToPersist) {
+        throw new Error("Could not find the session to save.");
+      }
+
+      if (shouldGenerateTitle) {
+        await createSessionIfNeeded({
+          projectId: targetProjectId,
+          selectedProjectId: targetProjectId,
+          selectedSessionId: targetSessionId,
+          session: sessionToPersist,
+        });
+      } else {
+        await updateSessionSelection({
+          permissionMode: sessionToPersist.permissionMode ?? currentPersistState.permissionMode,
+          projectId: targetProjectId,
+          selectedModelUuid: sessionToPersist.selectedModelUuid ?? currentPersistState.modelId,
+          sessionId: targetSessionId,
+          tokenizerKind: initialProviderModel?.tokenizerKind ?? null,
+        });
+      }
+      await appendOrUpdateMessage({
+        message: userMessage,
+        previewFiles: nextPreviewFiles,
+        projectId: targetProjectId,
+        sessionId: targetSessionId,
+      });
+      await persistWorkspaceSettingsForCurrentState();
+      set((state) => {
+        const nextProjects = updatePersistedSession(
+          state.projects,
+          targetProjectId,
+          targetSessionId as string,
+          (session) => {
+            const targetMessage = session.messages.find((message) => message.id === userMessage.id);
+
+            if (targetMessage) {
+              targetMessage.isStored = true;
+            }
+          },
+        );
+
+        return nextProjects ? { projects: nextProjects } : state;
+      });
+      frontendLogger.info("frontend.workspace", "session_persisted_before_run", {
+        projectIdLength: targetProjectId.length,
+        sessionIdLength: targetSessionId.length,
+      });
+      if (shouldGenerateTitle) {
+        void generateWorkspaceSessionTitle({
+          attachments,
+          chatId: targetSessionId,
+          modelId: initialState.modelId,
+          projectId: targetProjectId,
+          prompt: content,
+          reasoningLevels: initialProviderModel?.reasoningLevels,
+        })
+          .then((generatedTitle) => {
+            const nextTitle = normalizeGeneratedSessionTitle(generatedTitle, fallbackTitle);
+            set((state) => {
+              const nextProjects = updatePersistedSession(
+                state.projects,
+                targetProjectId,
+                targetSessionId as string,
+                (session) => {
+                  session.title = nextTitle;
+                },
+              );
+
+              return nextProjects ? { projects: nextProjects } : state;
+            });
+            return updateSessionTitle({
+              sessionId: targetSessionId as string,
+              title: nextTitle,
+            });
+          })
+          .catch(() => undefined);
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message.trim()
+          ? error.message
+          : "Wizzle could not save the chat.";
+      set({
+        ...rollbackState,
+        chatError: message,
+        isSendingMessage: false,
+      });
+      frontendLogger.error("frontend.workspace", "session_persist_before_run_failed", {
+        error,
+        projectIdLength: targetProjectId.length,
+        sessionIdLength: targetSessionId.length,
+      });
+      if (didBeginRuntimeRun) {
+        didBeginRuntimeRun = false;
+        await finishSessionRun(targetSessionId).catch(() => undefined);
+      }
+      activeRunRequestIdsBySession.delete(targetSessionId);
+      return { accepted: false, error: message, ok: false };
+    }
+
+    let activeAssistantMessageId: string | null = null;
+    let bufferedContent = "";
+    let flushTimeoutId: number | null = null;
+    let toolFlushTimeoutId: number | null = null;
+    let durablePersistTimeoutId: number | null = null;
+    let durablePersistChars = 0;
+    let lastDurablePersistAt = Date.now();
+    let durablePersistChain = Promise.resolve();
+    const bufferedToolOutputByCallId = new Map<string, BufferedToolOutput>();
+    let activeContentStepId: string | null = null;
+
+    const persistMessageFromState = async (messageId: string) => {
+      if (!isActiveRunRequest()) {
+        return;
+      }
+
+      const state = useWorkspaceStore.getState();
+      const session = resolvePersistedSession(state.projects, targetProjectId, targetSessionId as string);
+      const message = session?.messages.find((entry) => entry.id === messageId);
+
+      if (!message || message.turnId !== turnId) {
+        return;
+      }
+
+      await appendOrUpdateMessage({
+        message,
+        previewFiles: state.previewFiles,
+        projectId: targetProjectId,
+        sessionId: targetSessionId as string,
+      });
+    };
+
+    const persistActiveTurnMessages = async () => {
+      if (!isActiveRunRequest()) {
+        return;
+      }
+
+      const state = useWorkspaceStore.getState();
+      const session = resolvePersistedSession(state.projects, targetProjectId, targetSessionId as string);
+
+      for (const message of session?.messages ?? []) {
+        if (message.turnId !== turnId) {
+          continue;
+        }
+
+        await appendOrUpdateMessage({
+          message,
+          previewFiles: state.previewFiles,
+          projectId: targetProjectId,
+          sessionId: targetSessionId as string,
+        });
+      }
+    };
+
+    const reconcileEditedSessionIfNeeded = async () => {
+      if (!activeMessageEdit) {
+        return;
+      }
+
+      const state = useWorkspaceStore.getState();
+      const session = resolvePersistedSession(state.projects, targetProjectId, targetSessionId as string);
+
+      if (!session) {
+        return;
+      }
+
+      await reconcileEntireSessionForExplicitEditOrRepair({
+        previewFiles: state.previewFiles,
+        projectId: targetProjectId,
+        selectedProjectId: targetProjectId,
+        selectedSessionId: targetSessionId as string,
+        session,
+      });
+    };
+
+    const clearPendingFlush = () => {
+      if (flushTimeoutId !== null) {
+        window.clearTimeout(flushTimeoutId);
+        flushTimeoutId = null;
+      }
+    };
+
+    const clearPendingToolFlush = () => {
+      if (toolFlushTimeoutId !== null) {
+        window.clearTimeout(toolFlushTimeoutId);
+        toolFlushTimeoutId = null;
+      }
+    };
+
+    const clearPendingDurablePersist = () => {
+      if (durablePersistTimeoutId !== null) {
+        window.clearTimeout(durablePersistTimeoutId);
+        durablePersistTimeoutId = null;
+      }
+    };
+
+    const runDurablePersist = (reason: string) => {
+      clearPendingDurablePersist();
+      durablePersistChars = 0;
+      lastDurablePersistAt = Date.now();
+      durablePersistChain = durablePersistChain
+        .catch(() => undefined)
+        .then(() => {
+          if (!activeAssistantMessageId) {
+            return undefined;
+          }
+
+          return persistMessageFromState(activeAssistantMessageId);
+        })
+        .catch((error) => {
+          frontendLogger.debug("frontend.workspace", "durable_stream_persist_failed", {
+            error,
+            reason,
+            sessionIdLength: targetSessionId?.length ?? 0,
+          });
+        });
+    };
+
+    const noteDurableStreamProgress = (charCount: number) => {
+      if (charCount <= 0) {
+        return;
+      }
+
+      durablePersistChars += charCount;
+      const elapsedMs = Date.now() - lastDurablePersistAt;
+
+      if (
+        durablePersistChars >= STREAM_PERSIST_CHAR_THRESHOLD ||
+        elapsedMs >= STREAM_PERSIST_INTERVAL_MS
+      ) {
+        runDurablePersist("threshold");
+        return;
+      }
+
+      if (durablePersistTimeoutId !== null) {
+        return;
+      }
+
+      durablePersistTimeoutId = window.setTimeout(() => {
+        runDurablePersist("interval");
+      }, Math.max(0, STREAM_PERSIST_INTERVAL_MS - elapsedMs));
+    };
+
+    const flushBufferedChunks = () => {
+      if (!isActiveRunRequest()) {
+        bufferedContent = "";
+        return;
+      }
+
+      if (!activeAssistantMessageId || !bufferedContent) {
+        return;
+      }
+
+      const contentChunk = bufferedContent;
+      const messageId = activeAssistantMessageId;
+      bufferedContent = "";
+
+      set((state) => {
+        const nextProjects = updatePersistedSession(
+          state.projects,
+          targetProjectId,
+          targetSessionId as string,
+          (session) => {
+            const targetMessage = session.messages.find((message) => message.id === messageId);
+
+            if (!targetMessage) {
+              return;
+            }
+
+            if (contentChunk) {
+              const contentPartType =
+                (targetMessage.toolCalls?.length ?? 0) > 0 ? "activity_content" : "content";
+              const contentStepId =
+                activeContentStepId ?? createMessagePartId(targetMessage.id, contentPartType);
+              activeContentStepId = contentStepId;
+              targetMessage.parts = upsertStreamingPart(
+                targetMessage,
+                {
+                  createdAtMs: Date.now(),
+                  id: contentStepId,
+                  status: "streaming",
+                  type: contentPartType,
+                },
+                contentChunk,
+              );
+            }
+
+            targetMessage.status = "streaming";
+            synchronizeMessageFromParts(targetMessage);
+            session.updatedAtLabel = nowLabel();
+            session.updatedAtMs = Date.now();
+          },
+        );
+
+        return nextProjects ? { projects: nextProjects } : state;
+      });
+      void persistMessageFromState(messageId).catch(() => undefined);
+      noteDurableStreamProgress(contentChunk.length);
+      frontendLogger.debug("frontend.workspace", "assistant_chunks_flushed", {
+        contentLength: contentChunk.length,
+        messageIdLength: messageId.length,
+        reasoningLength: 0,
+        sessionIdLength: targetSessionId.length,
+      });
+    };
+
+    const flushBufferedToolChunks = () => {
+      if (!isActiveRunRequest()) {
+        bufferedToolOutputByCallId.clear();
+        return;
+      }
+
+      const pendingToolOutputs = Array.from(bufferedToolOutputByCallId.entries());
+
+      if (pendingToolOutputs.length === 0) {
+        return;
+      }
+
+      bufferedToolOutputByCallId.clear();
+
+      set((state) => {
+        const nextProjects = updatePersistedSession(
+          state.projects,
+          targetProjectId,
+          targetSessionId as string,
+          (session) => {
+            let didUpdateSession = false;
+
+            for (const [toolCallId, buffer] of pendingToolOutputs) {
+              const targetMessage = session.messages.find(
+                (message) => message.id === `message-tool-${toolCallId}`,
+              );
+
+              if (
+                !targetMessage ||
+                targetMessage.status === "done" ||
+                targetMessage.status === "error"
+              ) {
+                continue;
+              }
+
+              const existingPart = targetMessage.parts?.find(
+                (part) =>
+                  part.type === "tool_result" && (part.toolCallId ?? part.id) === toolCallId,
+              );
+
+              targetMessage.parts = appendMessagePart(
+                targetMessage.parts,
+                {
+                  createdAtMs: existingPart?.createdAtMs ?? Date.now(),
+                  id: existingPart?.id ?? `${targetMessage.id}-result`,
+                  metadata: {
+                    ...(existingPart?.metadata ?? {}),
+                    status: "running",
+                    toolName: targetMessage.toolName,
+                  },
+                  name: targetMessage.toolName,
+                  output: createToolStreamOutput(buffer),
+                  parentPartId: existingPart?.parentPartId,
+                  status: "running",
+                  toolCallId,
+                  type: "tool_result",
+                },
+                (part) =>
+                  part.type === "tool_result" && (part.toolCallId ?? part.id) === toolCallId,
+              );
+              targetMessage.status = "streaming";
+              synchronizeMessageFromParts(targetMessage);
+              didUpdateSession = true;
+            }
+
+            if (!didUpdateSession) {
+              return;
+            }
+
+            session.updatedAtLabel = nowLabel();
+            session.updatedAtMs = Date.now();
+          },
+        );
+
+        return nextProjects ? { projects: nextProjects } : state;
+      });
+      void persistActiveTurnMessages().catch(() => undefined);
+      noteDurableStreamProgress(
+        pendingToolOutputs.reduce((total, [, buffer]) => total + buffer.combinedOutput.length, 0),
+      );
+      frontendLogger.debug("frontend.workspace", "tool_chunks_flushed", {
+        sessionIdLength: targetSessionId.length,
+        toolCount: pendingToolOutputs.length,
+      });
+    };
+
+    const scheduleChunkFlush = () => {
+      if (flushTimeoutId !== null) {
+        return;
+      }
+
+      flushTimeoutId = window.setTimeout(() => {
+        flushTimeoutId = null;
+        flushBufferedChunks();
+      }, STREAM_FLUSH_INTERVAL_MS);
+    };
+
+    const scheduleToolChunkFlush = () => {
+      if (toolFlushTimeoutId !== null) {
+        return;
+      }
+
+      toolFlushTimeoutId = window.setTimeout(() => {
+        toolFlushTimeoutId = null;
+        flushBufferedToolChunks();
+      }, STREAM_FLUSH_INTERVAL_MS);
+    };
+
+    const beginAssistantMessage = (message: Message) => {
+      if (!isActiveRunRequest()) {
+        return;
+      }
+
+      clearPendingFlush();
+      clearPendingToolFlush();
+      flushBufferedChunks();
+      flushBufferedToolChunks();
+      activeAssistantMessageId = message.id;
+      activeContentStepId = null;
+      bufferedContent = "";
+      set((state) => {
+        const nextProjects = updatePersistedSession(
+          state.projects,
+          targetProjectId,
+          targetSessionId as string,
+          (session) => {
+            session.messages.push(message);
+            session.updatedAtLabel = nowLabel();
+            session.updatedAtMs = Date.now();
+          },
+        );
+
+        return nextProjects ? { projects: nextProjects } : state;
+      });
+      void persistMessageFromState(message.id).catch(() => undefined);
+      frontendLogger.info("frontend.workspace", "assistant_message_created", {
+        messageIdLength: message.id.length,
+        sessionIdLength: targetSessionId.length,
+        turnIdLength: turnId.length,
+      });
+    };
+
+    const finishReasoningStep = (messageId: string) => {
+      frontendLogger.debug("frontend.workspace", "assistant_reasoning_finished", {
+        messageIdLength: messageId.length,
+        reasoningStepIdLength: 0,
+        sessionIdLength: targetSessionId.length,
+      });
+    };
+
+    const finishAssistantStream = (messageId: string, phase: NonNullable<Message["assistantPhase"]>) => {
+      if (!isActiveRunRequest()) {
+        return;
+      }
+
+      clearPendingFlush();
+      clearPendingToolFlush();
+      flushBufferedChunks();
+      flushBufferedToolChunks();
+      activeContentStepId = null;
+
+      set((state) => {
+        const nextProjects = updatePersistedSession(
+          state.projects,
+          targetProjectId,
+          targetSessionId as string,
+          (session) => {
+            const targetMessage = session.messages.find((message) => message.id === messageId);
+
+            if (!targetMessage) {
+              return;
+            }
+
+            const completedAtMs = Date.now();
+            targetMessage.assistantPhase = phase;
+            targetMessage.completedAtMs = completedAtMs;
+            targetMessage.durationMs = targetMessage.startedAtMs
+              ? Math.max(0, completedAtMs - targetMessage.startedAtMs)
+              : undefined;
+            targetMessage.reasoningDurationMs =
+              targetMessage.reasoningDurationMs ??
+              (targetMessage.startedAtMs
+                ? Math.max(0, completedAtMs - targetMessage.startedAtMs)
+                : undefined);
+            targetMessage.status = "done";
+            targetMessage.parts = (targetMessage.parts ?? []).map((part) => {
+              if (part.status !== "streaming") {
+                return part;
+              }
+              return {
+                ...part,
+                durationMs: part.createdAtMs
+                  ? Math.max(0, completedAtMs - part.createdAtMs)
+                  : part.durationMs,
+                status: "done",
+              };
+            });
+            synchronizeMessageFromParts(targetMessage);
+            session.updatedAtLabel = nowLabel();
+            session.updatedAtMs = completedAtMs;
+          },
+        );
+
+        return nextProjects ? { projects: nextProjects } : state;
+      });
+      void persistMessageFromState(messageId).catch(() => undefined);
+      frontendLogger.info("frontend.workspace", "assistant_stream_finished", {
+        messageIdLength: messageId.length,
+        sessionIdLength: targetSessionId.length,
+      });
+    };
+
+    const syncAssistantToolCalls = (messageId: string, toolCalls: NonNullable<Message["toolCalls"]>) => {
+      if (!isActiveRunRequest()) {
+        return;
+      }
+
+      clearPendingFlush();
+      clearPendingToolFlush();
+      flushBufferedChunks();
+      flushBufferedToolChunks();
+      activeContentStepId = null;
+
+      set((state) => {
+        const nextProjects = updatePersistedSession(
+          state.projects,
+          targetProjectId,
+          targetSessionId as string,
+          (sessionEntry) => {
+            const targetMessage = sessionEntry.messages.find((entry) => entry.id === messageId);
+
+            if (!targetMessage) {
+              return;
+            }
+
+            targetMessage.toolCalls = toolCalls;
+            const existingParts = targetMessage.parts ?? [];
+            const nonToolCallParts = existingParts.filter((part) => part.type !== "tool_call");
+            const normalizedNonToolCallParts = nonToolCallParts.map((part) =>
+              part.type === "content"
+                ? {
+                    ...part,
+                    type: "activity_content" as const,
+                  }
+                : part,
+            );
+            const nextToolCallParts = toolCalls.map((toolCall) => {
+              const existingPart = existingParts.find(
+                (part) => part.type === "tool_call" && (part.toolCallId ?? part.id) === toolCall.id,
+              );
+
+              return {
+                createdAtMs: existingPart?.createdAtMs ?? Date.now(),
+                id: existingPart?.id ?? `${targetMessage.id}-tool-call-${toolCall.id}`,
+                input: toolCall.input,
+                metadata: {
+                  arguments: toolCall.input,
+                  projectId: targetProjectId,
+                  toolName: toolCall.name,
+                },
+                name: toolCall.name,
+                status: toolCall.status,
+                toolCallId: toolCall.id,
+                type: "tool_call" as const,
+              };
+            });
+
+            targetMessage.parts = [...normalizedNonToolCallParts, ...nextToolCallParts];
+            targetMessage.assistantPhase = "working";
+            synchronizeMessageFromParts(targetMessage);
+            sessionEntry.updatedAtLabel = nowLabel();
+            sessionEntry.updatedAtMs = Date.now();
+          },
+        );
+
+        return nextProjects ? { projects: nextProjects } : state;
+      });
+      void persistMessageFromState(messageId).catch(() => undefined);
+      frontendLogger.info("frontend.workspace", "assistant_tool_calls_synced", {
+        messageIdLength: messageId.length,
+        sessionIdLength: targetSessionId.length,
+        toolCallCount: toolCalls.length,
+      });
+    };
+
+    const appendToolChunk = (chunk: {
+      chunk: string;
+      stream: "stderr" | "stdout";
+      toolCallId: string;
+    }) => {
+      if (!isActiveRunRequest()) {
+        return;
+      }
+
+      const currentBuffer = bufferedToolOutputByCallId.get(chunk.toolCallId) ?? {
+        combinedOutput: "",
+        stderr: "",
+        stdout: "",
+      };
+      bufferedToolOutputByCallId.set(
+        chunk.toolCallId,
+        appendBufferedToolChunk(currentBuffer, chunk.stream, chunk.chunk),
+      );
+      scheduleToolChunkFlush();
+    };
+
+    const appendToolMessage = async (message: Message) => {
+      if (!isActiveRunRequest()) {
+        return;
+      }
+
+      clearPendingFlush();
+      clearPendingToolFlush();
+      flushBufferedChunks();
+      flushBufferedToolChunks();
+      activeAssistantMessageId = null;
+      activeContentStepId = null;
+      bufferedContent = "";
+      const linkedFile = extractLinkedFileFromToolResult({
+        content: message.content,
+        status: message.status,
+        toolName: message.toolName,
+      });
+      let linkedFileIds: string[] = [];
+      let previewFilesForMessage: PreviewFile[] = [];
+
+      if (linkedFile) {
+        try {
+          previewFilesForMessage = await loadPreviewFilesFromPaths([
+            {
+              path: linkedFile.path,
+              projectId: targetProjectId,
+              projectRoot: targetProjectRoot,
+              summary:
+                linkedFile.action === "created"
+                  ? "Created during assistant turn"
+                  : linkedFile.action === "edited"
+                    ? "Edited during assistant turn"
+                    : "Read during assistant turn",
+            },
+          ]);
+          linkedFileIds = previewFilesForMessage.map((previewFile) => previewFile.id);
+        } catch (error) {
+          frontendLogger.debug("frontend.workspace", "tool_preview_load_failed", {
+            error,
+            sessionIdLength: targetSessionId.length,
+            toolCallIdLength: message.toolCallId?.length ?? 0,
+            toolName: message.toolName ?? null,
+          });
+        }
+      }
+
+      set((state) => {
+        const nextProjects = updatePersistedSession(
+          state.projects,
+          targetProjectId,
+          targetSessionId as string,
+          (session) => {
+            upsertSessionMessage(session.messages, message);
+            const targetMessage = session.messages.find((entry) => entry.id === message.id);
+
+            if (targetMessage && linkedFileIds.length > 0) {
+              targetMessage.linkedFileIds = linkedFileIds;
+            }
+            session.updatedAtLabel = nowLabel();
+            session.updatedAtMs = Date.now();
+          },
+        );
+
+        if (!nextProjects) {
+          return state;
+        }
+
+        return {
+          previewFiles:
+            previewFilesForMessage.length > 0
+              ? mergePreviewFiles(state.previewFiles, previewFilesForMessage)
+              : state.previewFiles,
+          projects: nextProjects,
+        };
+      });
+      void persistMessageFromState(message.id).catch(() => undefined);
+      frontendLogger.info("frontend.workspace", "tool_message_appended", {
+        messageIdLength: message.id.length,
+        linkedFileCount: linkedFileIds.length,
+        sessionIdLength: targetSessionId.length,
+        status: message.status ?? null,
+        toolCallIdLength: message.toolCallId?.length ?? 0,
+      });
+    };
+
+    const settleTurn = (
+      status: "done" | "error" | "interrupted",
+      fallbackContent?: string,
+    ) => {
+      if (!isActiveRunRequest()) {
+        return;
+      }
+
+      clearPendingFlush();
+      clearPendingToolFlush();
+      clearPendingDurablePersist();
+      flushBufferedChunks();
+      flushBufferedToolChunks();
+      activeAssistantMessageId = null;
+      activeContentStepId = null;
+
+      set((state) => {
+        const nextProjects = updatePersistedSession(
+          state.projects,
+          targetProjectId,
+          targetSessionId as string,
+          (sessionEntry) => {
+            const turnMessages = sessionEntry.messages.filter((message) => message.turnId === turnId);
+            const assistantMessages = turnMessages.filter((message) => message.role === "assistant");
+            const changedFileIdsForTurn = turnMessages
+              .filter((message) => message.role === "tool")
+              .flatMap((message) => message.linkedFileIds ?? []);
+            const completedAtMs = Date.now();
+            let lastAssistantMessage = assistantMessages[assistantMessages.length - 1];
+
+            if (!lastAssistantMessage && fallbackContent) {
+              lastAssistantMessage = {
+                assistantPhase: "final",
+                content: "",
+                createdAtLabel: formatExactMessageTimestamp(completedAtMs),
+                createdAtMs: completedAtMs,
+                id: `message-assistant-${crypto.randomUUID()}`,
+                parts: [],
+                reasoning: "",
+                role: "assistant",
+                startedAtMs: completedAtMs,
+                status,
+                toolCalls: [],
+                toolResults: [],
+                turnId,
+              };
+              sessionEntry.messages.push(lastAssistantMessage);
+            }
+
+            if (lastAssistantMessage && changedFileIdsForTurn.length > 0) {
+              lastAssistantMessage.linkedFileIds = mergeLinkedFileIds(
+                lastAssistantMessage.linkedFileIds,
+                changedFileIdsForTurn,
+              );
+            }
+
+            const assistantToolCallMetadata = new Map<
+              string,
+              {
+                arguments?: string;
+                parentPartId: string;
+                startedAtMs?: number;
+                toolName: string;
+              }
+            >();
+
+            for (const assistantMessage of assistantMessages) {
+              for (const toolCall of assistantMessage.toolCalls ?? []) {
+                const toolCallPart = assistantMessage.parts?.find(
+                  (part) =>
+                    part.type === "tool_call" && (part.toolCallId ?? part.id) === toolCall.id,
+                );
+                assistantToolCallMetadata.set(toolCall.id, {
+                  arguments: toolCall.input,
+                  parentPartId:
+                    toolCallPart?.id ?? `${assistantMessage.id}-tool-call-${toolCall.id}`,
+                  startedAtMs: toolCallPart?.createdAtMs,
+                  toolName: toolCall.name,
+                });
+              }
+            }
+
+            if (status === "interrupted") {
+              const toolMessagesByCallId = new Set(
+                sessionEntry.messages
+                  .filter((message) => message.turnId === turnId && message.role === "tool")
+                  .map((message) => message.toolCallId)
+                  .filter((toolCallId): toolCallId is string => Boolean(toolCallId)),
+              );
+
+              for (const assistantMessage of assistantMessages) {
+                for (const toolCall of assistantMessage.toolCalls ?? []) {
+                  if (toolMessagesByCallId.has(toolCall.id)) {
+                    continue;
+                  }
+
+                  const toolMessageId = `message-tool-${toolCall.id}`;
+                  sessionEntry.messages.push({
+                    content: "User interrupted",
+                    completedAtMs,
+                    createdAtLabel: formatExactMessageTimestamp(completedAtMs),
+                    createdAtMs: completedAtMs,
+                    id: toolMessageId,
+                    parts: [
+                      {
+                        createdAtMs: completedAtMs,
+                        error: "User interrupted",
+                        id: `${toolMessageId}-result`,
+                        metadata: {
+                          arguments: toolCall.input,
+                          finishedAtMs: completedAtMs,
+                          projectId: targetProjectId,
+                          startedAtMs:
+                            assistantToolCallMetadata.get(toolCall.id)?.startedAtMs ?? completedAtMs,
+                          status: "interrupted",
+                          toolName: toolCall.name,
+                        },
+                        name: toolCall.name,
+                        output: "User interrupted",
+                        parentPartId:
+                          assistantToolCallMetadata.get(toolCall.id)?.parentPartId ??
+                          `${assistantMessage.id}-tool-call-${toolCall.id}`,
+                        status: "interrupted",
+                        toolCallId: toolCall.id,
+                        type: "tool_result",
+                      },
+                    ],
+                    role: "tool",
+                    startedAtMs: completedAtMs,
+                    status: "interrupted",
+                    toolCallId: toolCall.id,
+                    toolName: toolCall.name,
+                    turnId,
+                  });
+                  toolMessagesByCallId.add(toolCall.id);
+                }
+              }
+            }
+
+            for (const targetMessage of sessionEntry.messages) {
+              if (targetMessage.turnId !== turnId) {
+                continue;
+              }
+
+              if (targetMessage.role === "tool") {
+                if (targetMessage.status === "streaming") {
+                  const interruptedOutput = "User interrupted";
+                  const toolCallMetadata = targetMessage.toolCallId
+                    ? assistantToolCallMetadata.get(targetMessage.toolCallId)
+                    : undefined;
+                  let hasToolResultPart = false;
+
+                  targetMessage.completedAtMs = targetMessage.completedAtMs ?? completedAtMs;
+                  targetMessage.status =
+                    status === "error"
+                      ? "error"
+                      : status === "interrupted"
+                        ? "interrupted"
+                        : "done";
+                  targetMessage.parts = (targetMessage.parts ?? []).map((part) => ({
+                    ...part,
+                    error:
+                      status === "interrupted" && part.type === "tool_result"
+                        ? part.error ?? "User interrupted"
+                        : part.error,
+                    metadata:
+                      part.type === "tool_result"
+                        ? {
+                            ...(part.metadata ?? {}),
+                            finishedAtMs: completedAtMs,
+                            parentPartId: part.parentPartId ?? toolCallMetadata?.parentPartId,
+                            projectId: targetProjectId,
+                            startedAtMs:
+                              typeof part.metadata?.startedAtMs === "number"
+                                ? part.metadata.startedAtMs
+                                : toolCallMetadata?.startedAtMs,
+                            status:
+                              status === "interrupted"
+                                ? "interrupted"
+                                : status === "error"
+                                  ? "error"
+                                  : part.status === "error"
+                                    ? part.status
+                                    : "done",
+                          }
+                        : part.metadata,
+                    output:
+                      status === "interrupted" && part.type === "tool_result"
+                        ? interruptedOutput
+                        : part.output,
+                    status:
+                      status === "error"
+                        ? "error"
+                        : part.status === "error"
+                          ? part.status
+                          : status === "interrupted"
+                            ? "interrupted"
+                            : "done",
+                  })).map((part) => {
+                    if (part.type === "tool_result") {
+                      hasToolResultPart = true;
+                    }
+
+                    return part;
+                  });
+
+                  if (status === "interrupted" && !hasToolResultPart) {
+                    targetMessage.parts = appendMessagePart(targetMessage.parts, {
+                      createdAtMs: completedAtMs,
+                      error: "User interrupted",
+                      id: `${targetMessage.id}-result`,
+                      metadata: {
+                        arguments: toolCallMetadata?.arguments,
+                        finishedAtMs: completedAtMs,
+                        parentPartId: toolCallMetadata?.parentPartId,
+                        projectId: targetProjectId,
+                        startedAtMs: toolCallMetadata?.startedAtMs ?? completedAtMs,
+                        status: "interrupted",
+                        toolName: targetMessage.toolName ?? toolCallMetadata?.toolName,
+                      },
+                      name: targetMessage.toolName ?? toolCallMetadata?.toolName,
+                      output: interruptedOutput,
+                      parentPartId: toolCallMetadata?.parentPartId,
+                      status: "interrupted",
+                      toolCallId: targetMessage.toolCallId,
+                      type: "tool_result",
+                    });
+                  }
+
+                  synchronizeMessageFromParts(targetMessage);
+                }
+
+                continue;
+              }
+
+              if (
+                fallbackContent &&
+                targetMessage.id === lastAssistantMessage?.id &&
+                targetMessage.content.trim().length === 0 &&
+                (targetMessage.reasoning ?? "").trim().length === 0
+              ) {
+                targetMessage.parts = appendMessagePart(targetMessage.parts, {
+                  content: fallbackContent,
+                  createdAtMs: completedAtMs,
+                  id: createMessagePartId(targetMessage.id, "content"),
+                  status,
+                  type: "content",
+                });
+              }
+
+              targetMessage.completedAtMs = targetMessage.completedAtMs ?? completedAtMs;
+              targetMessage.durationMs = targetMessage.startedAtMs
+                ? Math.max(0, targetMessage.completedAtMs - targetMessage.startedAtMs)
+                : targetMessage.durationMs;
+              targetMessage.reasoningDurationMs =
+                targetMessage.reasoningDurationMs ??
+                (targetMessage.startedAtMs
+                  ? Math.max(0, targetMessage.completedAtMs - targetMessage.startedAtMs)
+                  : targetMessage.reasoningDurationMs);
+              if (!targetMessage.assistantPhase) {
+                targetMessage.assistantPhase =
+                  (targetMessage.toolCalls?.length ?? 0) > 0 ? "working" : "final";
+              }
+              targetMessage.status = status;
+              targetMessage.parts = (targetMessage.parts ?? []).map((part) => ({
+                ...part,
+                status:
+                  status === "error"
+                    ? "error"
+                    : part.status === "error"
+                      ? part.status
+                      : status === "interrupted"
+                        ? "interrupted"
+                        : "done",
+              }));
+              synchronizeMessageFromParts(targetMessage);
+            }
+
+            sessionEntry.updatedAtLabel = nowLabel();
+            sessionEntry.updatedAtMs = completedAtMs;
+          },
+        );
+
+        return nextProjects ? { projects: nextProjects } : state;
+      });
+
+      const settledState = useWorkspaceStore.getState();
+      const settledProject = settledState.projects.find((entry) => entry.id === targetProjectId);
+      const settledSession = settledProject?.sessions.find((entry) => entry.id === targetSessionId);
+      let settledTurnSummary: PersistedTurnSummaryRecord | null = null;
+
+      if (settledSession) {
+        const turnMessages = settledSession.messages.filter((message) => message.turnId === turnId);
+        const turnSummary = buildTurnReplaySummary({
+          messages: turnMessages,
+          previewFileMap: new Map(
+            settledState.previewFiles.map((file) => [file.id, file] as const),
+          ),
+          turnId,
+        });
+
+        if (turnSummary) {
+          settledTurnSummary = turnSummary;
+          set((state) => {
+            const nextProjects = updatePersistedSession(
+              state.projects,
+              targetProjectId,
+              targetSessionId as string,
+              (sessionEntry) => {
+                sessionEntry.replayTurnSummaries = upsertTurnSummary(
+                  sessionEntry.replayTurnSummaries,
+                  turnSummary,
+                );
+              },
+            );
+
+            return nextProjects ? { projects: nextProjects } : state;
+          });
+        }
+      }
+
+      durablePersistChain = durablePersistChain
+        .catch(() => undefined)
+        .then(async () => {
+          await persistActiveTurnMessages();
+
+          if (settledTurnSummary) {
+            await persistTurnSummary({
+              sessionId: targetSessionId as string,
+              summary: settledTurnSummary,
+            });
+          }
+
+          await finalizeTurn({
+            sessionId: targetSessionId as string,
+            status: status === "error" ? "failed" : status,
+            turnId,
+          });
+        })
+        .catch((error) => {
+          frontendLogger.error("frontend.workspace", "turn_targeted_persist_failed", {
+            error,
+            sessionIdLength: targetSessionId.length,
+            turnIdLength: turnId.length,
+          });
+        });
+      frontendLogger.info("frontend.workspace", "turn_settled", {
+        fallbackContentLength: fallbackContent?.length ?? 0,
+        sessionIdLength: targetSessionId.length,
+        status,
+        turnIdLength: turnId.length,
+      });
+    };
+
+    const finishRuntimeRun = async () => {
+      if (!didBeginRuntimeRun) {
+        return;
+      }
+
+      didBeginRuntimeRun = false;
+
+      try {
+        await finishSessionRun(targetSessionId);
+      } catch (error) {
+        frontendLogger.debug("frontend.workspace", "runtime_finish_failed", {
+          error,
+          sessionIdLength: targetSessionId.length,
+        });
+      }
+    };
+
+    try {
+      const currentState = useWorkspaceStore.getState();
+      const project = currentState.projects.find((entry) => entry.id === targetProjectId);
+      const session = project?.sessions.find((entry) => entry.id === targetSessionId);
+
+      if (!project || !session) {
+        throw new Error("The active chat could not be prepared.");
+      }
+
+      const selectedProviderModel = currentState.providerModels.find(
+        (model) => model.id === currentState.modelId,
+      );
+
+      if (!selectedProviderModel) {
+        throw new Error("Choose a provider model before sending a message.");
+      }
+
+      await runWorkspaceAgent({
+        chatId: targetSessionId,
+        history: session.messages,
+        modelId: currentState.modelId,
+        modelCapabilities: selectedProviderModel.capabilities,
+        compactedContext: session.compactedContext ?? null,
+        onAssistantChunk: ({ kind, text, messageId }) => {
+          if (activeAssistantMessageId !== messageId) {
+            activeAssistantMessageId = messageId;
+          }
+
+          if (kind === "reasoning") {
+            void text;
+          } else {
+            bufferedContent += text;
+            scheduleChunkFlush();
+          }
+        },
+        onAssistantCreated: beginAssistantMessage,
+        onReasoningFinished: finishReasoningStep,
+        onAssistantStreamFinished: finishAssistantStream,
+        onAssistantToolCalls: syncAssistantToolCalls,
+        onCompactedContext: async (compactedContext) => {
+          let compactedSession: Session | null = null;
+          set((state) => {
+            const nextProjects = updatePersistedSession(
+              state.projects,
+              targetProjectId,
+              targetSessionId as string,
+              (sessionEntry) => {
+                sessionEntry.compactedContext = compactedContext;
+                sessionEntry.updatedAtLabel = nowLabel();
+                sessionEntry.updatedAtMs = Date.now();
+                compactedSession = sessionEntry;
+              },
+            );
+
+            return nextProjects ? { projects: nextProjects } : state;
+          });
+
+          if (compactedSession) {
+            await createSessionIfNeeded({
+              projectId: targetProjectId,
+              selectedProjectId: targetProjectId,
+              selectedSessionId: targetSessionId as string,
+              session: compactedSession,
+            });
+          }
+        },
+        onToolChunk: appendToolChunk,
+        onToolMessage: appendToolMessage,
+        onTurnFinished: () => undefined,
+        permissionMode: currentState.permissionMode,
+        previewFileMap: new Map(currentState.previewFiles.map((file) => [file.id, file] as const)),
+        projectId: targetProjectId,
+        reasoningLevel: selectedProviderModel.reasoningLevels.includes(currentState.reasoningLevel)
+          ? currentState.reasoningLevel
+          : selectedProviderModel.reasoningLevels[0],
+        requestToolApproval: (request) =>
+          useWorkspaceStore.getState().requestToolApproval(request),
+        selectedModel: selectedProviderModel,
+        turnSummaries: session.replayTurnSummaries ?? [],
+        turnId,
+        tokenizerKind: selectedProviderModel.tokenizerKind,
+      });
+      settleTurn("done", "The model returned an empty response.");
+      await durablePersistChain.catch(() => undefined);
+      await reconcileEditedSessionIfNeeded();
+      await finishRuntimeRun();
+      if (isActiveRunRequest()) {
+        activeRunRequestIdsBySession.delete(targetSessionId);
+      }
+      set({ isSendingMessage: false });
+      frontendLogger.info("frontend.workspace", "agent_run_completed", {
+        sessionIdLength: targetSessionId.length,
+        turnIdLength: turnId.length,
+      });
+      frontendLogger.info("frontend.workspace", "turn_persisted_after_run", {
+        sessionIdLength: targetSessionId.length,
+        turnIdLength: turnId.length,
+      });
+      return { accepted: true, ok: true, turnId };
+    } catch (error) {
+      if (isInterruptedWorkspaceChatError(error)) {
+        settleTurn("interrupted", "Stopped.");
+        await durablePersistChain.catch(() => undefined);
+        await reconcileEditedSessionIfNeeded();
+        await finishRuntimeRun();
+        if (isActiveRunRequest()) {
+          activeRunRequestIdsBySession.delete(targetSessionId);
+        }
+        set({ isSendingMessage: false });
+        frontendLogger.info("frontend.workspace", "agent_run_interrupted", {
+          sessionIdLength: targetSessionId.length,
+          turnIdLength: turnId.length,
+        });
+        frontendLogger.info("frontend.workspace", "turn_persisted_after_interrupt", {
+          sessionIdLength: targetSessionId.length,
+          turnIdLength: turnId.length,
+        });
+        return { accepted: true, ok: true, turnId };
+      }
+
+      const message =
+        error instanceof Error && error.message.trim()
+          ? error.message
+          : "Wizzle could not complete the request.";
+
+      settleTurn("error", message);
+      frontendLogger.error("frontend.workspace", "agent_run_failed", {
+        error,
+        sessionIdLength: targetSessionId.length,
+        turnIdLength: turnId.length,
+      });
+
+      try {
+        await durablePersistChain.catch(() => undefined);
+        await reconcileEditedSessionIfNeeded();
+        frontendLogger.info("frontend.workspace", "turn_persisted_after_failure", {
+          sessionIdLength: targetSessionId.length,
+          turnIdLength: turnId.length,
+        });
+      } catch {
+        // Keep the original request error visible in the UI.
+      }
+      await finishRuntimeRun();
+      if (isActiveRunRequest()) {
+        activeRunRequestIdsBySession.delete(targetSessionId);
+      }
+      set({
+        chatError: message,
+        isSendingMessage: false,
+      });
+      return { accepted: false, error: message, ok: false };
+    }
+  },
 }));
