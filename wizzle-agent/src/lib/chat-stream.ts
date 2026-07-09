@@ -5,7 +5,7 @@ import { frontendLogger } from "./logger";
 import { resolveMaxPromptSize } from "./env";
 import { resolveImageAttachmentHardFailError } from "./image-capability";
 import {
-  extractMessageText,
+  extractTitleFromCompletion,
   sanitizeGeneratedSessionTitle,
   type ChatCompletionJson,
 } from "./chat-completion-text";
@@ -19,14 +19,19 @@ import {
 import titleSystemPrompt from "./prompts/title-system-prompt.txt?raw";
 import enhanceSystemPrompt from "./prompts/enhance-system-prompt.txt?raw";
 
-export { extractMessageText, sanitizeGeneratedSessionTitle } from "./chat-completion-text";
+export {
+  extractMessageText,
+  extractTitleFromCompletion,
+  sanitizeGeneratedSessionTitle,
+} from "./chat-completion-text";
 
 type ReasoningLevel = string;
 export const INTERRUPTED_WORKSPACE_CHAT_ERROR = "__WIZZLE_PROVIDER_CHAT_INTERRUPTED__";
 const DEFAULT_REASONING_LEVELS = ["low", "medium", "high", "max"] as const;
 const MAX_TITLE_INPUT_LENGTH = 1_000;
-const MAX_TITLE_OUTPUT_TOKENS = 256;
-const MAX_TITLE_RETRY_OUTPUT_TOKENS = 512;
+// Reasoning models share max_tokens with hidden reasoning; leave headroom for a short content title.
+const MAX_TITLE_OUTPUT_TOKENS = 1_024;
+const MAX_TITLE_RETRY_OUTPUT_TOKENS = 2_048;
 const MAX_ENHANCEMENT_INPUT_LENGTH = 8_000;
 const MAX_ENHANCEMENT_OUTPUT_TOKENS = 4 * 1_024;
 /** Loaded from `prompts/title-system-prompt.txt` (I-4). */
@@ -970,8 +975,8 @@ export async function generateWorkspaceSessionTitle(options: {
       return sanitizeGeneratedSessionTitle(response);
     }
 
-    const extracted = extractMessageText(payload);
-    return sanitizeGeneratedSessionTitle(extracted);
+    // Prefer content; only skim reasoning for a short last-line title if content is empty.
+    return extractTitleFromCompletion(payload);
   }
 
   async function requestTitle(maxTokens: number) {

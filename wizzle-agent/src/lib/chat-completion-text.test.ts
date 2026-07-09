@@ -1,5 +1,7 @@
 import {
+  extractCompletionContentText,
   extractMessageText,
+  extractTitleFromCompletion,
   sanitizeGeneratedSessionTitle,
 } from "./chat-completion-text.ts";
 
@@ -18,56 +20,76 @@ function main() {
   );
 
   assert(
-    extractMessageText({
+    extractCompletionContentText({
       choices: [
         {
           message: {
             content: "",
-            reasoning_content: "I should name this chat.\n\nAuth session timeout",
+            reasoning_content: "long reasoning that must not be content",
           },
         },
       ],
-    }) === "I should name this chat.\n\nAuth session timeout",
-    "reasoning_content fallback when content empty",
+    }) === "",
+    "content extractor ignores reasoning",
   );
 
   assert(
-    extractMessageText({
+    extractTitleFromCompletion({
       choices: [
         {
           message: {
-            content: null,
-            reasoning: "Auth session timeout",
+            content: "Auth refresh tokens",
+            reasoning_content: "I will think about naming...\nmany lines\nof plan",
           },
         },
       ],
-    }) === "Auth session timeout",
-    "reasoning fallback",
+    }) === "Auth refresh tokens",
+    "title prefers content over reasoning",
   );
 
+  const longReasoning = [
+    "The user asked about debugging production 500 errors.",
+    "I should consider logs, deploys, and databases.",
+    "Debugging production 500s",
+  ].join("\n");
+
   assert(
-    extractMessageText({
+    extractTitleFromCompletion({
       choices: [
         {
           message: {
-            content: [{ type: "text", text: "Hello " }, { type: "text", text: "world" }],
+            content: "",
+            reasoning_content: longReasoning,
           },
         },
       ],
-    }) === "Hello world",
-    "content parts array",
+    }) === "Debugging production 500s",
+    "title can take short last line from reasoning only if content empty",
   );
 
   assert(
-    sanitizeGeneratedSessionTitle('<think>long plan</think>\n"Fix login flow"') === "Fix login flow",
+    extractTitleFromCompletion({
+      choices: [
+        {
+          message: {
+            content: "",
+            reasoning_content:
+              "I am carefully analyzing the user request and considering many aspects of the problem without a short title line at the end",
+          },
+        },
+      ],
+    }) === "",
+    "reject long reasoning prose as title",
+  );
+
+  assert(
+    sanitizeGeneratedSessionTitle("a".repeat(120)).length <= 50,
+    "hard cap length",
+  );
+  assert(
+    sanitizeGeneratedSessionTitle('<think>plan</think>\n"Fix login flow"') === "Fix login flow",
     "strip think + quotes",
   );
-  assert(
-    sanitizeGeneratedSessionTitle("Title: Debug API errors\nMore text about stuff") ===
-      "Debug API errors",
-    "title prefix + short line",
-  );
-  assert(sanitizeGeneratedSessionTitle("   ") === "", "empty");
 
   console.log("chat-completion-text tests passed");
 }
