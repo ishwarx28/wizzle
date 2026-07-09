@@ -28,7 +28,7 @@ export {
 type ReasoningLevel = string;
 export const INTERRUPTED_WORKSPACE_CHAT_ERROR = "__WIZZLE_PROVIDER_CHAT_INTERRUPTED__";
 const DEFAULT_REASONING_LEVELS = ["low", "medium", "high", "max"] as const;
-const MAX_TITLE_INPUT_LENGTH = 1_000;
+const MAX_TITLE_INPUT_LENGTH = 1_200;
 // Reasoning models share max_tokens with hidden reasoning; leave headroom for a short content title.
 const MAX_TITLE_OUTPUT_TOKENS = 1_024;
 const MAX_TITLE_RETRY_OUTPUT_TOKENS = 2_048;
@@ -190,6 +190,21 @@ function truncateAtWordBoundary(text: string, maxLength: number) {
   }
 
   return trimmedSlice.slice(0, lastWhitespaceIndex).trimEnd();
+}
+
+/** Keep start + end of long prompts so title input still sees the main topic (I-18). */
+export function summarizeTextForTitleInput(text: string, maxLength: number) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  const headBudget = Math.max(80, Math.floor(maxLength * 0.55));
+  const tailBudget = Math.max(60, maxLength - headBudget - 5);
+  const head = truncateAtWordBoundary(normalized, headBudget);
+  const tailSource = normalized.slice(Math.max(0, normalized.length - tailBudget * 2));
+  const tail = truncateAtWordBoundary(tailSource, tailBudget);
+  return `${head} … ${tail}`.trim();
 }
 
 export function resolvePromptEnhancementInputLimit() {
@@ -925,15 +940,14 @@ export async function generateWorkspaceSessionTitle(options: {
   }
 
   const attachmentList = options.attachments.map((attachment) => attachment.name).join(", ");
-  const sourceText = truncateAtWordBoundary(
-    [
-      options.prompt.trim() ? `First user message:\n${options.prompt.trim()}` : "",
-      attachmentList ? `Attached files:\n${attachmentList}` : "",
-    ]
-      .filter(Boolean)
-      .join("\n\n"),
-    MAX_TITLE_INPUT_LENGTH,
-  );
+  // I-18: long prompts — keep head + tail so topic at either end is not lost.
+  const promptForTitle = summarizeTextForTitleInput(options.prompt.trim(), MAX_TITLE_INPUT_LENGTH);
+  const sourceText = [
+    promptForTitle ? `First user message:\n${promptForTitle}` : "",
+    attachmentList ? `Attached files:\n${attachmentList}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 
   frontendLogger.info("frontend.chat-stream", "title_generation_started", {
     attachmentCount: options.attachments.length,

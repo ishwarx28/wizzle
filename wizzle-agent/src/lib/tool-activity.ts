@@ -79,6 +79,10 @@ export function parseToolPayload(value?: string) {
   }
 }
 
+function isLiveToolStatus(status?: string | null) {
+  return status === "pending" || status === "running" || status === "streaming";
+}
+
 function resolveWriteLabel(resultPayload: ParsedToolPayload | null) {
   return resultPayload?.created === false ? "Edited" : "Created";
 }
@@ -88,16 +92,31 @@ function buildRunDetailLabel(
   resultPayload: ParsedToolPayload | null,
   resourceLabel?: string,
 ) {
+  const live = isLiveToolStatus(toolCall.status) && !resultPayload;
+
   switch (toolCall.name) {
     case "read":
+      if (live) {
+        return resourceLabel ? `Reading ${resourceLabel}` : "Reading a file";
+      }
       return `Read ${resourceLabel ?? "resource"}`;
     case "write":
+      // I-17: mid-run label before path/result is known.
+      if (live) {
+        return "Creating a file";
+      }
       return `${resolveWriteLabel(resultPayload)} ${resourceLabel ?? "resource"}`;
     case "edit":
+      if (live) {
+        return "Editing a file";
+      }
       return `Edited ${resourceLabel ?? "resource"}`;
     case "bash": {
       if (resultPayload?.background === true || resultPayload?.process?.id) {
         return "Started a background process";
+      }
+      if (live) {
+        return "Running a command";
       }
       return "Ran a command";
     }

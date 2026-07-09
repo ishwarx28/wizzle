@@ -31,7 +31,9 @@ function buildEnvironmentBlock(options: {
 }) {
   return [
     "# Runtime Environment",
-    `Project root: ${options.projectRoot}`,
+    // I-16: project root is a directory — never pass it to the read tool as a file path.
+    `Project root (directory): ${options.projectRoot}`,
+    "The project root is a folder path, not a file. List or search inside it; do not use the read tool on the root path itself.",
     `Current year: ${options.currentYear}`,
     `Platform: ${options.platform}`,
     `OS: ${options.operatingSystem}`,

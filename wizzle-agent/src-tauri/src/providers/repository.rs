@@ -22,10 +22,11 @@ use super::{
 };
 
 const DEFAULT_CONTEXT_TOKENS: u64 = 128_000;
-const DEFAULT_REASONING_LEVELS: &[&str] = &["low", "medium", "high", "max"];
+const DEFAULT_REASONING_LEVELS: &[&str] = &["low", "medium", "high", "max", "xhigh"];
 const PROVIDER_YAML_MAX_BYTES: usize = 512 * 1024;
 const PROVIDER_YAML_PATH_ENV: &str = "WIZZLE_PROVIDERS_YAML_PATH";
 const PROVIDER_YAML_INLINE_ENV: &str = "WIZZLE_PROVIDERS_YAML";
+const DEFAULT_PROVIDERS_YAML_NAME: &str = "opencode-models.yaml";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -610,6 +611,9 @@ pub fn import_provider_yaml_text(yaml: &str, source: &str) -> Result<(), String>
 
     let conn = open_database()?;
     let hash = source_hash(yaml);
+    let provider_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM providers", [], |row| row.get(0))
+        .map_err(|error| db_error("Could not count providers", error))?;
 
     let already_imported: Option<String> = conn
         .query_row(
@@ -620,7 +624,8 @@ pub fn import_provider_yaml_text(yaml: &str, source: &str) -> Result<(), String>
         .optional()
         .map_err(|error| db_error("Could not read provider imports", error))?;
 
-    if already_imported.is_some() {
+    // Skip duplicate imports only when providers already exist (I-14: allow re-seed when empty).
+    if already_imported.is_some() && provider_count > 0 {
         return Ok(());
     }
 
@@ -670,7 +675,61 @@ pub fn import_provider_yaml_text(yaml: &str, source: &str) -> Result<(), String>
     Ok(())
 }
 
+fn candidate_default_provider_yaml_paths() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        candidates.push(current_dir.join(DEFAULT_PROVIDERS_YAML_NAME));
+        candidates.push(current_dir.join("..").join(DEFAULT_PROVIDERS_YAML_NAME));
+        candidates.push(
+            current_dir
+                .join("..")
+                .join("..")
+                .join(DEFAULT_PROVIDERS_YAML_NAME),
+        );
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join(DEFAULT_PROVIDERS_YAML_NAME));
+            candidates.push(parent.join("..").join(DEFAULT_PROVIDERS_YAML_NAME));
+            candidates.push(parent.join("Resources").join(DEFAULT_PROVIDERS_YAML_NAME));
+        }
+    }
+
+    candidates
+}
+
+/// I-14: when the providers table is empty, import a default YAML once.
+fn seed_default_providers_if_empty() -> Result<(), String> {
+    let conn = open_database()?;
+    let provider_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM providers", [], |row| row.get(0))
+        .map_err(|error| db_error("Could not count providers", error))?;
+
+    if provider_count > 0 {
+        return Ok(());
+    }
+
+    drop(conn);
+
+    for path in candidate_default_provider_yaml_paths() {
+        if !path.is_file() {
+            continue;
+        }
+
+        let yaml = fs::read_to_string(&path)
+            .map_err(|_| "Could not read the default providers YAML.".to_string())?;
+        return import_provider_yaml_text(&yaml, "seed:default-providers");
+    }
+
+    Ok(())
+}
+
 pub fn import_env_yaml_once() -> Result<(), String> {
+    // Always try to seed defaults when the DB has zero providers (I-14).
+    seed_default_providers_if_empty()?;
+
     let (yaml_source, source_name) = match std::env::var(PROVIDER_YAML_PATH_ENV) {
         Ok(value) if !value.trim().is_empty() => (
             read_provider_yaml_path(&value)?,
@@ -690,8 +749,11 @@ pub fn import_env_yaml_once() -> Result<(), String> {
             row.get(0)
         })
         .map_err(|error| db_error("Could not read provider imports", error))?;
+    let provider_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM providers", [], |row| row.get(0))
+        .map_err(|error| db_error("Could not count providers", error))?;
 
-    if import_count > 0 {
+    if import_count > 0 && provider_count > 0 {
         return Ok(());
     }
 

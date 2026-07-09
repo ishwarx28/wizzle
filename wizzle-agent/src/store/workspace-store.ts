@@ -170,7 +170,12 @@ interface WorkspaceState {
   sendPrompt: (
     prompt: string,
     attachments?: PreviewFile[],
-    options?: { projectId?: string; sessionId?: string },
+    options?: {
+      projectId?: string;
+      /** Re-run agent for an existing user message (I-11 trailing turn). */
+      reuseUserMessageId?: string;
+      sessionId?: string;
+    },
   ) => Promise<SubmitPromptResult>;
 }
 
@@ -195,7 +200,7 @@ type PendingToolApprovalResolver = {
 type SubmitPromptResult =
   | { ok: true; accepted: true; turnId: string }
   | { ok: false; accepted: false; error: string; retryable?: boolean }
-  | { ok: false; accepted: true; turnId: string; error: string };
+  | { ok: false; accepted: true; turnId: string; error: string; retryable?: boolean };
 
 /** Resolvers live for the whole wait; not cleared on session switch (#26). */
 const pendingToolApprovalResolversBySessionId = new Map<string, PendingToolApprovalResolver>();
@@ -221,8 +226,99 @@ function requestComposerQueueDrain(sessionId: string) {
       },
       sendPrompt: (prompt, attachments, options) =>
         useWorkspaceStore.getState().sendPrompt(prompt, attachments, options),
+    }).finally(() => {
+      // I-11: after queue drain, run any trailing user turn that never got an agent start.
+      void continueTrailingUnansweredUserTurn(sessionId).catch(() => undefined);
     });
   });
+}
+
+function isPendingAssistantPlaceholder(message: Message) {
+  return (
+    message.role === "assistant" && message.id.startsWith("message-assistant-pending-")
+  );
+}
+
+/** Last user turn with no real assistant/tool work (I-11). Ignores Working… placeholders. */
+function findTrailingUnansweredUserMessage(session: Session): Message | null {
+  for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+    const message = session.messages[index]!;
+    if (isPendingAssistantPlaceholder(message)) {
+      continue;
+    }
+    if (message.role === "user") {
+      const turnId = message.turnId;
+      if (!turnId) {
+        return message;
+      }
+      const hasReply = session.messages.some((entry) => {
+        if (entry.turnId !== turnId) {
+          return false;
+        }
+        if (entry.role === "tool") {
+          return true;
+        }
+        if (entry.role === "assistant" && !isPendingAssistantPlaceholder(entry)) {
+          return true;
+        }
+        return false;
+      });
+      return hasReply ? null : message;
+    }
+    if (message.role === "assistant" || message.role === "tool") {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * If a user message was kept after begin_session_run failed (already running),
+ * start the agent once the previous run finishes (I-11).
+ * Implemented via getter to avoid circular type inference on the store.
+ */
+let continueTrailingUnansweredUserTurn: (sessionId: string) => Promise<void> = async () =>
+  undefined;
+
+/** Keep local messages that landed after a stale hydrate snapshot started (I-11). */
+function mergeHydratedSession(local: Session | undefined, loaded: Session): Session {
+  if (!local?.messagesLoaded || local.messages.length === 0) {
+    return { ...loaded, messagesLoaded: true };
+  }
+
+  const loadedIds = new Set(loaded.messages.map((message) => message.id));
+  const extras = local.messages.filter((message) => !loadedIds.has(message.id));
+  if (extras.length === 0) {
+    return { ...loaded, messagesLoaded: true };
+  }
+
+  const mergedMessages = [...loaded.messages, ...extras].sort(
+    (left, right) => (left.createdAtMs ?? 0) - (right.createdAtMs ?? 0),
+  );
+
+  return {
+    ...loaded,
+    messages: mergedMessages,
+    messagesLoaded: true,
+  };
+}
+
+function createPendingAssistantPlaceholder(turnId: string): Message {
+  const createdAtMs = Date.now();
+  return {
+    assistantPhase: "pending",
+    content: "",
+    createdAtLabel: formatExactMessageTimestamp(createdAtMs),
+    createdAtMs,
+    id: `message-assistant-pending-${turnId}`,
+    parts: [],
+    role: "assistant",
+    startedAtMs: createdAtMs,
+    status: "streaming",
+    toolCalls: [],
+    toolResults: [],
+    turnId,
+  };
 }
 
 function withSendingSessionState(
@@ -950,7 +1046,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     void loadWorkspaceSession(projectId, sessionId)
       .then(({ previewFiles, session }) => {
         set((state) => {
-          const nextProjects = replacePersistedSession(state.projects, projectId, sessionId, session);
+          const localSession = resolvePersistedSession(state.projects, projectId, sessionId);
+          const mergedSession = mergeHydratedSession(localSession ?? undefined, session);
+          const nextProjects = replacePersistedSession(
+            state.projects,
+            projectId,
+            sessionId,
+            mergedSession,
+          );
 
           if (!nextProjects) {
             return state;
@@ -1181,7 +1284,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     });
     await interruptWorkspaceChat({ sessionId });
   },
-  sendPrompt: async (prompt, attachments = [], options) => {
+  sendPrompt: async (prompt, attachments = [], options): Promise<SubmitPromptResult> => {
     const initialState = useWorkspaceStore.getState();
     const content = prompt.trim();
     // Allow queue drain for a non-selected session (#43).
@@ -1198,9 +1301,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     }
 
     // Block only if *this* session is already running (#27). Other sessions can send.
+    // reuseUserMessageId continues an existing bubble after a failed begin (I-11).
     if (
-      (targetSessionId && initialState.sendingSessionIds.includes(targetSessionId)) ||
-      (!content && attachments.length === 0)
+      (targetSessionId &&
+        initialState.sendingSessionIds.includes(targetSessionId) &&
+        !options?.reuseUserMessageId) ||
+      (!content && attachments.length === 0 && !options?.reuseUserMessageId)
     ) {
       return { accepted: false, error: "The chat is not ready for another message.", ok: false };
     }
@@ -1252,21 +1358,32 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       initialState.activeMessageEdit.sessionId === targetSessionId
         ? initialState.activeMessageEdit
         : null;
-    const userMessage = createUserMessage(content, attachments, {
-      editedAtMs: activeMessageEdit ? Date.now() : undefined,
-    });
+
+    const reusedUserMessage =
+      options?.reuseUserMessageId && targetSessionId
+        ? resolvePersistedSession(initialState.projects, targetProjectId, targetSessionId)?.messages.find(
+            (message) => message.id === options.reuseUserMessageId,
+          )
+        : null;
+
+    if (options?.reuseUserMessageId && !reusedUserMessage) {
+      return { accepted: false, error: "That message is no longer available to continue.", ok: false };
+    }
+
+    // Reuse path: do not push a duplicate user bubble (I-11).
+    if (reusedUserMessage && initialState.sendingSessionIds.includes(targetSessionId as string)) {
+      return { accepted: false, error: "The chat is not ready for another message.", ok: false, retryable: true };
+    }
+
+    const userMessage =
+      reusedUserMessage ??
+      createUserMessage(content, attachments, {
+        editedAtMs: activeMessageEdit ? Date.now() : undefined,
+      });
     const turnId = userMessage.turnId ?? `turn-${crypto.randomUUID()}`;
     const nextPreviewFiles = mergePreviewFiles(initialState.previewFiles, attachments);
     const draftSession = initialState.draftSessions[targetProjectId];
-    const isDraftSelection = draftSession?.id === targetSessionId;
-    const rollbackState = {
-      activeMessageEdit: initialState.activeMessageEdit,
-      draftSessions: initialState.draftSessions,
-      previewFiles: initialState.previewFiles,
-      projects: initialState.projects,
-      selectedProjectId: initialState.selectedProjectId,
-      selectedSessionId: initialState.selectedSessionId,
-    };
+    const isDraftSelection = draftSession?.id === targetSessionId && !reusedUserMessage;
     frontendLogger.info("frontend.workspace", "send_prompt_started", {
       attachmentCount: attachments.length,
       isEditingMessage: Boolean(activeMessageEdit),
@@ -1294,7 +1411,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         const nextProjects = prependPersistedSession(state.projects, targetProjectId, {
           createdAtMs: timestamp,
           id: targetSessionId,
-          messages: [userMessage],
+          messages: [userMessage, createPendingAssistantPlaceholder(turnId)],
           messagesLoaded: true,
           modelId: state.modelId,
           permissionMode: state.permissionMode,
@@ -1376,10 +1493,22 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           targetSessionId as string,
           (session) => {
             const timestamp = Date.now();
-            if (activeMessageEdit) {
+            if (reusedUserMessage) {
+              // Message already in transcript — only ensure Working… placeholder (I-15).
+              const hasPlaceholder = session.messages.some(
+                (message) =>
+                  message.turnId === turnId && isPendingAssistantPlaceholder(message),
+              );
+              if (!hasPlaceholder) {
+                session.messages.push(createPendingAssistantPlaceholder(turnId));
+              }
+            } else if (activeMessageEdit) {
               replaceEditedTurnMessages(session, activeMessageEdit, userMessage);
+              session.messages.push(createPendingAssistantPlaceholder(turnId));
             } else {
               session.messages.push(userMessage);
+              // I-15: show Working… immediately (before stream / tools).
+              session.messages.push(createPendingAssistantPlaceholder(turnId));
             }
             session.modelId = state.modelId;
             session.permissionMode = state.permissionMode;
@@ -1412,7 +1541,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       });
       frontendLogger.info(
         "frontend.workspace",
-        activeMessageEdit ? "message_replaced_in_session" : "message_appended_to_session",
+        activeMessageEdit
+          ? "message_replaced_in_session"
+          : reusedUserMessage
+            ? "message_reuse_for_agent"
+            : "message_appended_to_session",
         {
           sessionIdLength: targetSessionId.length,
           turnIdLength: turnId.length,
@@ -1442,16 +1575,48 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           ? error.message
           : "That session already has an active run.";
       const retryable = isSessionAlreadyRunningError(error) || isSessionAlreadyRunningError(message);
+      // I-11: never wipe the optimistic user message after it was appended.
+      // Keep projects/selection; only clear the sending flag. Persist best-effort.
       set((state) => ({
-        ...rollbackState,
-        // Retryable coalesce: do not sticky-error the chat; queue will re-drain on wake (#29).
         chatError: retryable ? state.chatError : message,
         ...withSendingSessionState(
-          rollbackState.selectedSessionId,
+          state.selectedSessionId,
           removeSendingSessionId(targetSessionId, state.sendingSessionIds),
         ),
       }));
-      return { accepted: false, error: message, ok: false, retryable };
+      void appendOrUpdateMessage({
+        message: userMessage,
+        previewFiles: nextPreviewFiles,
+        projectId: targetProjectId,
+        sessionId: targetSessionId,
+      })
+        .then(() => {
+          set((state) => {
+            const nextProjects = updatePersistedSession(
+              state.projects,
+              targetProjectId,
+              targetSessionId as string,
+              (session) => {
+                const targetMessage = session.messages.find(
+                  (entry) => entry.id === userMessage.id,
+                );
+                if (targetMessage) {
+                  targetMessage.isStored = true;
+                }
+              },
+            );
+            return nextProjects ? { projects: nextProjects } : state;
+          });
+        })
+        .catch(() => undefined);
+      // accepted: true keeps draft cleared; agent continues when the prior run finishes (I-11).
+      return {
+        accepted: true,
+        error: message,
+        ok: false,
+        retryable,
+        turnId,
+      };
     }
     const runRequestId = crypto.randomUUID();
     activeRunRequestIdsBySession.set(targetSessionId, runRequestId);
@@ -1616,11 +1781,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         error instanceof Error && error.message.trim()
           ? error.message
           : "Wizzle could not save the chat.";
+      // I-11: keep the user message in the transcript; do not restore pre-send project snapshot.
       set((state) => ({
-        ...rollbackState,
         chatError: message,
         ...withSendingSessionState(
-          rollbackState.selectedSessionId,
+          state.selectedSessionId,
           removeSendingSessionId(targetSessionId, state.sendingSessionIds),
         ),
       }));
@@ -1638,7 +1803,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         }).catch(() => undefined);
       }
       activeRunRequestIdsBySession.delete(targetSessionId);
-      return { accepted: false, error: message, ok: false };
+      // accepted true: draft stays cleared; message remains visible for retry/restart.
+      return { accepted: true, error: message, ok: false, turnId };
     }
 
     let activeAssistantMessageId: string | null = null;
@@ -2035,6 +2201,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           targetProjectId,
           targetSessionId as string,
           (session) => {
+            // I-15: replace pre-send Working… placeholder with the real assistant message.
+            session.messages = session.messages.filter(
+              (entry) =>
+                !(
+                  entry.turnId === turnId &&
+                  (isPendingAssistantPlaceholder(entry) ||
+                    (entry.role === "assistant" &&
+                      entry.status === "streaming" &&
+                      entry.id.startsWith("message-assistant-pending-")))
+                ),
+            );
             session.messages.push(message);
             session.updatedAtLabel = nowLabel();
             session.updatedAtMs = Date.now();
@@ -2847,7 +3024,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
       await runWorkspaceAgent({
         chatId: targetSessionId,
-        history: session.messages,
+        // Exclude pre-send Working… placeholders from model context (I-15).
+        history: session.messages.filter((message) => !isPendingAssistantPlaceholder(message)),
         modelId: currentState.modelId,
         modelCapabilities: selectedProviderModel.capabilities,
         compactedContext: session.compactedContext ?? null,
@@ -3112,3 +3290,40 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     }
   },
 }));
+
+continueTrailingUnansweredUserTurn = async (sessionId: string) => {
+  const state = useWorkspaceStore.getState();
+  if (state.sendingSessionIds.includes(sessionId)) {
+    return;
+  }
+
+  let projectId: string | null = null;
+  let session: Session | null = null;
+  for (const project of state.projects) {
+    const found = project.sessions.find((entry) => entry.id === sessionId);
+    if (found) {
+      projectId = project.id;
+      session = found;
+      break;
+    }
+  }
+
+  if (!projectId || !session) {
+    return;
+  }
+
+  const trailing = findTrailingUnansweredUserMessage(session);
+  if (!trailing) {
+    return;
+  }
+
+  const attachments = (trailing.linkedFileIds ?? [])
+    .map((fileId) => state.previewFiles.find((file) => file.id === fileId))
+    .filter((file): file is PreviewFile => Boolean(file));
+
+  await useWorkspaceStore.getState().sendPrompt(trailing.content, attachments, {
+    projectId,
+    sessionId,
+    reuseUserMessageId: trailing.id,
+  });
+};

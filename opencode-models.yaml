@@ -17,6 +17,7 @@ providers:
           - medium
           - high
           - max
+          - xhigh
         maxContext: 128000
         # Optional model-level tokenizer (overrides provider tokenizerJson).
         # tokenizerJson: "https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/tokenizer.json"
@@ -29,6 +30,8 @@ providers:
           - low
           - medium
           - high
+          - max
+          - xhigh
         maxContext: 128000
         tokenizerKind: heuristic
       - modelId: mimo-v2.5-free
@@ -40,5 +43,7 @@ providers:
           - low
           - medium
           - high
+          - max
+          - xhigh
         maxContext: 128000
         tokenizerKind: heuristic

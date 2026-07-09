@@ -1829,18 +1829,22 @@ export function Composer({
 
                     {selectedReasoningLevels.length > 0 ? (
                       <div className="border-b border-[var(--color-border)] px-3 py-2">
-                        <div className="mb-1.5 text-[11px] font-medium text-[var(--color-text-tertiary)]">
+                        <div className="mb-1.5 text-[10px] font-medium text-[var(--color-text-tertiary)]">
                           Reasoning
                         </div>
-                        <div className="flex flex-wrap gap-1.5">
+                        <div className="flex flex-wrap gap-1">
                           {selectedReasoningLevels.map((level) => {
                             const isSelectedLevel = level === selectedReasoningLevel;
-                            const label = level.charAt(0).toUpperCase() + level.slice(1);
+                            // Preserve casing for xhigh / max (I-13).
+                            const label =
+                              level.length <= 4
+                                ? level.toUpperCase()
+                                : level.charAt(0).toUpperCase() + level.slice(1);
 
                             return (
                               <button
                                 className={[
-                                  "rounded-full border px-2.5 py-1 text-[12px] transition",
+                                  "rounded-full border px-2 py-0.5 text-[10px] leading-none transition",
                                   isSelectedLevel
                                     ? "border-[var(--color-border-strong)] bg-[var(--color-accent)] text-[var(--color-accent-foreground)]"
                                     : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]",
