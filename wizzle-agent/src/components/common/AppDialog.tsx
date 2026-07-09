@@ -5,6 +5,8 @@ interface AppDialogProps {
   actions: ReactNode;
   description?: string;
   onClose: () => void;
+  /** Wider panel for multi-field forms (provider editor). */
+  size?: "default" | "wide";
   title: string;
 }
 
@@ -13,8 +15,11 @@ export function AppDialog({
   children,
   description,
   onClose,
+  size = "default",
   title,
 }: PropsWithChildren<AppDialogProps>) {
+  const maxWidthClass = size === "wide" ? "max-w-[720px]" : "max-w-[380px]";
+
   return createPortal(
     <div
       className="fixed inset-0 z-[400] flex items-center justify-center bg-black/45 px-4 backdrop-blur-[2px]"
@@ -27,7 +32,7 @@ export function AppDialog({
       role="dialog"
     >
       <div
-        className="relative w-full max-w-[380px] rounded-[26px] border border-[var(--color-border)] bg-[var(--color-panel)] p-5 shadow-[0_22px_60px_rgba(0,0,0,0.34)]"
+        className={`relative w-full ${maxWidthClass} max-h-[min(90vh,880px)] overflow-y-auto rounded-[26px] border border-[var(--color-border)] bg-[var(--color-panel)] p-5 shadow-[0_22px_60px_rgba(0,0,0,0.34)]`}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="space-y-1">

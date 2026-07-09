@@ -151,10 +151,18 @@ export async function deleteProvider(providerId: string) {
   });
 }
 
-export async function refreshProviderModels(providerId: string) {
+export async function refreshProviderModels(
+  providerId: string,
+  options?: {
+    fetchAll?: boolean;
+    removeInvalid?: boolean;
+  },
+) {
   return invoke<ProviderModelInfo[]>("refresh_provider_models", {
     input: {
+      fetchAll: options?.fetchAll ?? false,
       providerId,
+      removeInvalid: options?.removeInvalid ?? false,
     },
   });
 }

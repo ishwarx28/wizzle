@@ -566,6 +566,11 @@ pub fn list_models() -> Result<Vec<ProviderModelPayload>, String> {
 pub async fn refresh_provider_models(
     input: RefreshProviderModelsInput,
 ) -> Result<Vec<ProviderModelPayload>, String> {
+    // None selected → intentional no-op (I-25).
+    if !input.fetch_all && !input.remove_invalid {
+        return list_models();
+    }
+
     let provider = load_provider_secret(&input.provider_id)?;
 
     if !matches!(
@@ -575,16 +580,53 @@ pub async fn refresh_provider_models(
         return Err("Model refresh is not available for this provider type yet.".to_string());
     }
 
-    let models = openai_compatible::fetch_models(&provider).await?;
+    let remote_models = openai_compatible::fetch_models(&provider).await?;
     let conn = open_database()?;
+    let remote_ids: std::collections::HashSet<String> = remote_models
+        .iter()
+        .map(|model| model.model_id.clone())
+        .collect();
 
-    for mut model in models {
-        // Refresh must not wipe a user-configured tokenizer.json.
-        if model.tokenizer_json.is_none() {
-            model.tokenizer_json =
-                load_model_tokenizer_json(&conn, &provider.id, &model.model_id)?;
+    if input.fetch_all {
+        for mut model in remote_models {
+            // Refresh must not wipe a user-configured tokenizer.json.
+            if model.tokenizer_json.is_none() {
+                model.tokenizer_json =
+                    load_model_tokenizer_json(&conn, &provider.id, &model.model_id)?;
+            }
+            insert_or_update_model(&conn, &provider.id, model)?;
         }
-        insert_or_update_model(&conn, &provider.id, model)?;
+    }
+
+    if input.remove_invalid {
+        let local_model_ids: Vec<String> = {
+            let mut statement = conn
+                .prepare("SELECT model_id FROM models WHERE provider_id = ?1")
+                .map_err(|error| db_error("Could not list local models for refresh", error))?;
+            let rows = statement
+                .query_map(params![provider.id], |row| row.get::<_, String>(0))
+                .map_err(|error| db_error("Could not list local models for refresh", error))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| db_error("Could not list local models for refresh", error))?
+        };
+
+        for model_id in local_model_ids {
+            if remote_ids.contains(&model_id) {
+                continue;
+            }
+
+            conn.execute(
+                "DELETE FROM models WHERE provider_id = ?1 AND model_id = ?2",
+                params![provider.id, model_id],
+            )
+            .map_err(|error| db_error("Could not remove invalid provider model", error))?;
+            let _ = clear_tokenizer(
+                &provider.id,
+                TokenizerScope::Model {
+                    model_id: model_id.as_str(),
+                },
+            );
+        }
     }
 
     list_models()
@@ -927,7 +969,44 @@ mod tests {
         assert_eq!(model.model_id, "gpt-test");
         assert_eq!(model.max_context, 128_000);
         assert_eq!(model.capabilities, vec!["text", "image"]);
-        assert_eq!(model.reasoning_levels, vec!["low", "medium", "high", "max"]);
+        assert_eq!(
+            model.reasoning_levels,
+            vec!["low", "medium", "high", "max", "xhigh"]
+        );
+    }
+
+    #[test]
+    fn model_definition_empty_capabilities_defaults_to_text() {
+        let model = model_from_definition(ProviderModelDefinitionInput {
+            capabilities: Some(vec![]),
+            display_name: None,
+            max_context: None,
+            max_output_tokens: None,
+            model_id: "gpt-empty-caps".to_string(),
+            reasoning_levels: None,
+            tokenizer_kind: None,
+            tokenizer_json: None,
+        })
+        .expect("model definition");
+
+        assert_eq!(model.capabilities, vec!["text"]);
+    }
+
+    #[test]
+    fn model_definition_blank_capabilities_defaults_to_text() {
+        let model = model_from_definition(ProviderModelDefinitionInput {
+            capabilities: Some(vec!["".to_string(), "   ".to_string()]),
+            display_name: None,
+            max_context: None,
+            max_output_tokens: None,
+            model_id: "gpt-blank-caps".to_string(),
+            reasoning_levels: None,
+            tokenizer_kind: None,
+            tokenizer_json: None,
+        })
+        .expect("model definition");
+
+        assert_eq!(model.capabilities, vec!["text"]);
     }
 
     #[test]

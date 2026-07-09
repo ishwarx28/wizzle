@@ -40,6 +40,12 @@ pub struct DeleteProviderInput {
 #[serde(rename_all = "camelCase")]
 pub struct RefreshProviderModelsInput {
     pub provider_id: String,
+    /// Upsert every model returned by the provider `/models` list.
+    #[serde(default)]
+    pub fetch_all: bool,
+    /// Drop local models that are not present on the remote `/models` list.
+    #[serde(default)]
+    pub remove_invalid: bool,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
