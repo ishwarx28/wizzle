@@ -777,8 +777,16 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
     modelRows.length === 1 && isEmptyDraftRow(modelRows[0] ?? emptyModelRow);
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto px-8 py-8" data-provider-dialog>
-      <div className="mx-auto flex max-w-[1080px] flex-col gap-6">
+    <div
+      className="min-h-0 min-w-0 flex-1 overflow-y-auto px-5 py-6 sm:px-6 sm:py-8 lg:px-8"
+      data-provider-dialog
+    >
+      {/*
+        Width follows the main panel (not the viewport). auto-fit columns use the
+        available content width so opening the sidebar does not force skinny tiles
+        while empty track space sits unused.
+      */}
+      <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
             <button
@@ -834,7 +842,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
           </p>
         ) : null}
 
-        <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <section className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr))]">
           {providers.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-[var(--color-border)] p-4 text-[13px] text-[var(--color-text-secondary)]">
               No providers configured. Use <span className="font-medium text-[var(--color-text)]">Add</span> or{" "}
@@ -843,7 +851,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
           ) : (
             providers.map((provider) => (
               <article
-                className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-card)] p-4"
+                className="min-w-0 rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-card)] p-4"
                 key={provider.id}
               >
                 <div className="flex items-start justify-between gap-3">
