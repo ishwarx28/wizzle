@@ -454,28 +454,65 @@ fn load_attachment_preview(
     Ok(payload)
 }
 
+/// Crash/reload recovery (#8): unfinished `streaming` must become `interrupted`, never `done`.
+/// Kept in sync with `sqlite_repository::recover_unfinished_streaming_message`.
 fn normalize_message_record(record: StoredMessageRecord) -> StoredMessageRecord {
-    if record.status.as_deref() != Some("streaming") {
+    let message_streaming = record.status.as_deref() == Some("streaming");
+    let has_streaming_parts = record
+        .parts
+        .iter()
+        .any(|part| part.status.as_deref() == Some("streaming"));
+
+    if !message_streaming && !has_streaming_parts {
         return record;
     }
 
-    let has_content = !record.content.trim().is_empty();
-    let has_reasoning = record
-        .reasoning
-        .as_ref()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
+    let mut record = record;
 
-    StoredMessageRecord {
-        assistant_phase: record.assistant_phase,
-        content: if has_content || has_reasoning {
-            record.content
-        } else {
-            "Response interrupted.".to_string()
-        },
-        status: Some("done".to_string()),
-        ..record
+    if message_streaming {
+        let has_visible_content = !record.content.trim().is_empty()
+            || record
+                .reasoning
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty())
+            || record.parts.iter().any(|part| {
+                matches!(part.r#type.as_str(), "content" | "activity_content")
+                    && part
+                        .content
+                        .as_ref()
+                        .is_some_and(|value| !value.trim().is_empty())
+            });
+
+        if record.role == "assistant" && !has_visible_content {
+            record.content = "Response interrupted.".to_string();
+        }
+
+        record.status = Some("interrupted".to_string());
+        if record.completed_at_ms.is_none() {
+            record.completed_at_ms = Some(record.created_at);
+        }
     }
+
+    for part in &mut record.parts {
+        if part.status.as_deref() == Some("streaming")
+            || (message_streaming && part.status.is_none())
+        {
+            part.status = Some("interrupted".to_string());
+        }
+    }
+
+    for tool_call in &mut record.tool_calls {
+        if message_streaming
+            && matches!(
+                tool_call.status.as_deref(),
+                Some("streaming" | "pending" | "running") | None
+            )
+        {
+            tool_call.status = Some("interrupted".to_string());
+        }
+    }
+
+    record
 }
 
 fn to_workspace_message(

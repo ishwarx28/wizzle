@@ -1065,22 +1065,63 @@ fn to_workspace_turn_summary(record: StoredTurnSummaryRecord) -> WorkspaceTurnSu
     }
 }
 
-fn normalize_message_record(record: StoredMessageRecord) -> StoredMessageRecord {
-    if record.status.as_deref() != Some("streaming") {
+/// Crash/reload recovery (#8): unfinished `streaming` must become `interrupted`, never `done`.
+fn recover_unfinished_streaming_message(mut record: StoredMessageRecord) -> StoredMessageRecord {
+    let message_streaming = record.status.as_deref() == Some("streaming");
+    let has_streaming_parts = record
+        .parts
+        .iter()
+        .any(|part| part.status.as_deref() == Some("streaming"));
+
+    if !message_streaming && !has_streaming_parts {
         return record;
     }
 
-    let has_content = !record.content.trim().is_empty();
-    StoredMessageRecord {
-        assistant_phase: record.assistant_phase,
-        content: if has_content {
-            record.content
-        } else {
-            "Response interrupted.".to_string()
-        },
-        status: Some("done".to_string()),
-        ..record
+    if message_streaming {
+        let has_visible_content = !record.content.trim().is_empty()
+            || record.parts.iter().any(|part| {
+                matches!(part.r#type.as_str(), "content" | "activity_content")
+                    && part
+                        .content
+                        .as_ref()
+                        .is_some_and(|value| !value.trim().is_empty())
+            });
+
+        // Keep any partial text; only inject fallback when the assistant is empty.
+        if record.role == "assistant" && !has_visible_content {
+            record.content = "Response interrupted.".to_string();
+        }
+
+        record.status = Some("interrupted".to_string());
+        if record.completed_at_ms.is_none() {
+            record.completed_at_ms = Some(record.created_at);
+        }
     }
+
+    for part in &mut record.parts {
+        if part.status.as_deref() == Some("streaming")
+            || (message_streaming && part.status.is_none())
+        {
+            part.status = Some("interrupted".to_string());
+        }
+    }
+
+    for tool_call in &mut record.tool_calls {
+        if message_streaming
+            && matches!(
+                tool_call.status.as_deref(),
+                Some("streaming" | "pending" | "running") | None
+            )
+        {
+            tool_call.status = Some("interrupted".to_string());
+        }
+    }
+
+    record
+}
+
+fn normalize_message_record(record: StoredMessageRecord) -> StoredMessageRecord {
+    recover_unfinished_streaming_message(record)
 }
 
 fn derive_legacy_steps(record: &StoredMessageRecord) -> Vec<StoredMessageStepRecord> {
@@ -1566,14 +1607,8 @@ fn load_session_history(
             _ => {}
         }
 
-        if message.status.as_deref() == Some("streaming") && message.completed_at_ms.is_none() {
-            message.status = Some("interrupted".to_string());
-            for part in &mut message.parts {
-                if part.status.as_deref() == Some("streaming") || part.status.is_none() {
-                    part.status = Some("interrupted".to_string());
-                }
-            }
-        }
+        // Same recovery as JSON/legacy load: never promote unfinished streams to done (#8).
+        *message = recover_unfinished_streaming_message(std::mem::take(message));
     }
 
     fn parse_summary_message_ids(raw_value: Option<String>) -> Result<Vec<String>, String> {
@@ -4775,5 +4810,78 @@ mod tests {
         assert_eq!(state.queued_messages.len(), 1);
         assert_eq!(state.queued_messages[0].id, "queue-new");
         assert_eq!(state.queued_messages[0].status, "queued");
+    }
+
+    #[test]
+    fn unfinished_streaming_message_becomes_interrupted_not_done() {
+        let record = StoredMessageRecord {
+            content: "partial answer".to_string(),
+            created_at: 1_000,
+            id: "message-assistant-1".to_string(),
+            role: "assistant".to_string(),
+            status: Some("streaming".to_string()),
+            parts: vec![StoredMessageStepRecord {
+                content: Some("partial answer".to_string()),
+                id: "part-1".to_string(),
+                status: Some("streaming".to_string()),
+                r#type: "content".to_string(),
+                ..StoredMessageStepRecord::default()
+            }],
+            ..StoredMessageRecord::default()
+        };
+
+        let recovered = recover_unfinished_streaming_message(record);
+        assert_eq!(recovered.status.as_deref(), Some("interrupted"));
+        assert_ne!(recovered.status.as_deref(), Some("done"));
+        assert_eq!(recovered.content, "partial answer");
+        assert_eq!(recovered.parts[0].status.as_deref(), Some("interrupted"));
+        assert_eq!(recovered.completed_at_ms, Some(1_000));
+    }
+
+    #[test]
+    fn empty_streaming_assistant_gets_interrupted_fallback_text() {
+        let record = StoredMessageRecord {
+            content: String::new(),
+            created_at: 2_000,
+            id: "message-assistant-2".to_string(),
+            role: "assistant".to_string(),
+            status: Some("streaming".to_string()),
+            parts: vec![StoredMessageStepRecord {
+                id: "part-empty".to_string(),
+                status: Some("streaming".to_string()),
+                r#type: "content".to_string(),
+                ..StoredMessageStepRecord::default()
+            }],
+            ..StoredMessageRecord::default()
+        };
+
+        let recovered = recover_unfinished_streaming_message(record);
+        assert_eq!(recovered.status.as_deref(), Some("interrupted"));
+        assert_eq!(recovered.content, "Response interrupted.");
+        assert_eq!(recovered.parts[0].status.as_deref(), Some("interrupted"));
+    }
+
+    #[test]
+    fn done_messages_are_unchanged_by_stream_recovery() {
+        let record = StoredMessageRecord {
+            content: "finished".to_string(),
+            created_at: 3_000,
+            id: "message-assistant-3".to_string(),
+            role: "assistant".to_string(),
+            status: Some("done".to_string()),
+            parts: vec![StoredMessageStepRecord {
+                content: Some("finished".to_string()),
+                id: "part-done".to_string(),
+                status: Some("done".to_string()),
+                r#type: "content".to_string(),
+                ..StoredMessageStepRecord::default()
+            }],
+            ..StoredMessageRecord::default()
+        };
+
+        let recovered = recover_unfinished_streaming_message(record.clone());
+        assert_eq!(recovered.status.as_deref(), Some("done"));
+        assert_eq!(recovered.content, "finished");
+        assert_eq!(recovered.parts[0].status.as_deref(), Some("done"));
     }
 }
