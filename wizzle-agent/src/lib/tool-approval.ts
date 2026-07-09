@@ -45,6 +45,7 @@ export function createToolApprovalRequest(input: {
   globalSkillsDir?: string;
   permissionMode: PermissionMode;
   projectRoot: string;
+  sessionId: string;
   toolCallId: string;
   toolName: string;
 }): ToolApprovalRequest | null {
@@ -70,6 +71,7 @@ export function createToolApprovalRequest(input: {
   return {
     command: toolName === "bash" ? payload.command?.trim() : undefined,
     path: toolName !== "bash" ? payload.path?.trim() : undefined,
+    sessionId: input.sessionId,
     summary: summarizeRequest(toolName, payload),
     timeout: payload.timeout ?? DEFAULT_TOOL_TIMEOUT,
     toolCallId: input.toolCallId,

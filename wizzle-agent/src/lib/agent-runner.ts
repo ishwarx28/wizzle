@@ -237,6 +237,7 @@ export async function runWorkspaceAgent(options: {
   requestToolApproval: (request: {
     command?: string;
     path?: string;
+    sessionId: string;
     summary: string;
     timeout: string;
     toolCallId: string;
@@ -515,6 +516,7 @@ export async function runWorkspaceAgent(options: {
           globalSkillsDir: projectContext.globalSkillsDir ?? undefined,
           permissionMode: options.permissionMode,
           projectRoot: projectContext.projectRoot,
+          sessionId: options.chatId,
           toolCallId: toolCall.id,
           toolName: toolCall.function.name,
         });

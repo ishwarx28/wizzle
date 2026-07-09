@@ -9,7 +9,10 @@ import { usePanelResize } from "../hooks/use-panel-resize";
 import { useWindowDrag } from "../hooks/use-window-drag";
 import { frontendLogger } from "../lib/logger";
 import { listProviderModels, listProviders, loadWorkspaceSnapshot } from "../lib/local-workspace";
-import { useWorkspaceStore } from "../store/workspace-store";
+import {
+  interruptAllWorkspaceRunsForShutdown,
+  useWorkspaceStore,
+} from "../store/workspace-store";
 
 function shouldAllowNativeContextMenu(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) {
@@ -130,6 +133,33 @@ export function AppPage() {
       isMounted = false;
     };
   }, [setProviderConfig]);
+
+  useEffect(() => {
+    // App close / refresh: pending approvals cannot be completed by a dead process.
+    // Resolve them as interrupted and stop in-flight session runs (#26 restart policy).
+    const handlePageHide = () => {
+      void interruptAllWorkspaceRunsForShutdown();
+    };
+
+    window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("beforeunload", handlePageHide);
+
+    let unlistenClose: (() => void) | undefined;
+    void import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) => getCurrentWindow().onCloseRequested(async () => {
+        await interruptAllWorkspaceRunsForShutdown();
+      }))
+      .then((unlisten) => {
+        unlistenClose = unlisten;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("beforeunload", handlePageHide);
+      unlistenClose?.();
+    };
+  }, []);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {

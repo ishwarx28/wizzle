@@ -49,6 +49,8 @@ export interface ProviderModelInfo {
 export interface ToolApprovalRequest {
   command?: string;
   path?: string;
+  /** Session that owns this pending approval (survives UI session switches). */
+  sessionId: string;
   summary: string;
   timeout: string;
   toolCallId: string;

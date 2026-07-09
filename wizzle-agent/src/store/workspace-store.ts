@@ -88,6 +88,12 @@ interface WorkspaceState {
   sendingSessionIds: string[];
   /** Inline context compaction status per session (#81). */
   sessionContextStatus: Record<string, ContextCompactionStatus>;
+  /**
+   * Pending tool approvals keyed by session id.
+   * Survive session switches; only the selected session's entry is shown in UI (#26/#28).
+   */
+  pendingToolApprovalsBySessionId: Record<string, ToolApprovalRequest>;
+  /** Convenience: approval for the currently selected session (derived). */
   pendingToolApproval: ToolApprovalRequest | null;
   providerModels: ProviderModelInfo[];
   providerModelsError: string | null;
@@ -143,6 +149,7 @@ type PendingToolApprovalResolution = {
 
 type PendingToolApprovalResolver = {
   resolve: (resolution: PendingToolApprovalResolution) => void;
+  sessionId: string;
   toolCallId: string;
 };
 
@@ -151,7 +158,8 @@ type SubmitPromptResult =
   | { ok: false; accepted: false; error: string }
   | { ok: false; accepted: true; turnId: string; error: string };
 
-let pendingToolApprovalResolver: PendingToolApprovalResolver | null = null;
+/** Resolvers live for the whole wait; not cleared on session switch (#26). */
+const pendingToolApprovalResolversBySessionId = new Map<string, PendingToolApprovalResolver>();
 const activeRunRequestIdsBySession = new Map<string, string>();
 
 function withSendingSessionState(
@@ -164,14 +172,75 @@ function withSendingSessionState(
   };
 }
 
-function rejectPendingToolApproval(interrupted = false) {
-  if (pendingToolApprovalResolver) {
-    pendingToolApprovalResolver.resolve({
-      approved: false,
-      interrupted,
-    });
-    pendingToolApprovalResolver = null;
+function resolvePendingApprovalForSelection(
+  selectedSessionId: string | null,
+  pendingToolApprovalsBySessionId: Record<string, ToolApprovalRequest>,
+) {
+  if (!selectedSessionId) {
+    return null;
   }
+
+  return pendingToolApprovalsBySessionId[selectedSessionId] ?? null;
+}
+
+function withPendingApprovalsState(
+  selectedSessionId: string | null,
+  pendingToolApprovalsBySessionId: Record<string, ToolApprovalRequest>,
+) {
+  return {
+    pendingToolApproval: resolvePendingApprovalForSelection(
+      selectedSessionId,
+      pendingToolApprovalsBySessionId,
+    ),
+    pendingToolApprovalsBySessionId,
+  };
+}
+
+function rejectPendingToolApprovalForSession(sessionId: string, interrupted = false) {
+  const resolver = pendingToolApprovalResolversBySessionId.get(sessionId);
+  if (!resolver) {
+    return;
+  }
+
+  pendingToolApprovalResolversBySessionId.delete(sessionId);
+  resolver.resolve({
+    approved: false,
+    interrupted,
+  });
+}
+
+function rejectAllPendingToolApprovals(interrupted = false) {
+  const sessionIds = Array.from(pendingToolApprovalResolversBySessionId.keys());
+  for (const sessionId of sessionIds) {
+    rejectPendingToolApprovalForSession(sessionId, interrupted);
+  }
+}
+
+/** Interrupt every in-flight run and pending approval (app close / restart). */
+export async function interruptAllWorkspaceRunsForShutdown() {
+  const state = useWorkspaceStore.getState();
+  rejectAllPendingToolApprovals(true);
+
+  const sessionIds = Array.from(
+    new Set([
+      ...state.sendingSessionIds,
+      ...Object.keys(state.pendingToolApprovalsBySessionId),
+    ]),
+  );
+
+  setWorkspacePendingApprovalsCleared();
+
+  await Promise.all(
+    sessionIds.map((sessionId) =>
+      interruptWorkspaceChat({ sessionId }).catch(() => undefined),
+    ),
+  );
+}
+
+function setWorkspacePendingApprovalsCleared() {
+  useWorkspaceStore.setState((state) => ({
+    ...withPendingApprovalsState(state.selectedSessionId, {}),
+  }));
 }
 
 function nowLabel() {
@@ -618,6 +687,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   modelId: "",
   openedFileIds: [],
   pendingToolApproval: null,
+  pendingToolApprovalsBySessionId: {},
   permissionMode: "manual-approve",
   reasoningLevel: "",
   previewFiles: [],
@@ -634,17 +704,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       currentState.selectedProjectId !== snapshot.selectedProjectId ||
       currentState.selectedSessionId !== snapshot.selectedSessionId;
 
-    if (didChangeWorkspaceContext) {
-      rejectPendingToolApproval();
-    }
+    // Fresh process / hydrate: in-memory approval waiters are dead — treat as interrupted.
+    rejectAllPendingToolApprovals(true);
 
-    set((state) => ({
-      ...state,
-      ...applyWorkspaceSnapshotToState(state, snapshot),
-      activeMessageEdit: didChangeWorkspaceContext ? null : state.activeMessageEdit,
-      chatError: didChangeWorkspaceContext ? null : state.chatError,
-      pendingToolApproval: didChangeWorkspaceContext ? null : state.pendingToolApproval,
-    }));
+    set((state) => {
+      const nextSelectedSessionId = snapshot.selectedSessionId;
+      return {
+        ...state,
+        ...applyWorkspaceSnapshotToState(state, snapshot),
+        activeMessageEdit: didChangeWorkspaceContext ? null : state.activeMessageEdit,
+        chatError: didChangeWorkspaceContext ? null : state.chatError,
+        ...withPendingApprovalsState(nextSelectedSessionId, {}),
+      };
+    });
   },
   toggleProjectExpanded: (projectId) =>
     set((state) => {
@@ -764,12 +836,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     }));
   },
   deleteSession: async (projectId, sessionId) => {
-    const initialState = useWorkspaceStore.getState();
-
-    if (initialState.selectedProjectId === projectId && initialState.selectedSessionId === sessionId) {
-      rejectPendingToolApproval(true);
-      set({ pendingToolApproval: null });
-    }
+    // Deleting a session interrupts its pending approval / run.
+    rejectPendingToolApprovalForSession(sessionId, true);
 
     const snapshot = await deleteWorkspaceSession(projectId, sessionId);
 
@@ -779,6 +847,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         state.selectedProjectId === projectId && state.selectedSessionId === sessionId;
       const nextSelectedSessionId = isDeletedSessionSelected ? null : state.selectedSessionId;
       const sendingSessionIds = removeSendingSessionId(sessionId, state.sendingSessionIds);
+      const nextApprovals = { ...state.pendingToolApprovalsBySessionId };
+      delete nextApprovals[sessionId];
 
       return {
         ...state,
@@ -788,10 +858,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           state.activeMessageEdit?.sessionId === sessionId
             ? null
             : state.activeMessageEdit,
-        pendingToolApproval: isDeletedSessionSelected ? null : state.pendingToolApproval,
         selectedProjectId: isDeletedSessionSelected ? projectId : state.selectedProjectId,
         selectedSessionId: nextSelectedSessionId,
         ...withSendingSessionState(nextSelectedSessionId, sendingSessionIds),
+        ...withPendingApprovalsState(nextSelectedSessionId, nextApprovals),
       };
     });
   },
@@ -806,9 +876,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       : resolvePersistedSession(currentState.projects, projectId, sessionId);
     const needsHydration = Boolean(persistedSession && !persistedSession.messagesLoaded);
 
-    if (didChangeSelection) {
-      rejectPendingToolApproval();
-    }
+    // Do NOT reject pending approvals on switch — keep waiters alive and re-show on return (#26/#28).
 
     set((state) => ({
       activeFileId: didChangeSelection ? null : state.activeFileId,
@@ -816,10 +884,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       chatError: didChangeSelection ? null : state.chatError,
       loadingSessionId: needsHydration ? sessionId : null,
       openedFileIds: didChangeSelection ? [] : state.openedFileIds,
-      pendingToolApproval: didChangeSelection ? null : state.pendingToolApproval,
       selectedProjectId: projectId,
       selectedSessionId: sessionId,
       ...withSendingSessionState(sessionId, state.sendingSessionIds),
+      ...withPendingApprovalsState(sessionId, state.pendingToolApprovalsBySessionId),
     }));
     void persistWorkspaceSettingsForCurrentState().catch(() => undefined);
 
@@ -932,15 +1000,33 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     void persistWorkspaceSettingsForCurrentState().catch(() => undefined);
   },
   requestToolApproval: async (request) => {
-    rejectPendingToolApproval();
+    const sessionId = request.sessionId;
+    // Replacing an in-session pending approval interrupts the previous wait only.
+    rejectPendingToolApprovalForSession(sessionId, true);
 
-    set({ pendingToolApproval: request });
+    set((state) => {
+      const pendingToolApprovalsBySessionId = {
+        ...state.pendingToolApprovalsBySessionId,
+        [sessionId]: request,
+      };
+      return withPendingApprovalsState(state.selectedSessionId, pendingToolApprovalsBySessionId);
+    });
 
     const resolution = await new Promise<PendingToolApprovalResolution>((resolve) => {
-      pendingToolApprovalResolver = {
+      pendingToolApprovalResolversBySessionId.set(sessionId, {
         resolve,
+        sessionId,
         toolCallId: request.toolCallId,
-      };
+      });
+    });
+
+    set((state) => {
+      const pendingToolApprovalsBySessionId = { ...state.pendingToolApprovalsBySessionId };
+      const current = pendingToolApprovalsBySessionId[sessionId];
+      if (current?.toolCallId === request.toolCallId) {
+        delete pendingToolApprovalsBySessionId[sessionId];
+      }
+      return withPendingApprovalsState(state.selectedSessionId, pendingToolApprovalsBySessionId);
     });
 
     if (resolution.interrupted) {
@@ -950,8 +1036,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     return resolution.approved;
   },
   resolveToolApproval: (approved, toolCallId) => {
-    const resolver = pendingToolApprovalResolver;
-    const pendingToolApproval = useWorkspaceStore.getState().pendingToolApproval;
+    const state = useWorkspaceStore.getState();
+    const selectedSessionId = state.selectedSessionId;
+    if (!selectedSessionId) {
+      return;
+    }
+
+    const pendingToolApproval = state.pendingToolApprovalsBySessionId[selectedSessionId] ?? null;
+    const resolver = pendingToolApprovalResolversBySessionId.get(selectedSessionId);
 
     if (!resolver || !pendingToolApproval) {
       return;
@@ -966,8 +1058,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       return;
     }
 
-    pendingToolApprovalResolver = null;
-    set({ pendingToolApproval: null });
+    pendingToolApprovalResolversBySessionId.delete(selectedSessionId);
+    set((current) => {
+      const pendingToolApprovalsBySessionId = { ...current.pendingToolApprovalsBySessionId };
+      delete pendingToolApprovalsBySessionId[selectedSessionId];
+      return withPendingApprovalsState(current.selectedSessionId, pendingToolApprovalsBySessionId);
+    });
     resolver.resolve({
       approved,
       interrupted: false,
@@ -1025,8 +1121,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       return;
     }
 
-    rejectPendingToolApproval(true);
-    set({ pendingToolApproval: null });
+    rejectPendingToolApprovalForSession(sessionId, true);
+    set((current) => {
+      const pendingToolApprovalsBySessionId = { ...current.pendingToolApprovalsBySessionId };
+      delete pendingToolApprovalsBySessionId[sessionId];
+      return withPendingApprovalsState(current.selectedSessionId, pendingToolApprovalsBySessionId);
+    });
     await interruptWorkspaceChat({ sessionId });
   },
   sendPrompt: async (prompt, attachments = []) => {
