@@ -292,6 +292,7 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
         .map_err(|error| db_error("Could not read Wizzle migrations", error))?;
 
     if applied.is_some() {
+        // Includes turn part + turn budget column ensures / legacy summary migration.
         ensure_session_metadata_columns(conn)?;
         return Ok(());
     }
@@ -393,6 +394,13 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
           status TEXT NOT NULL,
           compacted INTEGER NOT NULL DEFAULT 0,
           total_tokens INTEGER NOT NULL DEFAULT 0,
+          estimated_tokens_image_capable INTEGER NULL,
+          estimated_tokens_text_only INTEGER NULL,
+          estimator_version INTEGER NULL,
+          replay_message_count_image_capable INTEGER NULL,
+          replay_message_count_text_only INTEGER NULL,
+          summary_message_ids TEXT NULL,
+          summary_completed_at INTEGER NULL,
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
           UNIQUE(session_id, turn_index)
@@ -522,7 +530,11 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
     .map_err(|error| db_error("Could not record the Wizzle migration", error))?;
 
     tx.commit()
-        .map_err(|error| db_error("Could not commit the Wizzle migration", error))
+        .map_err(|error| db_error("Could not commit the Wizzle migration", error))?;
+
+    ensure_session_metadata_columns(conn)?;
+    ensure_turn_budget_columns(conn)?;
+    Ok(())
 }
 
 fn table_has_column(
@@ -672,7 +684,118 @@ fn ensure_session_metadata_columns(conn: &Connection) -> Result<(), String> {
         .map_err(|error| db_error("Could not update Wizzle session metadata", error))?;
     }
 
-    ensure_turn_part_columns(conn)
+    ensure_turn_part_columns(conn)?;
+    ensure_turn_budget_columns(conn)
+}
+
+/// Budget cache columns live on the real conversation turn (#71), not summary-* turns.
+fn ensure_turn_budget_columns(conn: &Connection) -> Result<(), String> {
+    let columns = [
+        ("estimated_tokens_image_capable", "INTEGER NULL"),
+        ("estimated_tokens_text_only", "INTEGER NULL"),
+        ("estimator_version", "INTEGER NULL"),
+        ("replay_message_count_image_capable", "INTEGER NULL"),
+        ("replay_message_count_text_only", "INTEGER NULL"),
+        ("summary_message_ids", "TEXT NULL"),
+        ("summary_completed_at", "INTEGER NULL"),
+    ];
+
+    for (column_name, column_type) in columns {
+        if !table_has_column(conn, "turns", column_name)? {
+            conn.execute(
+                &format!("ALTER TABLE turns ADD COLUMN {column_name} {column_type}"),
+                [],
+            )
+            .map_err(|error| db_error("Could not update Wizzle turn budget columns", error))?;
+        }
+    }
+
+    migrate_legacy_summary_turns_onto_real_turns(conn)?;
+    Ok(())
+}
+
+/// One-time: copy budget fields from summary-* turn_parts onto real turns, then drop fake turns.
+fn migrate_legacy_summary_turns_onto_real_turns(conn: &Connection) -> Result<(), String> {
+    if !table_has_column(conn, "turn_parts", "summary_turn_id")? {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "
+        UPDATE turns
+        SET
+          estimated_tokens_image_capable = (
+            SELECT tp.estimated_tokens_image_capable
+            FROM turn_parts tp
+            WHERE tp.part_type = 'turn_summary'
+              AND tp.summary_turn_id = turns.id
+            ORDER BY tp.updated_at DESC
+            LIMIT 1
+          ),
+          estimated_tokens_text_only = (
+            SELECT tp.estimated_tokens_text_only
+            FROM turn_parts tp
+            WHERE tp.part_type = 'turn_summary'
+              AND tp.summary_turn_id = turns.id
+            ORDER BY tp.updated_at DESC
+            LIMIT 1
+          ),
+          estimator_version = (
+            SELECT tp.estimator_version
+            FROM turn_parts tp
+            WHERE tp.part_type = 'turn_summary'
+              AND tp.summary_turn_id = turns.id
+            ORDER BY tp.updated_at DESC
+            LIMIT 1
+          ),
+          replay_message_count_image_capable = (
+            SELECT tp.replay_message_count_image_capable
+            FROM turn_parts tp
+            WHERE tp.part_type = 'turn_summary'
+              AND tp.summary_turn_id = turns.id
+            ORDER BY tp.updated_at DESC
+            LIMIT 1
+          ),
+          replay_message_count_text_only = (
+            SELECT tp.replay_message_count_text_only
+            FROM turn_parts tp
+            WHERE tp.part_type = 'turn_summary'
+              AND tp.summary_turn_id = turns.id
+            ORDER BY tp.updated_at DESC
+            LIMIT 1
+          ),
+          summary_message_ids = (
+            SELECT tp.summary_message_ids
+            FROM turn_parts tp
+            WHERE tp.part_type = 'turn_summary'
+              AND tp.summary_turn_id = turns.id
+            ORDER BY tp.updated_at DESC
+            LIMIT 1
+          ),
+          summary_completed_at = (
+            SELECT COALESCE(tp.completed_at, tp.updated_at)
+            FROM turn_parts tp
+            WHERE tp.part_type = 'turn_summary'
+              AND tp.summary_turn_id = turns.id
+            ORDER BY tp.updated_at DESC
+            LIMIT 1
+          )
+        WHERE EXISTS (
+          SELECT 1
+          FROM turn_parts tp
+          WHERE tp.part_type = 'turn_summary'
+            AND tp.summary_turn_id = turns.id
+        )
+          AND turns.estimator_version IS NULL;
+
+        DELETE FROM turns
+        WHERE id LIKE 'summary-%'
+           OR id LIKE 'summary-turn-%';
+        ",
+    )
+    .map_err(|error| db_error("Could not migrate legacy Wizzle turn summaries", error))?;
+
+    Ok(())
 }
 
 fn ensure_turn_part_columns(conn: &Connection) -> Result<(), String> {
@@ -1868,13 +1991,122 @@ fn load_session_history(
         }
     }
 
+    // Prefer budget columns on real turns (#71); keep any legacy part-based summaries as fallback.
+    let mut summary_by_turn = std::collections::HashMap::<String, StoredTurnSummaryRecord>::new();
+    for summary in summaries {
+        if !summary.turn_id.is_empty() {
+            summary_by_turn.insert(summary.turn_id.clone(), summary);
+        }
+    }
+    for summary in load_turn_budget_summaries(conn, session_id)? {
+        summary_by_turn.insert(summary.turn_id.clone(), summary);
+    }
+    let mut merged_summaries = summary_by_turn.into_values().collect::<Vec<_>>();
+    merged_summaries.sort_by(|left, right| left.turn_id.cmp(&right.turn_id));
+
     Ok((
         message_order
             .into_iter()
             .filter_map(|message_id| messages.remove(&message_id))
             .collect(),
-        summaries,
+        merged_summaries,
     ))
+}
+
+fn load_turn_budget_summaries(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<StoredTurnSummaryRecord>, String> {
+    if !table_has_column(conn, "turns", "estimator_version")? {
+        return Ok(Vec::new());
+    }
+
+    let mut statement = conn
+        .prepare(
+            "
+            SELECT
+              id,
+              estimated_tokens_image_capable,
+              estimated_tokens_text_only,
+              estimator_version,
+              replay_message_count_image_capable,
+              replay_message_count_text_only,
+              summary_message_ids,
+              summary_completed_at,
+              updated_at
+            FROM turns
+            WHERE session_id = ?1
+              AND estimator_version IS NOT NULL
+              AND id NOT LIKE 'summary-%'
+            ORDER BY turn_index ASC
+            ",
+        )
+        .map_err(|error| db_error("Could not prepare turn budget loading", error))?;
+
+    let rows = statement
+        .query_map(params![session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<i64>>(7)?,
+                row.get::<_, i64>(8)?,
+            ))
+        })
+        .map_err(|error| db_error("Could not read turn budget rows", error))?;
+
+    let mut summaries = Vec::new();
+    for row in rows {
+        let (
+            turn_id,
+            estimated_tokens_image_capable,
+            estimated_tokens_text_only,
+            estimator_version,
+            replay_message_count_image_capable,
+            replay_message_count_text_only,
+            summary_message_ids,
+            summary_completed_at,
+            updated_at,
+        ) = row.map_err(|error| db_error("Could not parse turn budget row", error))?;
+
+        let Some(estimator_version) = estimator_version else {
+            continue;
+        };
+
+        let message_ids = parse_summary_message_ids_value(summary_message_ids)?;
+        summaries.push(StoredTurnSummaryRecord {
+            completed_at_ms: summary_completed_at
+                .map(|value| value.max(0) as u64)
+                .unwrap_or_else(|| updated_at.max(0) as u64),
+            estimated_tokens_image_capable: estimated_tokens_image_capable
+                .unwrap_or(0)
+                .max(0) as u64,
+            estimated_tokens_text_only: estimated_tokens_text_only.unwrap_or(0).max(0) as u64,
+            estimator_version: estimator_version.max(0) as u32,
+            message_ids,
+            replay_message_count_image_capable: replay_message_count_image_capable
+                .unwrap_or(0)
+                .max(0) as u64,
+            replay_message_count_text_only: replay_message_count_text_only.unwrap_or(0).max(0)
+                as u64,
+            turn_id,
+        });
+    }
+
+    Ok(summaries)
+}
+
+fn parse_summary_message_ids_value(raw_value: Option<String>) -> Result<Vec<String>, String> {
+    let Some(raw_value) = raw_value.filter(|value| !value.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
+
+    serde_json::from_str::<Vec<String>>(&raw_value)
+        .map_err(|error| format!("Could not parse saved Wizzle summary message ids: {error}"))
 }
 
 fn load_workspace_session_payload(
@@ -3251,78 +3483,83 @@ fn insert_message_part(
     insert_normalized_message_steps(tx, inserted_part_ids, message, &turn_id, turn_indexes)
 }
 
-fn insert_summary_part(
+/// Persist replay budget estimates on the real conversation turn (#71).
+/// Does not rewrite turn lifecycle status when the turn already exists.
+fn upsert_turn_budget_summary(
     tx: &Transaction<'_>,
-    inserted_part_ids: &mut HashSet<String>,
     session_id: &str,
     turn_indexes: &mut HashMap<String, (i64, i64)>,
     summary: &StoredTurnSummaryRecord,
 ) -> Result<(), String> {
-    let turn_id = format!("summary-{}", summary.turn_id);
-    insert_turn_if_needed(
-        tx,
-        session_id,
-        turn_indexes,
-        &turn_id,
-        "complete",
-        summary.completed_at_ms,
-        summary.completed_at_ms,
-    )?;
-    let part_id = format!("summary-part-{}", summary.turn_id);
-    let part_index = resolve_stable_part_index(tx, turn_indexes, &turn_id, &part_id)?;
     let message_ids = serde_json::to_string(&summary.message_ids)
         .map_err(|error| format!("Could not serialize Wizzle summary message ids: {error}"))?;
 
-    tx.execute(
-        "
-        INSERT INTO turn_parts (
-          id, turn_id, role, part_type, content, tokens, metadata, status,
-          parent_part_id, tool_call_id, summary_turn_id, summary_message_ids,
-          estimated_tokens_image_capable, estimated_tokens_text_only, estimator_version,
-          replay_message_count_image_capable, replay_message_count_text_only,
-          completed_at, part_index, pruned, created_at, updated_at
-        ) VALUES (?1, ?2, 'system', 'turn_summary', NULL, ?3, '{}', 'done', NULL, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13, ?13)
-        ON CONFLICT(id) DO UPDATE SET
-          turn_id = excluded.turn_id,
-          role = excluded.role,
-          part_type = excluded.part_type,
-          content = excluded.content,
-          tokens = excluded.tokens,
-          metadata = excluded.metadata,
-          status = excluded.status,
-          parent_part_id = excluded.parent_part_id,
-          tool_call_id = excluded.tool_call_id,
-          summary_turn_id = excluded.summary_turn_id,
-          summary_message_ids = excluded.summary_message_ids,
-          estimated_tokens_image_capable = excluded.estimated_tokens_image_capable,
-          estimated_tokens_text_only = excluded.estimated_tokens_text_only,
-          estimator_version = excluded.estimator_version,
-          replay_message_count_image_capable = excluded.replay_message_count_image_capable,
-          replay_message_count_text_only = excluded.replay_message_count_text_only,
-          completed_at = excluded.completed_at,
-          part_index = turn_parts.part_index,
-          pruned = excluded.pruned,
-          created_at = MIN(turn_parts.created_at, excluded.created_at),
-          updated_at = excluded.updated_at
-        ",
+    let apply_budget = |tx: &Transaction<'_>| {
+        tx.execute(
+            "
+            UPDATE turns
+            SET estimated_tokens_image_capable = ?1,
+                estimated_tokens_text_only = ?2,
+                estimator_version = ?3,
+                replay_message_count_image_capable = ?4,
+                replay_message_count_text_only = ?5,
+                summary_message_ids = ?6,
+                summary_completed_at = ?7,
+                total_tokens = CASE
+                  WHEN total_tokens = 0 THEN ?2
+                  ELSE total_tokens
+                END,
+                updated_at = MAX(updated_at, ?7)
+            WHERE id = ?8
+              AND session_id = ?9
+            ",
+            params![
+                summary.estimated_tokens_image_capable as i64,
+                summary.estimated_tokens_text_only as i64,
+                summary.estimator_version as i64,
+                summary.replay_message_count_image_capable as i64,
+                summary.replay_message_count_text_only as i64,
+                message_ids,
+                summary.completed_at_ms as i64,
+                summary.turn_id,
+                session_id,
+            ],
+        )
+        .map_err(|error| db_error("Could not save a Wizzle turn budget summary", error))
+    };
+
+    let mut updated = apply_budget(tx)?;
+    if updated == 0 {
+        // Turn row missing (edge case) — create shell, then apply budget.
+        insert_turn_if_needed(
+            tx,
+            session_id,
+            turn_indexes,
+            &summary.turn_id,
+            "complete",
+            summary.completed_at_ms,
+            summary.completed_at_ms,
+        )?;
+        updated = apply_budget(tx)?;
+    }
+
+    if updated == 0 {
+        return Err(format!(
+            "Could not save turn budget for missing turn {}.",
+            summary.turn_id
+        ));
+    }
+
+    // Drop legacy synthetic summary turns if they still exist.
+    let legacy_turn_id = format!("summary-{}", summary.turn_id);
+    let _ = tx.execute(
+        "DELETE FROM turns WHERE session_id = ?1 AND (id = ?2 OR id = ?3)",
         params![
-            part_id,
-            turn_id,
-            0,
-            summary.turn_id,
-            message_ids,
-            summary.estimated_tokens_image_capable as i64,
-            summary.estimated_tokens_text_only as i64,
-            summary.estimator_version as i64,
-            summary.replay_message_count_image_capable as i64,
-            summary.replay_message_count_text_only as i64,
-            summary.completed_at_ms as i64,
-            part_index,
-            summary.completed_at_ms as i64
+            session_id,
+            legacy_turn_id,
+            format!("summary-turn-{}", summary.turn_id)
         ],
-    )
-    .map_err(|error| db_error("Could not save a Wizzle turn summary", error))?;
-    inserted_part_ids.insert(part_id);
+    );
 
     Ok(())
 }
@@ -3749,14 +3986,7 @@ pub fn upsert_turn_summary(input: UpsertTurnSummaryInput) -> Result<(), String> 
         .transaction()
         .map_err(|error| db_error("Could not start turn summary persistence", error))?;
     let mut turn_indexes = load_turn_indexes(&tx, &input.session_id)?;
-    let mut inserted_part_ids = HashSet::new();
-    insert_summary_part(
-        &tx,
-        &mut inserted_part_ids,
-        &input.session_id,
-        &mut turn_indexes,
-        &summary,
-    )?;
+    upsert_turn_budget_summary(&tx, &input.session_id, &mut turn_indexes, &summary)?;
     tx.commit()
         .map_err(|error| db_error("Could not finish turn summary persistence", error))
 }
@@ -3978,15 +4208,8 @@ pub fn persist_session(input: PersistWorkspaceSessionInput) -> Result<(), String
             ],
         )
         .map_err(|error| db_error("Could not save the Wizzle session", error))?;
-        let expected_turn_ids = messages
-            .iter()
-            .map(message_turn_id)
-            .chain(
-                turn_summaries
-                    .iter()
-                    .map(|summary| format!("summary-{}", summary.turn_id)),
-            )
-            .collect::<HashSet<_>>();
+        // Real conversation turns only — budget metadata is columns on those rows (#71).
+        let expected_turn_ids = messages.iter().map(message_turn_id).collect::<HashSet<_>>();
         let expected_part_ids = messages
             .iter()
             .flat_map(|message| {
@@ -3998,11 +4221,6 @@ pub fn persist_session(input: PersistWorkspaceSessionInput) -> Result<(), String
                         .map(|part| part.id.clone()),
                 )
             })
-            .chain(
-                turn_summaries
-                    .iter()
-                    .map(|summary| format!("summary-part-{}", summary.turn_id)),
-            )
             .collect::<HashSet<_>>();
         delete_stale_transcript_rows(&tx, &session_id, &expected_turn_ids, &expected_part_ids)?;
         let mut turn_indexes = HashMap::new();
@@ -4018,13 +4236,7 @@ pub fn persist_session(input: PersistWorkspaceSessionInput) -> Result<(), String
             )?;
         }
         for summary in &turn_summaries {
-            insert_summary_part(
-                &tx,
-                &mut inserted_part_ids,
-                &session_id,
-                &mut turn_indexes,
-                summary,
-            )?;
+            upsert_turn_budget_summary(&tx, &session_id, &mut turn_indexes, summary)?;
         }
         let current_turn_ids = turn_indexes.keys().cloned().collect::<HashSet<_>>();
         delete_stale_transcript_rows(&tx, &session_id, &current_turn_ids, &inserted_part_ids)?;
@@ -5274,5 +5486,96 @@ mod tests {
             .expect("read complete");
         assert_eq!(running_status, "interrupted");
         assert_eq!(complete_status, "complete");
+    }
+
+    #[test]
+    fn turn_budget_summary_writes_columns_on_real_turn_not_synthetic_turn() {
+        let mut conn = migrated_memory_db();
+        let now = now_unix_ms() as i64;
+        insert_test_session(&conn);
+        conn.execute(
+            "INSERT INTO turns (id, session_id, turn_index, status, created_at, updated_at)
+             VALUES ('turn-real', 'session-1', 0, 'running', ?1, ?1)",
+            params![now],
+        )
+        .expect("insert real turn");
+        // Legacy synthetic summary turn should be deleted on upsert.
+        conn.execute(
+            "INSERT INTO turns (id, session_id, turn_index, status, created_at, updated_at)
+             VALUES ('summary-turn-real', 'session-1', 1, 'complete', ?1, ?1)",
+            params![now],
+        )
+        .expect("insert legacy summary turn");
+
+        {
+            let tx = conn.transaction().expect("tx");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("indexes");
+            upsert_turn_budget_summary(
+                &tx,
+                "session-1",
+                &mut turn_indexes,
+                &StoredTurnSummaryRecord {
+                    completed_at_ms: now as u64 + 10,
+                    estimated_tokens_image_capable: 120,
+                    estimated_tokens_text_only: 100,
+                    estimator_version: 4,
+                    message_ids: vec!["m1".to_string(), "m2".to_string()],
+                    replay_message_count_image_capable: 3,
+                    replay_message_count_text_only: 2,
+                    turn_id: "turn-real".to_string(),
+                },
+            )
+            .expect("upsert budget");
+            tx.commit().expect("commit");
+        }
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM turns WHERE id = 'turn-real'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("status");
+        assert_eq!(status, "running", "budget upsert must not force complete");
+
+        let text_tokens: i64 = conn
+            .query_row(
+                "SELECT estimated_tokens_text_only FROM turns WHERE id = 'turn-real'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("text tokens");
+        let version: i64 = conn
+            .query_row(
+                "SELECT estimator_version FROM turns WHERE id = 'turn-real'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("version");
+        let message_ids: String = conn
+            .query_row(
+                "SELECT summary_message_ids FROM turns WHERE id = 'turn-real'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("message ids");
+        assert_eq!(text_tokens, 100);
+        assert_eq!(version, 4);
+        assert!(message_ids.contains("m1"));
+
+        let legacy_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM turns WHERE id LIKE 'summary-%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy count");
+        assert_eq!(legacy_count, 0, "synthetic summary turns removed");
+
+        let loaded = load_turn_budget_summaries(&conn, "session-1").expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].turn_id, "turn-real");
+        assert_eq!(loaded[0].estimated_tokens_text_only, 100);
+        assert_eq!(loaded[0].message_ids, vec!["m1".to_string(), "m2".to_string()]);
     }
 }
