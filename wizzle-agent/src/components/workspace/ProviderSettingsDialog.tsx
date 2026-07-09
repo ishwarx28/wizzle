@@ -998,7 +998,18 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                 Add model
               </button>
             </div>
-            {modelRows.map((row, index) => (
+            {modelRows.map((row, index) => {
+              // Capture input values before setState updaters run — Safari nulls
+              // event.currentTarget inside async functional updates (I-27 class crash).
+              function patchModelRow(patch: Partial<ProviderModelFormRow>) {
+                setModelRows((rows) =>
+                  rows.map((entry, rowIndex) =>
+                    rowIndex === index ? { ...entry, ...patch } : entry,
+                  ),
+                );
+              }
+
+              return (
               <div
                 className="grid gap-2 rounded-2xl border border-[var(--color-border)] p-3 md:grid-cols-2"
                 key={index}
@@ -1007,13 +1018,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                   <FieldLabel>Model Id</FieldLabel>
                   <input
                     className={modelFieldClassName}
-                    onChange={(event) =>
-                      setModelRows((rows) =>
-                        rows.map((entry, rowIndex) =>
-                          rowIndex === index ? { ...entry, modelId: event.currentTarget.value } : entry,
-                        ),
-                      )
-                    }
+                    onChange={(event) => patchModelRow({ modelId: event.currentTarget.value })}
                     placeholder="Model Id"
                     value={row.modelId}
                   />
@@ -1022,15 +1027,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                   <FieldLabel>Display name</FieldLabel>
                   <input
                     className={modelFieldClassName}
-                    onChange={(event) =>
-                      setModelRows((rows) =>
-                        rows.map((entry, rowIndex) =>
-                          rowIndex === index
-                            ? { ...entry, displayName: event.currentTarget.value }
-                            : entry,
-                        ),
-                      )
-                    }
+                    onChange={(event) => patchModelRow({ displayName: event.currentTarget.value })}
                     placeholder="Display name"
                     value={row.displayName}
                   />
@@ -1039,15 +1036,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                   <FieldLabel>Max context</FieldLabel>
                   <input
                     className={modelFieldClassName}
-                    onChange={(event) =>
-                      setModelRows((rows) =>
-                        rows.map((entry, rowIndex) =>
-                          rowIndex === index
-                            ? { ...entry, maxContext: event.currentTarget.value }
-                            : entry,
-                        ),
-                      )
-                    }
+                    onChange={(event) => patchModelRow({ maxContext: event.currentTarget.value })}
                     placeholder="Max context"
                     value={row.maxContext}
                   />
@@ -1057,13 +1046,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                   <input
                     className={modelFieldClassName}
                     onChange={(event) =>
-                      setModelRows((rows) =>
-                        rows.map((entry, rowIndex) =>
-                          rowIndex === index
-                            ? { ...entry, maxOutputTokens: event.currentTarget.value }
-                            : entry,
-                        ),
-                      )
+                      patchModelRow({ maxOutputTokens: event.currentTarget.value })
                     }
                     placeholder="Max output tokens"
                     value={row.maxOutputTokens}
@@ -1073,15 +1056,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                   <FieldLabel>Capabilities</FieldLabel>
                   <input
                     className={modelFieldClassName}
-                    onChange={(event) =>
-                      setModelRows((rows) =>
-                        rows.map((entry, rowIndex) =>
-                          rowIndex === index
-                            ? { ...entry, capabilities: event.currentTarget.value }
-                            : entry,
-                        ),
-                      )
-                    }
+                    onChange={(event) => patchModelRow({ capabilities: event.currentTarget.value })}
                     placeholder="text, image"
                     value={row.capabilities}
                   />
@@ -1091,13 +1066,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                   <input
                     className={modelFieldClassName}
                     onChange={(event) =>
-                      setModelRows((rows) =>
-                        rows.map((entry, rowIndex) =>
-                          rowIndex === index
-                            ? { ...entry, reasoningLevels: event.currentTarget.value }
-                            : entry,
-                        ),
-                      )
+                      patchModelRow({ reasoningLevels: event.currentTarget.value })
                     }
                     placeholder="low, medium, high, max"
                     value={row.reasoningLevels}
@@ -1109,17 +1078,10 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                     className={modelFieldClassName}
                     onChange={(event) => {
                       const mode = event.currentTarget.value as TokenizerMode;
-                      setModelRows((rows) =>
-                        rows.map((entry, rowIndex) =>
-                          rowIndex === index
-                            ? {
-                                ...entry,
-                                tokenizerMode: mode,
-                                tokenizerJson: mode === "heuristic" ? "" : entry.tokenizerJson,
-                              }
-                            : entry,
-                        ),
-                      );
+                      patchModelRow({
+                        tokenizerMode: mode,
+                        tokenizerJson: mode === "heuristic" ? "" : row.tokenizerJson,
+                      });
                     }}
                     value={row.tokenizerMode}
                   >
@@ -1133,13 +1095,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                     <input
                       className={modelFieldClassName}
                       onChange={(event) =>
-                        setModelRows((rows) =>
-                          rows.map((entry, rowIndex) =>
-                            rowIndex === index
-                              ? { ...entry, tokenizerJson: event.currentTarget.value }
-                              : entry,
-                          ),
-                        )
+                        patchModelRow({ tokenizerJson: event.currentTarget.value })
                       }
                       placeholder="Local path or HTTPS URL"
                       value={row.tokenizerJson}
@@ -1163,7 +1119,8 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                   </button>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
 
           {error && dialog.type === "provider-form" ? (
