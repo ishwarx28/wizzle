@@ -32,6 +32,12 @@ import {
 import { buildTurnReplaySummary } from "../lib/context-budget";
 import { resolveMaxPromptSize } from "../lib/env";
 import { frontendLogger } from "../lib/logger";
+import {
+  describeSettledTurnPersistResult,
+  isTurnAlreadyFinalizedError,
+  runSettledTurnPersistence,
+  type SettledTurnPersistResult,
+} from "../lib/settle-turn-persist";
 import { extractLinkedFileFromToolResult } from "../lib/tool-activity";
 import type {
   Message,
@@ -1323,11 +1329,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     let durablePersistChars = 0;
     let lastDurablePersistAt = Date.now();
     let durablePersistChain = Promise.resolve();
+    /** After settle starts, late stream writes must not race finalize (#4). */
+    let turnSettled = false;
+    let settledTurnPersistResult: SettledTurnPersistResult | null = null;
     const bufferedToolOutputByCallId = new Map<string, BufferedToolOutput>();
     let activeContentStepId: string | null = null;
 
     const persistMessageFromState = async (messageId: string) => {
-      if (!isActiveRunRequest()) {
+      if (!isActiveRunRequest() || turnSettled) {
         return;
       }
 
@@ -1339,12 +1348,34 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         return;
       }
 
-      await appendOrUpdateMessage({
-        message,
-        previewFiles: state.previewFiles,
-        projectId: targetProjectId,
-        sessionId: targetSessionId as string,
-      });
+      try {
+        await appendOrUpdateMessage({
+          message,
+          previewFiles: state.previewFiles,
+          projectId: targetProjectId,
+          sessionId: targetSessionId as string,
+        });
+      } catch (error) {
+        if (isTurnAlreadyFinalizedError(error)) {
+          frontendLogger.debug("frontend.workspace", "stream_persist_skipped_finalized_turn", {
+            messageIdLength: messageId.length,
+            sessionIdLength: targetSessionId.length,
+            turnIdLength: turnId.length,
+          });
+          return;
+        }
+
+        throw error;
+      }
+    };
+
+    const collectActiveTurnMessageIds = () => {
+      const state = useWorkspaceStore.getState();
+      const session = resolvePersistedSession(state.projects, targetProjectId, targetSessionId as string);
+
+      return (session?.messages ?? [])
+        .filter((message) => message.turnId === turnId)
+        .map((message) => message.id);
     };
 
     const persistActiveTurnMessages = async () => {
@@ -1412,19 +1443,27 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     };
 
     const runDurablePersist = (reason: string) => {
+      if (turnSettled) {
+        return;
+      }
+
       clearPendingDurablePersist();
       durablePersistChars = 0;
       lastDurablePersistAt = Date.now();
       durablePersistChain = durablePersistChain
         .catch(() => undefined)
         .then(() => {
-          if (!activeAssistantMessageId) {
+          if (turnSettled || !activeAssistantMessageId) {
             return undefined;
           }
 
           return persistMessageFromState(activeAssistantMessageId);
         })
         .catch((error) => {
+          if (isTurnAlreadyFinalizedError(error) || turnSettled) {
+            return;
+          }
+
           frontendLogger.debug("frontend.workspace", "durable_stream_persist_failed", {
             error,
             reason,
@@ -1459,7 +1498,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     };
 
     const flushBufferedChunks = () => {
-      if (!isActiveRunRequest()) {
+      if (!isActiveRunRequest() || turnSettled) {
         bufferedContent = "";
         return;
       }
@@ -1522,7 +1561,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     };
 
     const flushBufferedToolChunks = () => {
-      if (!isActiveRunRequest()) {
+      if (!isActiveRunRequest() || turnSettled) {
         bufferedToolOutputByCallId.clear();
         return;
       }
@@ -1923,8 +1962,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       clearPendingFlush();
       clearPendingToolFlush();
       clearPendingDurablePersist();
+      // Apply last buffered UI state before freezing stream writes.
       flushBufferedChunks();
       flushBufferedToolChunks();
+      turnSettled = true;
       activeAssistantMessageId = null;
       activeContentStepId = null;
 
@@ -2233,25 +2274,71 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         }
       }
 
+      clearPendingDurablePersist();
+
+      const messageIds = collectActiveTurnMessageIds();
+      const summaryToPersist = settledTurnSummary;
+
       durablePersistChain = durablePersistChain
         .catch(() => undefined)
         .then(async () => {
-          await persistActiveTurnMessages();
+          const result = await runSettledTurnPersistence({
+            finalize: async () => {
+              await finalizeTurn({
+                sessionId: targetSessionId as string,
+                status: status === "error" ? "failed" : status,
+                turnId,
+              });
+            },
+            messageIds,
+            persistMessage: async (messageId) => {
+              const state = useWorkspaceStore.getState();
+              const session = resolvePersistedSession(
+                state.projects,
+                targetProjectId,
+                targetSessionId as string,
+              );
+              const message = session?.messages.find((entry) => entry.id === messageId);
 
-          if (settledTurnSummary) {
-            await persistTurnSummary({
-              sessionId: targetSessionId as string,
-              summary: settledTurnSummary,
+              if (!message || message.turnId !== turnId) {
+                return;
+              }
+
+              await appendOrUpdateMessage({
+                message,
+                previewFiles: state.previewFiles,
+                projectId: targetProjectId,
+                sessionId: targetSessionId as string,
+              });
+            },
+            persistSummary: summaryToPersist
+              ? async () => {
+                  await persistTurnSummary({
+                    sessionId: targetSessionId as string,
+                    summary: summaryToPersist,
+                  });
+                }
+              : undefined,
+          });
+
+          settledTurnPersistResult = result;
+
+          if (result.finalizeError || result.messageErrors.length > 0 || result.summaryError) {
+            frontendLogger.error("frontend.workspace", "turn_targeted_persist_incomplete", {
+              finalizeError: result.finalizeError,
+              messageErrorCount: result.messageErrors.length,
+              sessionIdLength: targetSessionId.length,
+              summaryError: result.summaryError,
+              turnIdLength: turnId.length,
             });
           }
-
-          await finalizeTurn({
-            sessionId: targetSessionId as string,
-            status: status === "error" ? "failed" : status,
-            turnId,
-          });
         })
         .catch((error) => {
+          settledTurnPersistResult = {
+            finalizeError: error instanceof Error ? error.message : "Turn persistence failed.",
+            messageErrors: [],
+            summaryError: null,
+          };
           frontendLogger.error("frontend.workspace", "turn_targeted_persist_failed", {
             error,
             sessionIdLength: targetSessionId.length,
@@ -2264,6 +2351,21 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         status,
         turnIdLength: turnId.length,
       });
+    };
+
+    const awaitSettledTurnPersist = async () => {
+      await durablePersistChain.catch(() => undefined);
+      return settledTurnPersistResult;
+    };
+
+    const applySettledPersistOutcome = (result: SettledTurnPersistResult | null) => {
+      const description = result ? describeSettledTurnPersistResult(result) : null;
+
+      if (!description) {
+        return;
+      }
+
+      set({ chatError: description });
     };
 
     const finishRuntimeRun = async () => {
@@ -2366,7 +2468,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         tokenizerKind: selectedProviderModel.tokenizerKind,
       });
       settleTurn("done", "The model returned an empty response.");
-      await durablePersistChain.catch(() => undefined);
+      const persistResult = await awaitSettledTurnPersist();
+      applySettledPersistOutcome(persistResult);
       await reconcileEditedSessionIfNeeded();
       await finishRuntimeRun();
       if (isActiveRunRequest()) {
@@ -2374,6 +2477,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       }
       set({ isSendingMessage: false });
       frontendLogger.info("frontend.workspace", "agent_run_completed", {
+        finalizeError: persistResult?.finalizeError ?? null,
+        messageErrorCount: persistResult?.messageErrors.length ?? 0,
         sessionIdLength: targetSessionId.length,
         turnIdLength: turnId.length,
       });
@@ -2385,7 +2490,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     } catch (error) {
       if (isInterruptedWorkspaceChatError(error)) {
         settleTurn("interrupted", "Stopped.");
-        await durablePersistChain.catch(() => undefined);
+        const persistResult = await awaitSettledTurnPersist();
+        applySettledPersistOutcome(persistResult);
         await reconcileEditedSessionIfNeeded();
         await finishRuntimeRun();
         if (isActiveRunRequest()) {
@@ -2393,6 +2499,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         }
         set({ isSendingMessage: false });
         frontendLogger.info("frontend.workspace", "agent_run_interrupted", {
+          finalizeError: persistResult?.finalizeError ?? null,
           sessionIdLength: targetSessionId.length,
           turnIdLength: turnId.length,
         });
@@ -2415,10 +2522,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         turnIdLength: turnId.length,
       });
 
+      let errorMessage = message;
+
       try {
-        await durablePersistChain.catch(() => undefined);
+        const persistResult = await awaitSettledTurnPersist();
+        if (persistResult?.finalizeError) {
+          errorMessage = `${message} (Also could not close the turn: ${persistResult.finalizeError})`;
+        }
         await reconcileEditedSessionIfNeeded();
         frontendLogger.info("frontend.workspace", "turn_persisted_after_failure", {
+          finalizeError: persistResult?.finalizeError ?? null,
           sessionIdLength: targetSessionId.length,
           turnIdLength: turnId.length,
         });
@@ -2430,10 +2543,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         activeRunRequestIdsBySession.delete(targetSessionId);
       }
       set({
-        chatError: message,
+        chatError: errorMessage,
         isSendingMessage: false,
       });
-      return { accepted: false, error: message, ok: false };
+      return { accepted: false, error: errorMessage, ok: false };
     }
   },
 }));

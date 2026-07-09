@@ -2707,6 +2707,30 @@ fn update_next_part_index(
     Ok(part_index)
 }
 
+/// Keep the first-assigned `part_index` for an existing part id.
+/// Only allocate a new index when the part is first inserted.
+fn resolve_stable_part_index(
+    tx: &Transaction<'_>,
+    turn_indexes: &mut HashMap<String, (i64, i64)>,
+    turn_id: &str,
+    part_id: &str,
+) -> Result<i64, String> {
+    let existing_index = tx
+        .query_row(
+            "SELECT part_index FROM turn_parts WHERE id = ?1",
+            params![part_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| db_error("Could not read an existing Wizzle part index", error))?;
+
+    if let Some(part_index) = existing_index {
+        return Ok(part_index);
+    }
+
+    update_next_part_index(turn_indexes, turn_id)
+}
+
 fn load_turn_indexes(
     tx: &Transaction<'_>,
     session_id: &str,
@@ -2883,6 +2907,65 @@ fn step_metadata(message: &StoredMessageRecord, step: &StoredMessageStepRecord) 
     metadata
 }
 
+fn part_id_exists(
+    tx: &Transaction<'_>,
+    inserted_part_ids: &HashSet<String>,
+    part_id: &str,
+) -> Result<bool, String> {
+    if inserted_part_ids.contains(part_id) {
+        return Ok(true);
+    }
+
+    let exists = tx
+        .query_row(
+            "SELECT 1 FROM turn_parts WHERE id = ?1",
+            params![part_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| db_error("Could not check Wizzle parent part existence", error))?;
+
+    Ok(exists.is_some())
+}
+
+/// Resolve a durable parent link for tool results.
+/// Prefer the requested parent when it exists (this transaction or DB).
+/// Fall back to the tool_call part matching `tool_call_id`.
+fn resolve_parent_part_id(
+    tx: &Transaction<'_>,
+    inserted_part_ids: &HashSet<String>,
+    requested_parent_part_id: Option<&str>,
+    tool_call_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    if let Some(parent_id) = requested_parent_part_id {
+        if part_id_exists(tx, inserted_part_ids, parent_id)? {
+            return Ok(Some(parent_id.to_string()));
+        }
+    }
+
+    let Some(tool_call_id) = tool_call_id.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    let parent_from_tool_call = tx
+        .query_row(
+            "
+            SELECT id
+            FROM turn_parts
+            WHERE tool_call_id = ?1
+              AND part_type = 'tool_call'
+            ORDER BY part_index ASC
+            LIMIT 1
+            ",
+            params![tool_call_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| db_error("Could not resolve Wizzle tool-call parent part", error))?;
+
+    Ok(parent_from_tool_call)
+}
+
 fn insert_normalized_message_steps(
     tx: &Transaction<'_>,
     inserted_part_ids: &mut HashSet<String>,
@@ -2899,7 +2982,7 @@ fn insert_normalized_message_steps(
             continue;
         }
 
-        let part_index = update_next_part_index(turn_indexes, turn_id)?;
+        let part_index = resolve_stable_part_index(tx, turn_indexes, turn_id, &step.id)?;
         let content = step_content(step);
         let content_text = match step.r#type.as_str() {
             "activity_content" | "content" => step.content.clone(),
@@ -2908,11 +2991,12 @@ fn insert_normalized_message_steps(
         let metadata = step_metadata(message, step);
         let metadata = serde_json::to_string(&metadata)
             .map_err(|error| format!("Could not serialize tool metadata: {error}"))?;
-        let parent_part_id = step
-            .parent_part_id
-            .as_ref()
-            .filter(|part_id| inserted_part_ids.contains(*part_id))
-            .cloned();
+        let parent_part_id = resolve_parent_part_id(
+            tx,
+            inserted_part_ids,
+            step.parent_part_id.as_deref(),
+            step.tool_call_id.as_deref(),
+        )?;
         let updated_at = message.completed_at_ms.unwrap_or(message.created_at);
         let tokens = step
             .tokens
@@ -2935,7 +3019,7 @@ fn insert_normalized_message_steps(
               tokens = excluded.tokens,
               metadata = excluded.metadata,
               status = excluded.status,
-              parent_part_id = excluded.parent_part_id,
+              parent_part_id = COALESCE(excluded.parent_part_id, turn_parts.parent_part_id),
               tool_call_id = excluded.tool_call_id,
               message_id = excluded.message_id,
               tool_name = excluded.tool_name,
@@ -2943,7 +3027,7 @@ fn insert_normalized_message_steps(
               tool_output = excluded.tool_output,
               tool_error = excluded.tool_error,
               duration_ms = excluded.duration_ms,
-              part_index = excluded.part_index,
+              part_index = turn_parts.part_index,
               pruned = excluded.pruned,
               created_at = MIN(turn_parts.created_at, excluded.created_at),
               updated_at = excluded.updated_at
@@ -3001,7 +3085,7 @@ fn insert_message_part(
         message.created_at,
         updated_at,
     )?;
-    let part_index = update_next_part_index(turn_indexes, &turn_id)?;
+    let part_index = resolve_stable_part_index(tx, turn_indexes, &turn_id, &message.id)?;
     let content = if message.role == "user" {
         optional_text(&message.content)
     } else {
@@ -3033,7 +3117,7 @@ fn insert_message_part(
           completed_at = excluded.completed_at,
           duration_ms = excluded.duration_ms,
           edited_at = excluded.edited_at,
-          part_index = excluded.part_index,
+          part_index = turn_parts.part_index,
           pruned = excluded.pruned,
           created_at = MIN(turn_parts.created_at, excluded.created_at),
           updated_at = excluded.updated_at
@@ -3082,8 +3166,8 @@ fn insert_summary_part(
         summary.completed_at_ms,
         summary.completed_at_ms,
     )?;
-    let part_index = update_next_part_index(turn_indexes, &turn_id)?;
     let part_id = format!("summary-part-{}", summary.turn_id);
+    let part_index = resolve_stable_part_index(tx, turn_indexes, &turn_id, &part_id)?;
     let message_ids = serde_json::to_string(&summary.message_ids)
         .map_err(|error| format!("Could not serialize Wizzle summary message ids: {error}"))?;
 
@@ -3114,7 +3198,7 @@ fn insert_summary_part(
           replay_message_count_image_capable = excluded.replay_message_count_image_capable,
           replay_message_count_text_only = excluded.replay_message_count_text_only,
           completed_at = excluded.completed_at,
-          part_index = excluded.part_index,
+          part_index = turn_parts.part_index,
           pruned = excluded.pruned,
           created_at = MIN(turn_parts.created_at, excluded.created_at),
           updated_at = excluded.updated_at
@@ -3472,6 +3556,30 @@ pub fn upsert_turn_summary(input: UpsertTurnSummaryInput) -> Result<(), String> 
         .map_err(|error| db_error("Could not finish turn summary persistence", error))
 }
 
+fn resolve_finalize_turn_result(
+    turn_id: &str,
+    desired_status: &str,
+    rows_updated: usize,
+    current_status: Option<&str>,
+) -> Result<(), String> {
+    if rows_updated > 0 {
+        return Ok(());
+    }
+
+    match current_status {
+        None => Err(format!(
+            "Could not finalize turn {turn_id} because it was not found."
+        )),
+        // Idempotent: already closed with the same terminal status.
+        Some(existing) if existing == desired_status => Ok(()),
+        // Already terminal under a different label — still closed, not stuck running.
+        Some("complete") | Some("interrupted") | Some("error") => Ok(()),
+        Some(existing) => Err(format!(
+            "Could not finalize turn {turn_id} from status {existing}."
+        )),
+    }
+}
+
 pub fn finalize_turn(input: FinalizeTurnInput) -> Result<(), String> {
     validate_storage_id("session", &input.session_id)?;
     validate_storage_id("turn", &input.turn_id)?;
@@ -3484,24 +3592,44 @@ pub fn finalize_turn(input: FinalizeTurnInput) -> Result<(), String> {
 
     ensure_workspace_storage()?;
     let conn = open_database()?;
-    conn.execute(
-        "
-        UPDATE turns
-        SET status = ?1,
-            updated_at = MAX(updated_at, ?2)
-        WHERE id = ?3
-          AND session_id = ?4
-          AND status = 'running'
-        ",
-        params![
-            status,
-            input.updated_at_ms as i64,
-            input.turn_id,
-            input.session_id
-        ],
+    let updated = conn
+        .execute(
+            "
+            UPDATE turns
+            SET status = ?1,
+                updated_at = MAX(updated_at, ?2)
+            WHERE id = ?3
+              AND session_id = ?4
+              AND status = 'running'
+            ",
+            params![
+                status,
+                input.updated_at_ms as i64,
+                input.turn_id,
+                input.session_id
+            ],
+        )
+        .map_err(|error| db_error("Could not finalize the Wizzle turn", error))?;
+
+    if updated > 0 {
+        return Ok(());
+    }
+
+    let current_status = conn
+        .query_row(
+            "SELECT status FROM turns WHERE id = ?1 AND session_id = ?2",
+            params![input.turn_id, input.session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| db_error("Could not read Wizzle turn status after finalize", error))?;
+
+    resolve_finalize_turn_result(
+        &input.turn_id,
+        status,
+        updated,
+        current_status.as_deref(),
     )
-    .map_err(|error| db_error("Could not finalize the Wizzle turn", error))?;
-    Ok(())
 }
 
 pub fn persist_session(input: PersistWorkspaceSessionInput) -> Result<(), String> {
@@ -4046,6 +4174,448 @@ mod tests {
     }
 
     #[test]
+    fn reupserting_messages_preserves_part_index_order() {
+        let mut conn = migrated_memory_db();
+        let now = now_unix_ms();
+        insert_test_session(&conn);
+
+        let user = StoredMessageRecord {
+            content: "hello".to_string(),
+            created_at: now,
+            id: "message-user-1".to_string(),
+            role: "user".to_string(),
+            status: Some("done".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            ..StoredMessageRecord::default()
+        };
+        let assistant = StoredMessageRecord {
+            content: String::new(),
+            created_at: now + 1,
+            id: "message-assistant-1".to_string(),
+            role: "assistant".to_string(),
+            status: Some("streaming".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            parts: vec![StoredMessageStepRecord {
+                content: Some("thinking".to_string()),
+                created_at_ms: Some(now + 1),
+                id: "message-assistant-1-content".to_string(),
+                status: Some("streaming".to_string()),
+                r#type: "content".to_string(),
+                ..StoredMessageStepRecord::default()
+            }],
+            ..StoredMessageRecord::default()
+        };
+
+        {
+            let tx = conn.transaction().expect("start first write");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("load indexes");
+            let mut inserted_part_ids = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted_part_ids,
+                "session-1",
+                &mut turn_indexes,
+                &user,
+                Some("running"),
+            )
+            .expect("insert user");
+            insert_message_part(
+                &tx,
+                &mut inserted_part_ids,
+                "session-1",
+                &mut turn_indexes,
+                &assistant,
+                Some("running"),
+            )
+            .expect("insert assistant");
+            tx.commit().expect("commit first write");
+        }
+
+        let user_index_before: i64 = conn
+            .query_row(
+                "SELECT part_index FROM turn_parts WHERE id = 'message-user-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read user index");
+        let assistant_index_before: i64 = conn
+            .query_row(
+                "SELECT part_index FROM turn_parts WHERE id = 'message-assistant-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read assistant index");
+        assert!(
+            user_index_before < assistant_index_before,
+            "user should sort before assistant initially"
+        );
+
+        // Re-persist user last (settle path). Index must stay stable.
+        let updated_user = StoredMessageRecord {
+            content: "hello".to_string(),
+            completed_at_ms: Some(now + 10),
+            created_at: now,
+            id: "message-user-1".to_string(),
+            role: "user".to_string(),
+            status: Some("done".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            ..StoredMessageRecord::default()
+        };
+        {
+            let tx = conn.transaction().expect("start reupsert");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("load indexes");
+            let mut inserted_part_ids = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted_part_ids,
+                "session-1",
+                &mut turn_indexes,
+                &updated_user,
+                Some("running"),
+            )
+            .expect("reupsert user");
+            tx.commit().expect("commit reupsert");
+        }
+
+        let user_index_after: i64 = conn
+            .query_row(
+                "SELECT part_index FROM turn_parts WHERE id = 'message-user-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read user index after");
+        let assistant_index_after: i64 = conn
+            .query_row(
+                "SELECT part_index FROM turn_parts WHERE id = 'message-assistant-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read assistant index after");
+
+        assert_eq!(user_index_after, user_index_before);
+        assert_eq!(assistant_index_after, assistant_index_before);
+        assert!(
+            user_index_after < assistant_index_after,
+            "reupsert must not move user after assistant"
+        );
+
+        // Re-persist assistant content streaming update; content part index must stay stable.
+        let content_index_before: i64 = conn
+            .query_row(
+                "SELECT part_index FROM turn_parts WHERE id = 'message-assistant-1-content'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read content index");
+        let updated_assistant = StoredMessageRecord {
+            content: String::new(),
+            created_at: now + 1,
+            id: "message-assistant-1".to_string(),
+            role: "assistant".to_string(),
+            status: Some("streaming".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            parts: vec![StoredMessageStepRecord {
+                content: Some("thinking more".to_string()),
+                created_at_ms: Some(now + 1),
+                id: "message-assistant-1-content".to_string(),
+                status: Some("streaming".to_string()),
+                r#type: "content".to_string(),
+                ..StoredMessageStepRecord::default()
+            }],
+            ..StoredMessageRecord::default()
+        };
+        {
+            let tx = conn.transaction().expect("start assistant reupsert");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("load indexes");
+            let mut inserted_part_ids = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted_part_ids,
+                "session-1",
+                &mut turn_indexes,
+                &updated_assistant,
+                Some("running"),
+            )
+            .expect("reupsert assistant");
+            tx.commit().expect("commit assistant reupsert");
+        }
+        let content_index_after: i64 = conn
+            .query_row(
+                "SELECT part_index FROM turn_parts WHERE id = 'message-assistant-1-content'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read content index after");
+        let content_text: String = conn
+            .query_row(
+                "SELECT content FROM turn_parts WHERE id = 'message-assistant-1-content'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read content text");
+
+        assert_eq!(content_index_after, content_index_before);
+        assert_eq!(content_text, "thinking more");
+    }
+
+    #[test]
+    fn tool_messages_with_provider_ids_persist_results_and_parent_links() {
+        let mut conn = migrated_memory_db();
+        let now = now_unix_ms();
+        insert_test_session(&conn);
+
+        let tool_call_id = "call_00_ABzCHrM8TDY9yQ6gWYME8154";
+        let assistant_id = "message-assistant-2fc8bdd8-067a-4cb0-863b-dce69787e1d4";
+        let tool_call_part_id = format!("{assistant_id}-tool-call-{tool_call_id}");
+        let tool_message_id = format!("message-tool-{tool_call_id}");
+        let tool_result_part_id = format!("{tool_message_id}-result");
+
+        let assistant = StoredMessageRecord {
+            created_at: now,
+            id: assistant_id.to_string(),
+            role: "assistant".to_string(),
+            status: Some("done".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            parts: vec![StoredMessageStepRecord {
+                created_at_ms: Some(now),
+                id: tool_call_part_id.clone(),
+                input: Some(r#"{"command":"ls"}"#.to_string()),
+                name: Some("bash".to_string()),
+                status: Some("done".to_string()),
+                tool_call_id: Some(tool_call_id.to_string()),
+                r#type: "tool_call".to_string(),
+                ..StoredMessageStepRecord::default()
+            }],
+            ..StoredMessageRecord::default()
+        };
+
+        {
+            let tx = conn.transaction().expect("start assistant write");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("indexes");
+            let mut inserted = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted,
+                "session-1",
+                &mut turn_indexes,
+                &assistant,
+                Some("running"),
+            )
+            .expect("insert assistant with tool_call");
+            tx.commit().expect("commit assistant");
+        }
+
+        // Separate transaction (targeted persist of tool message alone).
+        let tool_message = StoredMessageRecord {
+            content: r#"{"ok":true,"stdout":"file.txt"}"#.to_string(),
+            completed_at_ms: Some(now + 5),
+            created_at: now + 2,
+            id: tool_message_id.clone(),
+            role: "tool".to_string(),
+            status: Some("done".to_string()),
+            tool_call_id: Some(tool_call_id.to_string()),
+            tool_name: Some("bash".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            parts: vec![StoredMessageStepRecord {
+                created_at_ms: Some(now + 2),
+                id: tool_result_part_id.clone(),
+                name: Some("bash".to_string()),
+                output: Some(r#"{"ok":true,"stdout":"file.txt"}"#.to_string()),
+                parent_part_id: Some(tool_call_part_id.clone()),
+                status: Some("done".to_string()),
+                tool_call_id: Some(tool_call_id.to_string()),
+                r#type: "tool_result".to_string(),
+                ..StoredMessageStepRecord::default()
+            }],
+            ..StoredMessageRecord::default()
+        };
+
+        {
+            let tx = conn.transaction().expect("start tool write");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("indexes");
+            let mut inserted = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted,
+                "session-1",
+                &mut turn_indexes,
+                &tool_message,
+                Some("running"),
+            )
+            .expect("insert tool message with underscore id");
+            tx.commit().expect("commit tool");
+        }
+
+        let (role, status): (String, String) = conn
+            .query_row(
+                "SELECT role, status FROM turn_parts WHERE id = ?1",
+                params![tool_message_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read tool message anchor");
+        assert_eq!(role, "tool");
+        assert_eq!(status, "done");
+
+        let (part_type, tool_output, parent_part_id, stored_tool_call_id): (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT part_type, tool_output, parent_part_id, tool_call_id FROM turn_parts WHERE id = ?1",
+                params![tool_result_part_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read tool_result part");
+
+        assert_eq!(part_type, "tool_result");
+        assert_eq!(
+            tool_output.as_deref(),
+            Some(r#"{"ok":true,"stdout":"file.txt"}"#)
+        );
+        assert_eq!(parent_part_id.as_deref(), Some(tool_call_part_id.as_str()));
+        assert_eq!(stored_tool_call_id.as_deref(), Some(tool_call_id));
+
+        // Re-upsert without parent should keep existing parent link.
+        let tool_message_without_parent = StoredMessageRecord {
+            content: r#"{"ok":true,"stdout":"file.txt"}"#.to_string(),
+            completed_at_ms: Some(now + 6),
+            created_at: now + 2,
+            id: tool_message_id.clone(),
+            role: "tool".to_string(),
+            status: Some("done".to_string()),
+            tool_call_id: Some(tool_call_id.to_string()),
+            tool_name: Some("bash".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            parts: vec![StoredMessageStepRecord {
+                created_at_ms: Some(now + 2),
+                id: tool_result_part_id.clone(),
+                name: Some("bash".to_string()),
+                output: Some(r#"{"ok":true,"stdout":"file.txt"}"#.to_string()),
+                parent_part_id: None,
+                status: Some("done".to_string()),
+                tool_call_id: Some(tool_call_id.to_string()),
+                r#type: "tool_result".to_string(),
+                ..StoredMessageStepRecord::default()
+            }],
+            ..StoredMessageRecord::default()
+        };
+        {
+            let tx = conn.transaction().expect("start tool reupsert");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("indexes");
+            let mut inserted = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted,
+                "session-1",
+                &mut turn_indexes,
+                &tool_message_without_parent,
+                Some("running"),
+            )
+            .expect("reupsert tool message");
+            tx.commit().expect("commit reupsert");
+        }
+
+        let parent_after: Option<String> = conn
+            .query_row(
+                "SELECT parent_part_id FROM turn_parts WHERE id = ?1",
+                params![tool_result_part_id],
+                |row| row.get(0),
+            )
+            .expect("read parent after reupsert");
+        assert_eq!(parent_after.as_deref(), Some(tool_call_part_id.as_str()));
+    }
+
+    #[test]
+    fn tool_result_parent_falls_back_to_tool_call_id_lookup() {
+        let mut conn = migrated_memory_db();
+        let now = now_unix_ms();
+        insert_test_session(&conn);
+
+        let tool_call_id = "call_01_fallbackParent";
+        let tool_call_part_id = "message-assistant-aaa-tool-call-call_01_fallbackParent";
+
+        {
+            let tx = conn.transaction().expect("tx");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("indexes");
+            let mut inserted = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted,
+                "session-1",
+                &mut turn_indexes,
+                &StoredMessageRecord {
+                    created_at: now,
+                    id: "message-assistant-aaa".to_string(),
+                    role: "assistant".to_string(),
+                    status: Some("done".to_string()),
+                    turn_id: Some("turn-1".to_string()),
+                    parts: vec![StoredMessageStepRecord {
+                        id: tool_call_part_id.to_string(),
+                        name: Some("bash".to_string()),
+                        input: Some("{}".to_string()),
+                        status: Some("done".to_string()),
+                        tool_call_id: Some(tool_call_id.to_string()),
+                        r#type: "tool_call".to_string(),
+                        ..StoredMessageStepRecord::default()
+                    }],
+                    ..StoredMessageRecord::default()
+                },
+                Some("running"),
+            )
+            .expect("assistant");
+            tx.commit().expect("commit");
+        }
+
+        {
+            let tx = conn.transaction().expect("tx tool");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("indexes");
+            let mut inserted = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted,
+                "session-1",
+                &mut turn_indexes,
+                &StoredMessageRecord {
+                    content: "done".to_string(),
+                    created_at: now + 1,
+                    id: format!("message-tool-{tool_call_id}"),
+                    role: "tool".to_string(),
+                    status: Some("done".to_string()),
+                    tool_call_id: Some(tool_call_id.to_string()),
+                    tool_name: Some("bash".to_string()),
+                    turn_id: Some("turn-1".to_string()),
+                    parts: vec![StoredMessageStepRecord {
+                        id: format!("message-tool-{tool_call_id}-result"),
+                        name: Some("bash".to_string()),
+                        output: Some("done".to_string()),
+                        // Wrong / missing parent id — resolve via tool_call_id.
+                        parent_part_id: Some("missing-parent".to_string()),
+                        status: Some("done".to_string()),
+                        tool_call_id: Some(tool_call_id.to_string()),
+                        r#type: "tool_result".to_string(),
+                        ..StoredMessageStepRecord::default()
+                    }],
+                    ..StoredMessageRecord::default()
+                },
+                Some("running"),
+            )
+            .expect("tool without valid parent id");
+            tx.commit().expect("commit tool");
+        }
+
+        let parent: Option<String> = conn
+            .query_row(
+                "SELECT parent_part_id FROM turn_parts WHERE id = ?1",
+                params![format!("message-tool-{tool_call_id}-result")],
+                |row| row.get(0),
+            )
+            .expect("parent");
+        assert_eq!(parent.as_deref(), Some(tool_call_part_id));
+    }
+
+    #[test]
     fn finalized_turn_rejects_targeted_message_updates() {
         let mut conn = migrated_memory_db();
         let now = now_unix_ms();
@@ -4061,6 +4631,22 @@ mod tests {
             .expect_err("final turn rejects updates");
 
         assert!(error.contains("already finalized"));
+    }
+
+    #[test]
+    fn resolve_finalize_turn_result_closes_running_and_is_idempotent() {
+        assert!(resolve_finalize_turn_result("turn-1", "complete", 1, None).is_ok());
+        assert!(resolve_finalize_turn_result("turn-1", "complete", 0, Some("complete")).is_ok());
+        assert!(resolve_finalize_turn_result("turn-1", "complete", 0, Some("interrupted")).is_ok());
+        assert!(resolve_finalize_turn_result("turn-1", "error", 0, Some("error")).is_ok());
+
+        let missing = resolve_finalize_turn_result("turn-missing", "complete", 0, None)
+            .expect_err("missing turn");
+        assert!(missing.contains("not found"));
+
+        let bad = resolve_finalize_turn_result("turn-1", "complete", 0, Some("running"))
+            .expect_err("still running after zero updates");
+        assert!(bad.contains("from status running"));
     }
 
     #[test]
