@@ -14,6 +14,11 @@ import {
   createToolMessage,
   type ToolExecutionPayload,
 } from "./agent/message-factories";
+import {
+  resolveForcedFinalDisplayContent,
+  type ForcedFinalKind,
+  type ForcedFinalOutcome,
+} from "./agent/forced-final";
 import { createRejectedToolPayload, createToolApprovalRequest } from "./tool-approval";
 import { normalizeStreamedToolCalls, streamAgentTurn } from "./agent/stream-turn";
 import {
@@ -165,9 +170,15 @@ function resolveRuntimeOperatingSystem() {
   return "unknown";
 }
 
+/**
+ * After tools have already run, a failed or empty forced-final stream must not
+ * fail the whole turn (#24 / #25). Always finishes an assistant message and
+ * returns an outcome the caller can settle as done.
+ */
 async function requestForcedFinalResponse(options: {
   chatId: string;
   conversation: ChatRequestMessage[];
+  forcedFinalKind: ForcedFinalKind;
   modelId: ModelId;
   onAssistantChunk: (payload: {
     kind: "content" | "reasoning";
@@ -182,35 +193,67 @@ async function requestForcedFinalResponse(options: {
   reasoningLevel?: string | null;
   step: number;
   turnId: string;
-}) {
+}): Promise<ForcedFinalOutcome> {
   const finalAssistantMessage = createAssistantMessage(options.turnId);
   options.onAssistantCreated(finalAssistantMessage);
 
-  const finalTurn = await streamAgentTurn({
-    chatId: options.chatId,
-    conversation: [
-      ...options.conversation,
-      {
-        content: options.prompt,
-        role: "system",
-      },
-    ],
-    modelId: options.modelId,
-    onChunk: (chunk) =>
-      options.onAssistantChunk({
-        ...chunk,
-        messageId: finalAssistantMessage.id,
-      }),
-    onReasoningFinished: () => options.onReasoningFinished?.(finalAssistantMessage.id),
-    projectId: options.projectId,
-    reasoningLevel: options.reasoningLevel,
-    tools: [],
-    turnIndex: options.step,
-    toToolCallState: createToolCallState,
-  });
-  options.onAssistantStreamFinished(finalAssistantMessage.id, "final");
+  let streamedContent = "";
+  let streamError: unknown;
 
-  return finalTurn;
+  try {
+    const finalTurn = await streamAgentTurn({
+      chatId: options.chatId,
+      conversation: [
+        ...options.conversation,
+        {
+          content: options.prompt,
+          role: "system",
+        },
+      ],
+      modelId: options.modelId,
+      onChunk: (chunk) => {
+        if (chunk.kind === "content") {
+          streamedContent += chunk.text;
+        }
+        options.onAssistantChunk({
+          ...chunk,
+          messageId: finalAssistantMessage.id,
+        });
+      },
+      onReasoningFinished: () => options.onReasoningFinished?.(finalAssistantMessage.id),
+      projectId: options.projectId,
+      reasoningLevel: options.reasoningLevel,
+      tools: [],
+      turnIndex: options.step,
+      toToolCallState: createToolCallState,
+    });
+    streamedContent = finalTurn.content || streamedContent;
+  } catch (error) {
+    streamError = error;
+    frontendLogger.error("frontend.agent", "forced_final_response_failed", {
+      error,
+      forcedFinalKind: options.forcedFinalKind,
+      turnIdLength: options.turnId.length,
+    });
+  }
+
+  const outcome = resolveForcedFinalDisplayContent({
+    error: streamError,
+    kind: options.forcedFinalKind,
+    streamedContent,
+  });
+
+  // Inject fallback only when the stream left the assistant empty.
+  if (outcome.kind !== "ok" && !streamedContent.trim()) {
+    options.onAssistantChunk({
+      kind: "content",
+      messageId: finalAssistantMessage.id,
+      text: outcome.content,
+    });
+  }
+
+  options.onAssistantStreamFinished(finalAssistantMessage.id, "final");
+  return outcome;
 }
 
 export async function runWorkspaceAgent(options: {
@@ -504,9 +547,10 @@ export async function runWorkspaceAgent(options: {
           turnIdLength: options.turnId.length,
         });
 
-        const finalTurn = await requestForcedFinalResponse({
+        const finalOutcome = await requestForcedFinalResponse({
           chatId: options.chatId,
           conversation,
+          forcedFinalKind: "after_tools",
           modelId: options.modelId,
           onAssistantChunk: options.onAssistantChunk,
           onAssistantCreated: options.onAssistantCreated,
@@ -519,10 +563,11 @@ export async function runWorkspaceAgent(options: {
           turnId: options.turnId,
         });
         frontendLogger.info("frontend.agent", "forced_final_response_finished", {
-          contentLength: finalTurn.content.length,
-          reasoningLength: finalTurn.reasoning.length,
+          contentLength: finalOutcome.content.length,
+          outcomeKind: finalOutcome.kind,
           step,
           turnIdLength: options.turnId.length,
+          usedFallback: finalOutcome.kind !== "ok",
         });
       }
 
@@ -530,6 +575,7 @@ export async function runWorkspaceAgent(options: {
         step,
         turnIdLength: options.turnId.length,
       });
+      // Tools already ran: forced-final failure/empty still settles done (#24/#25).
       options.onTurnFinished({ status: "done", turnId: options.turnId });
       return;
     }
@@ -687,9 +733,10 @@ export async function runWorkspaceAgent(options: {
   });
 
   if (usedToolsInTurn) {
-    const finalTurn = await requestForcedFinalResponse({
+    const finalOutcome = await requestForcedFinalResponse({
       chatId: options.chatId,
       conversation,
+      forcedFinalKind: "max_steps",
       modelId: options.modelId,
       onAssistantChunk: options.onAssistantChunk,
       onAssistantCreated: options.onAssistantCreated,
@@ -703,15 +750,15 @@ export async function runWorkspaceAgent(options: {
     });
 
     frontendLogger.info("frontend.agent", "forced_final_response_after_limit_finished", {
-      contentLength: finalTurn.content.length,
-      reasoningLength: finalTurn.reasoning.length,
+      contentLength: finalOutcome.content.length,
+      outcomeKind: finalOutcome.kind,
       turnIdLength: options.turnId.length,
+      usedFallback: finalOutcome.kind !== "ok",
     });
 
-    if (finalTurn.content.trim().length > 0) {
-      options.onTurnFinished({ status: "done", turnId: options.turnId });
-      return;
-    }
+    // Max steps after tools: always done. Empty/failed final uses fallback text (#25/#60).
+    options.onTurnFinished({ status: "done", turnId: options.turnId });
+    return;
   }
 
   options.onTurnFinished({ status: "error", turnId: options.turnId });
