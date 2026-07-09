@@ -4,6 +4,11 @@ import type { PropsWithChildren, ReactNode } from "react";
 interface AppDialogProps {
   actions: ReactNode;
   description?: string;
+  /**
+   * Top border above the action row. Only for long scrollable forms
+   * (add/edit provider); keep off for simple confirms and short dialogs.
+   */
+  footerDivider?: boolean;
   onClose: () => void;
   /** Wider panel for multi-field forms (provider editor). */
   size?: "default" | "wide";
@@ -14,6 +19,7 @@ export function AppDialog({
   actions,
   children,
   description,
+  footerDivider = false,
   onClose,
   size = "default",
   title,
@@ -46,7 +52,14 @@ export function AppDialog({
           <div className="min-h-0 flex-1 overflow-y-auto px-5 pt-4">{children}</div>
         ) : null}
 
-        <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-panel)] px-5 py-4">
+        <div
+          className={[
+            "shrink-0 bg-[var(--color-panel)] px-5",
+            footerDivider
+              ? "border-t border-[var(--color-border)] py-4"
+              : "pb-5 pt-5",
+          ].join(" ")}
+        >
           <div className="flex justify-end gap-2.5">{actions}</div>
         </div>
       </div>

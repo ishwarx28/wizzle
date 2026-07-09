@@ -1093,6 +1093,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
             resetProviderForm();
             closeDialog();
           }}
+          footerDivider
           size="wide"
           title={dialog.mode === "edit" ? "Edit provider" : "Add provider"}
         >
