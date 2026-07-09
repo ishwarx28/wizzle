@@ -97,6 +97,14 @@ pub struct ProviderChatCompletionInput {
     pub project_id: String,
     pub reasoning_level: Option<String>,
     pub request_id: Option<String>,
+    /// When false, do not touch session runtime Busy/Idle (title, compaction helpers).
+    /// Defaults to true when omitted.
+    #[serde(default = "default_manage_session_runtime")]
+    pub manage_session_runtime: bool,
+}
+
+fn default_manage_session_runtime() -> bool {
+    true
 }
 
 #[derive(Clone, Deserialize)]

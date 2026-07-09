@@ -13,6 +13,7 @@ import {
   type ReplayBlock,
 } from "../context-budget";
 import { getAssistantConversationContent, getMessageParts } from "../message-parts";
+import { shouldManageSessionRuntimeForHelperCompletion } from "../session-runtime-helpers";
 import type {
   CompactedContextRecord,
   Message,
@@ -319,6 +320,8 @@ async function requestSummary(options: {
       modelUuid: options.model.id,
       projectId: options.projectId,
       chatId: options.chatId,
+      // Frontend owns compacting/busy; do not Idle when the summary completes (#31 family).
+      manageSessionRuntime: shouldManageSessionRuntimeForHelperCompletion(),
       reasoningLevel: resolveCompactionReasoningLevel(options.model),
       body: {
         model: options.model.id,

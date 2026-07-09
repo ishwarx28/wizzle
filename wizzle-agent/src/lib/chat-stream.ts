@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 
 import { frontendLogger } from "./logger";
 import { resolveMaxPromptSize } from "./env";
+import { shouldManageSessionRuntimeForHelperCompletion } from "./session-runtime-helpers";
 import type { Message, ModelCapability, ModelId, PreviewFile } from "../types/workspace";
 import {
   createToolCallFromPart,
@@ -971,6 +972,8 @@ export async function generateWorkspaceSessionTitle(options: {
         modelUuid: options.modelId,
         projectId: options.projectId,
         chatId: options.chatId,
+        // Detached helper: must not flip session Busy/Idle during the agent run (#31/#32).
+        manageSessionRuntime: shouldManageSessionRuntimeForHelperCompletion(),
         reasoningLevel: resolveLowestReasoningLevel(options.reasoningLevels),
         body: buildTitleRequestBody(maxTokens),
       },

@@ -144,6 +144,14 @@ impl RunCoordinator {
             slot.wake_requested = false;
         }
     }
+
+    fn is_running(&self, key: &str) -> bool {
+        self.slots
+            .lock()
+            .ok()
+            .and_then(|slots| slots.get(key).map(|slot| slot.running))
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Clone)]
@@ -274,6 +282,36 @@ impl AgentRuntimeState {
 
     pub fn wake_session_run(&self, session_id: &str) {
         self.inner.coordinator.wake(session_id);
+    }
+
+    /// True while `begin_session_run` is outstanding (agent turn still active).
+    pub fn is_session_run_active(&self, session_id: &str) -> bool {
+        self.inner.coordinator.is_running(session_id)
+    }
+
+    /// Release provider-owned Busy → Idle only when no agent run still owns the session.
+    /// Prevents title/compaction/stream step completion from clearing Busy mid-turn (#31/#61).
+    pub fn release_provider_session_runtime(
+        &self,
+        window: &Window,
+        session_id: &str,
+        interrupted: bool,
+    ) -> Result<(), String> {
+        if self.is_session_run_active(session_id) {
+            // Agent run still owns runtime (busy / compacting / waiting_approval).
+            return Ok(());
+        }
+
+        if interrupted {
+            return self.set_state(
+                window,
+                session_id,
+                SessionRuntimeStateKind::Interrupted,
+                None,
+            );
+        }
+
+        self.set_state(window, session_id, SessionRuntimeStateKind::Idle, None)
     }
 
     pub fn set_state(

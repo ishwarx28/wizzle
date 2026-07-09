@@ -158,7 +158,11 @@ pub async fn complete_provider_chat(
 
     request_store.insert(request_id.clone(), abort_handle.clone())?;
     runtime.register_provider_request(&input.chat_id, &request_id, abort_handle)?;
-    let _ = runtime.set_state(&window, &input.chat_id, SessionRuntimeStateKind::Busy, None);
+    // Helpers (title, compaction) pass manage_session_runtime=false so they never
+    // flip Idle while the agent run still owns the session (#31/#32/#61).
+    if input.manage_session_runtime && !runtime.is_session_run_active(&input.chat_id) {
+        let _ = runtime.set_state(&window, &input.chat_id, SessionRuntimeStateKind::Busy, None);
+    }
 
     let completion_result = Abortable::new(
         openai_compatible::complete_chat(
@@ -176,16 +180,15 @@ pub async fn complete_provider_chat(
 
     let result = match completion_result {
         Ok(result) => {
-            let _ = runtime.set_state(&window, &input.chat_id, SessionRuntimeStateKind::Idle, None);
+            if input.manage_session_runtime {
+                let _ = runtime.release_provider_session_runtime(&window, &input.chat_id, false);
+            }
             result
         }
         Err(Aborted) => {
-            let _ = runtime.set_state(
-                &window,
-                &input.chat_id,
-                SessionRuntimeStateKind::Interrupted,
-                None,
-            );
+            if input.manage_session_runtime {
+                let _ = runtime.release_provider_session_runtime(&window, &input.chat_id, true);
+            }
             Err(INTERRUPTED_ERROR.to_string())
         }
     };
@@ -245,7 +248,11 @@ pub async fn stream_provider_chat(
 
     request_store.insert(request_id.clone(), abort_handle.clone())?;
     runtime.register_provider_request(&input.chat_id, &request_id, abort_handle)?;
-    let _ = runtime.set_state(&window, &input.chat_id, SessionRuntimeStateKind::Busy, None);
+    // Stream steps run inside an agent turn: begin_session_run already set Busy.
+    // Only mark Busy when there is no active run (standalone streams).
+    if !runtime.is_session_run_active(&input.chat_id) {
+        let _ = runtime.set_state(&window, &input.chat_id, SessionRuntimeStateKind::Busy, None);
+    }
 
     let stream_result = Abortable::new(
         openai_compatible::stream_chat(
@@ -265,19 +272,15 @@ pub async fn stream_provider_chat(
 
     match stream_result {
         Ok(result) => {
-            let _ = runtime.set_state(&window, &input.chat_id, SessionRuntimeStateKind::Idle, None);
+            // Never Idle while the session run is still open (tools / next steps).
+            let _ = runtime.release_provider_session_runtime(&window, &input.chat_id, false);
             if result.is_ok() {
                 repository::mark_model_used(&resolved_model.model_uuid)?;
             }
             result
         }
         Err(Aborted) => {
-            let _ = runtime.set_state(
-                &window,
-                &input.chat_id,
-                SessionRuntimeStateKind::Interrupted,
-                None,
-            );
+            let _ = runtime.release_provider_session_runtime(&window, &input.chat_id, true);
             Err(INTERRUPTED_ERROR.to_string())
         }
     }
