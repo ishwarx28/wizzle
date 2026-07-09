@@ -984,13 +984,23 @@ export function Composer({
     }
 
     const cachedState = composerMemoryRef.current.get(nextComposerKey);
+    // Queue may already be rekeyed here (draft → real session promote, #45).
+    const existingQueue = getComposerSessionQueue(nextComposerKey);
 
     if (cachedState) {
       setDraft(cachedState.draft);
       setAttachments(cachedState.attachments);
       hydrateComposerSessionQueue(nextComposerKey, cachedState.queuedSubmissions, {
-        overwrite: true,
+        overwrite: existingQueue.length === 0,
       });
+      setIsComposerStateReady(Boolean(persistedComposerSessionId));
+      return;
+    }
+
+    if (existingQueue.length > 0) {
+      // Promoted/migrated queue already lives under this session id (#45).
+      setDraft("");
+      setAttachments([]);
       setIsComposerStateReady(Boolean(persistedComposerSessionId));
       return;
     }
@@ -1015,6 +1025,7 @@ export function Composer({
 
         setDraft(composerState.draftText);
         setAttachments([]);
+        // Do not wipe a queue that arrived via draft promote while SQL was loading (#45).
         hydrateComposerSessionQueue(
           nextComposerKey,
           composerState.queuedMessages.map((message) => ({
@@ -1026,7 +1037,7 @@ export function Composer({
                 ? message.status
                 : "queued",
           })),
-          { overwrite: true },
+          { overwrite: getComposerSessionQueue(nextComposerKey).length === 0 },
         );
         setIsComposerStateReady(true);
       })

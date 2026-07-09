@@ -32,7 +32,11 @@ import {
   collectRetainedTurnIds,
   filterCompactedTurnIds,
 } from "../lib/session-edit-truncate";
-import { drainComposerSessionQueue } from "../lib/composer-session-queue";
+import {
+  drainComposerSessionQueue,
+  migrateComposerSessionQueue,
+  rekeyComposerSessionQueue,
+} from "../lib/composer-session-queue";
 import { createDurablePersistFailureReporter } from "../lib/durable-persist-failure";
 import { getErrorMessage } from "../lib/settle-turn-persist";
 import {
@@ -1253,6 +1257,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     let fallbackTitle = deriveSessionTitle(content, attachments);
 
     if (isDraftSelection && draftSession) {
+      const draftSessionId = draftSession.id;
       targetSessionId = `session-${crypto.randomUUID()}`;
       shouldGenerateTitle = true;
 
@@ -1294,6 +1299,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           ...withSendingSessionState(targetSessionId, sendingSessionIds),
         };
       });
+      // #45: rekey immediately (sync) so Composer session switch does not drop the queue.
+      rekeyComposerSessionQueue(draftSessionId, targetSessionId);
+      void migrateComposerSessionQueue(draftSessionId, targetSessionId).catch(() => undefined);
       frontendLogger.info("frontend.workspace", "draft_session_promoted", {
         sessionIdLength: targetSessionId.length,
         turnIdLength: turnId.length,

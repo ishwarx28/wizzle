@@ -454,61 +454,104 @@ fn load_attachment_preview(
     Ok(payload)
 }
 
-/// Crash/reload recovery (#8): unfinished `streaming` must become `interrupted`, never `done`.
-/// Kept in sync with `sqlite_repository::recover_unfinished_streaming_message`.
+fn is_incomplete_lifecycle_status(status: Option<&str>) -> bool {
+    matches!(status, Some("streaming" | "pending" | "running"))
+}
+
+/// Crash/reload recovery (#8 / #68): unfinished work becomes `interrupted`, never `done`.
+/// Kept in sync with `sqlite_repository::recover_incomplete_message`.
 fn normalize_message_record(record: StoredMessageRecord) -> StoredMessageRecord {
-    let message_streaming = record.status.as_deref() == Some("streaming");
-    let has_streaming_parts = record
+    let message_incomplete = is_incomplete_lifecycle_status(record.status.as_deref());
+    let has_incomplete_parts = record
         .parts
         .iter()
-        .any(|part| part.status.as_deref() == Some("streaming"));
+        .any(|part| is_incomplete_lifecycle_status(part.status.as_deref()));
+    let has_incomplete_tool_calls = record
+        .tool_calls
+        .iter()
+        .any(|tool_call| is_incomplete_lifecycle_status(tool_call.status.as_deref()));
+    let has_incomplete_tool_results = record
+        .tool_results
+        .iter()
+        .any(|tool_result| is_incomplete_lifecycle_status(tool_result.status.as_deref()));
 
-    if !message_streaming && !has_streaming_parts {
+    if !message_incomplete
+        && !has_incomplete_parts
+        && !has_incomplete_tool_calls
+        && !has_incomplete_tool_results
+    {
+        if record.role == "user"
+            && matches!(record.status.as_deref(), Some("interrupted" | "error"))
+        {
+            let mut record = record;
+            record.status = Some("done".to_string());
+            return record;
+        }
         return record;
     }
 
     let mut record = record;
 
-    if message_streaming {
-        let has_visible_content = !record.content.trim().is_empty()
-            || record
-                .reasoning
-                .as_ref()
-                .is_some_and(|value| !value.trim().is_empty())
-            || record.parts.iter().any(|part| {
-                matches!(part.r#type.as_str(), "content" | "activity_content")
-                    && part
-                        .content
-                        .as_ref()
-                        .is_some_and(|value| !value.trim().is_empty())
-            });
-
-        if record.role == "assistant" && !has_visible_content {
-            record.content = "Response interrupted.".to_string();
+    if record.role == "user" {
+        record.status = Some("done".to_string());
+        for part in &mut record.parts {
+            if is_incomplete_lifecycle_status(part.status.as_deref()) || part.status.is_none() {
+                part.status = Some("done".to_string());
+            }
         }
-
-        record.status = Some("interrupted".to_string());
         if record.completed_at_ms.is_none() {
             record.completed_at_ms = Some(record.created_at);
         }
+        return record;
+    }
+
+    let has_visible_content = !record.content.trim().is_empty()
+        || record
+            .reasoning
+            .as_ref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || record.parts.iter().any(|part| {
+            matches!(part.r#type.as_str(), "content" | "activity_content")
+                && part
+                    .content
+                    .as_ref()
+                    .is_some_and(|value| !value.trim().is_empty())
+        });
+
+    if record.role == "assistant" && !has_visible_content {
+        record.content = "Response interrupted.".to_string();
+    }
+
+    record.status = Some("interrupted".to_string());
+    if record.completed_at_ms.is_none() {
+        record.completed_at_ms = Some(record.created_at);
     }
 
     for part in &mut record.parts {
-        if part.status.as_deref() == Some("streaming")
-            || (message_streaming && part.status.is_none())
+        if is_incomplete_lifecycle_status(part.status.as_deref())
+            || (message_incomplete && part.status.is_none())
         {
-            part.status = Some("interrupted".to_string());
+            if part.status.as_deref() != Some("error") {
+                part.status = Some("interrupted".to_string());
+            }
         }
     }
 
     for tool_call in &mut record.tool_calls {
-        if message_streaming
-            && matches!(
-                tool_call.status.as_deref(),
-                Some("streaming" | "pending" | "running") | None
-            )
+        if is_incomplete_lifecycle_status(tool_call.status.as_deref())
+            || (message_incomplete && tool_call.status.is_none())
         {
-            tool_call.status = Some("interrupted".to_string());
+            if tool_call.status.as_deref() != Some("error") {
+                tool_call.status = Some("interrupted".to_string());
+            }
+        }
+    }
+
+    for tool_result in &mut record.tool_results {
+        if is_incomplete_lifecycle_status(tool_result.status.as_deref())
+            && tool_result.status.as_deref() != Some("error")
+        {
+            tool_result.status = Some("interrupted".to_string());
         }
     }
 

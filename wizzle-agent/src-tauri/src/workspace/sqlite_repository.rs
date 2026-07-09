@@ -1066,55 +1066,100 @@ fn to_workspace_turn_summary(record: StoredTurnSummaryRecord) -> WorkspaceTurnSu
     }
 }
 
-/// Crash/reload recovery (#8): unfinished `streaming` must become `interrupted`, never `done`.
-fn recover_unfinished_streaming_message(mut record: StoredMessageRecord) -> StoredMessageRecord {
-    let message_streaming = record.status.as_deref() == Some("streaming");
-    let has_streaming_parts = record
+fn is_incomplete_lifecycle_status(status: Option<&str>) -> bool {
+    matches!(status, Some("streaming" | "pending" | "running"))
+}
+
+/// Crash/reload recovery (#8 / #68): unfinished work becomes `interrupted`, never `done`.
+/// Covers streaming, pending, and running message/part/tool statuses (not only streaming).
+fn recover_incomplete_message(mut record: StoredMessageRecord) -> StoredMessageRecord {
+    let message_incomplete = is_incomplete_lifecycle_status(record.status.as_deref());
+    let has_incomplete_parts = record
         .parts
         .iter()
-        .any(|part| part.status.as_deref() == Some("streaming"));
+        .any(|part| is_incomplete_lifecycle_status(part.status.as_deref()));
+    let has_incomplete_tool_calls = record
+        .tool_calls
+        .iter()
+        .any(|tool_call| is_incomplete_lifecycle_status(tool_call.status.as_deref()));
+    let has_incomplete_tool_results = record
+        .tool_results
+        .iter()
+        .any(|tool_result| is_incomplete_lifecycle_status(tool_result.status.as_deref()));
 
-    if !message_streaming && !has_streaming_parts {
+    if !message_incomplete
+        && !has_incomplete_parts
+        && !has_incomplete_tool_calls
+        && !has_incomplete_tool_results
+    {
+        // Historical settle bug left user anchors as interrupted/error (#9); repair on load.
+        if record.role == "user"
+            && matches!(record.status.as_deref(), Some("interrupted" | "error"))
+        {
+            record.status = Some("done".to_string());
+        }
         return record;
     }
 
-    if message_streaming {
-        let has_visible_content = !record.content.trim().is_empty()
-            || record.parts.iter().any(|part| {
-                matches!(part.r#type.as_str(), "content" | "activity_content")
-                    && part
-                        .content
-                        .as_ref()
-                        .is_some_and(|value| !value.trim().is_empty())
-            });
-
-        // Keep any partial text; only inject fallback when the assistant is empty.
-        if record.role == "assistant" && !has_visible_content {
-            record.content = "Response interrupted.".to_string();
+    // User prompts were accepted; never leave them non-done after crash recovery.
+    if record.role == "user" {
+        record.status = Some("done".to_string());
+        for part in &mut record.parts {
+            if is_incomplete_lifecycle_status(part.status.as_deref()) || part.status.is_none() {
+                part.status = Some("done".to_string());
+            }
         }
-
-        record.status = Some("interrupted".to_string());
         if record.completed_at_ms.is_none() {
             record.completed_at_ms = Some(record.created_at);
         }
+        return record;
+    }
+
+    let has_visible_content = !record.content.trim().is_empty()
+        || record.parts.iter().any(|part| {
+            matches!(part.r#type.as_str(), "content" | "activity_content")
+                && part
+                    .content
+                    .as_ref()
+                    .is_some_and(|value| !value.trim().is_empty())
+        });
+
+    // Keep any partial text; only inject fallback when the assistant is empty.
+    if record.role == "assistant" && !has_visible_content {
+        record.content = "Response interrupted.".to_string();
+    }
+
+    record.status = Some("interrupted".to_string());
+    if record.completed_at_ms.is_none() {
+        record.completed_at_ms = Some(record.created_at);
     }
 
     for part in &mut record.parts {
-        if part.status.as_deref() == Some("streaming")
-            || (message_streaming && part.status.is_none())
+        if is_incomplete_lifecycle_status(part.status.as_deref())
+            || (message_incomplete && part.status.is_none())
         {
-            part.status = Some("interrupted".to_string());
+            // Terminal error parts stay error; other open work becomes interrupted.
+            if part.status.as_deref() != Some("error") {
+                part.status = Some("interrupted".to_string());
+            }
         }
     }
 
     for tool_call in &mut record.tool_calls {
-        if message_streaming
-            && matches!(
-                tool_call.status.as_deref(),
-                Some("streaming" | "pending" | "running") | None
-            )
+        if is_incomplete_lifecycle_status(tool_call.status.as_deref())
+            || (message_incomplete && tool_call.status.is_none())
         {
-            tool_call.status = Some("interrupted".to_string());
+            if tool_call.status.as_deref() != Some("error") {
+                tool_call.status = Some("interrupted".to_string());
+            }
+        }
+    }
+
+    for tool_result in &mut record.tool_results {
+        if is_incomplete_lifecycle_status(tool_result.status.as_deref()) {
+            if tool_result.status.as_deref() != Some("error") {
+                tool_result.status = Some("interrupted".to_string());
+            }
         }
     }
 
@@ -1122,7 +1167,24 @@ fn recover_unfinished_streaming_message(mut record: StoredMessageRecord) -> Stor
 }
 
 fn normalize_message_record(record: StoredMessageRecord) -> StoredMessageRecord {
-    recover_unfinished_streaming_message(record)
+    recover_incomplete_message(record)
+}
+
+/// Cold-load recovery (#68): a process restart cannot continue in-flight turns.
+fn interrupt_running_turns_on_load(conn: &Connection, session_id: &str) -> Result<(), String> {
+    let now = now_unix_ms() as i64;
+    conn.execute(
+        "
+        UPDATE turns
+        SET status = 'interrupted',
+            updated_at = MAX(updated_at, ?1)
+        WHERE session_id = ?2
+          AND status = 'running'
+        ",
+        params![now, session_id],
+    )
+    .map_err(|error| db_error("Could not recover running Wizzle turns on load", error))?;
+    Ok(())
 }
 
 fn derive_legacy_steps(record: &StoredMessageRecord) -> Vec<StoredMessageStepRecord> {
@@ -1608,8 +1670,8 @@ fn load_session_history(
             _ => {}
         }
 
-        // Same recovery as JSON/legacy load: never promote unfinished streams to done (#8).
-        *message = recover_unfinished_streaming_message(std::mem::take(message));
+        // Same recovery as JSON/legacy load: never promote unfinished work to done (#8/#68).
+        *message = recover_incomplete_message(std::mem::take(message));
     }
 
     fn parse_summary_message_ids(raw_value: Option<String>) -> Result<Vec<String>, String> {
@@ -1826,6 +1888,8 @@ fn load_workspace_session_payload(
     if let Some(compacted_context) = metadata.compacted_context.as_mut() {
         compacted_context.compacted_turn_ids = read_compacted_turn_ids(conn, session_id)?;
     }
+    // Cold load: in-flight agent state is gone — close stuck running turns (#68).
+    interrupt_running_turns_on_load(conn, session_id)?;
     let (messages, summaries) = load_session_history(conn, session_id)?;
     let root = ensure_workspace_storage()?;
     let session_root = sqlite_session_dir(&root, session_id)?;
@@ -4991,7 +5055,7 @@ mod tests {
             ..StoredMessageRecord::default()
         };
 
-        let recovered = recover_unfinished_streaming_message(record);
+        let recovered = recover_incomplete_message(record);
         assert_eq!(recovered.status.as_deref(), Some("interrupted"));
         assert_ne!(recovered.status.as_deref(), Some("done"));
         assert_eq!(recovered.content, "partial answer");
@@ -5016,7 +5080,7 @@ mod tests {
             ..StoredMessageRecord::default()
         };
 
-        let recovered = recover_unfinished_streaming_message(record);
+        let recovered = recover_incomplete_message(record);
         assert_eq!(recovered.status.as_deref(), Some("interrupted"));
         assert_eq!(recovered.content, "Response interrupted.");
         assert_eq!(recovered.parts[0].status.as_deref(), Some("interrupted"));
@@ -5040,7 +5104,7 @@ mod tests {
             ..StoredMessageRecord::default()
         };
 
-        let recovered = recover_unfinished_streaming_message(record.clone());
+        let recovered = recover_incomplete_message(record.clone());
         assert_eq!(recovered.status.as_deref(), Some("done"));
         assert_eq!(recovered.content, "finished");
         assert_eq!(recovered.parts[0].status.as_deref(), Some("done"));
@@ -5104,5 +5168,111 @@ mod tests {
             .expect("read running flag");
         assert_eq!(turn_b_flag, 0, "unlisted complete turn stays uncompacted");
         assert_eq!(running_flag, 0, "running turns are not marked compacted");
+    }
+
+    #[test]
+    fn pending_and_running_parts_become_interrupted_on_load() {
+        let record = StoredMessageRecord {
+            content: String::new(),
+            created_at: 1_000,
+            id: "message-assistant-mixed".to_string(),
+            role: "assistant".to_string(),
+            status: Some("done".to_string()),
+            parts: vec![
+                StoredMessageStepRecord {
+                    content: Some("done text".to_string()),
+                    id: "part-done".to_string(),
+                    status: Some("done".to_string()),
+                    r#type: "content".to_string(),
+                    ..StoredMessageStepRecord::default()
+                },
+                StoredMessageStepRecord {
+                    id: "part-pending-tool".to_string(),
+                    status: Some("pending".to_string()),
+                    r#type: "tool_call".to_string(),
+                    name: Some("bash".to_string()),
+                    tool_call_id: Some("call-1".to_string()),
+                    ..StoredMessageStepRecord::default()
+                },
+                StoredMessageStepRecord {
+                    id: "part-running-result".to_string(),
+                    status: Some("running".to_string()),
+                    r#type: "tool_result".to_string(),
+                    tool_call_id: Some("call-1".to_string()),
+                    ..StoredMessageStepRecord::default()
+                },
+            ],
+            tool_calls: vec![StoredToolCallRecord {
+                id: "call-1".to_string(),
+                input: Some("{}".to_string()),
+                name: "bash".to_string(),
+                status: Some("running".to_string()),
+            }],
+            ..StoredMessageRecord::default()
+        };
+
+        let recovered = recover_incomplete_message(record);
+        assert_eq!(recovered.status.as_deref(), Some("interrupted"));
+        assert_eq!(recovered.parts[0].status.as_deref(), Some("done"));
+        assert_eq!(recovered.parts[1].status.as_deref(), Some("interrupted"));
+        assert_eq!(recovered.parts[2].status.as_deref(), Some("interrupted"));
+        assert_eq!(
+            recovered.tool_calls[0].status.as_deref(),
+            Some("interrupted")
+        );
+    }
+
+    #[test]
+    fn user_message_interrupted_status_repairs_to_done_on_load() {
+        let record = StoredMessageRecord {
+            content: "hello".to_string(),
+            created_at: 1_000,
+            id: "message-user-1".to_string(),
+            role: "user".to_string(),
+            status: Some("interrupted".to_string()),
+            ..StoredMessageRecord::default()
+        };
+
+        let recovered = recover_incomplete_message(record);
+        assert_eq!(recovered.status.as_deref(), Some("done"));
+        assert_eq!(recovered.content, "hello");
+    }
+
+    #[test]
+    fn interrupt_running_turns_on_load_closes_stuck_turns() {
+        let conn = migrated_memory_db();
+        let now = now_unix_ms() as i64;
+        insert_test_session(&conn);
+        conn.execute(
+            "INSERT INTO turns (id, session_id, turn_index, status, created_at, updated_at)
+             VALUES ('turn-running', 'session-1', 0, 'running', ?1, ?1)",
+            params![now],
+        )
+        .expect("insert running turn");
+        conn.execute(
+            "INSERT INTO turns (id, session_id, turn_index, status, created_at, updated_at)
+             VALUES ('turn-complete', 'session-1', 1, 'complete', ?1, ?1)",
+            params![now],
+        )
+        .expect("insert complete turn");
+
+        interrupt_running_turns_on_load(&conn, "session-1").expect("recover turns");
+
+        let running_status: String = conn
+            .query_row(
+                "SELECT status FROM turns WHERE id = 'turn-running'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read running");
+        let complete_status: String = conn
+            .query_row(
+                "SELECT status FROM turns WHERE id = 'turn-complete'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read complete");
+        assert_eq!(running_status, "interrupted");
+        assert_eq!(complete_status, "complete");
     }
 }

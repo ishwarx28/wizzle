@@ -231,6 +231,46 @@ export function hydrateComposerSessionQueue(
   setComposerSessionQueue(sessionId, items);
 }
 
+/**
+ * Move queue items from a draft session id to the promoted real session (#45).
+ * In-flight "sending" items become "queued" again under the new id.
+ */
+export function rekeyComposerSessionQueue(
+  fromSessionId: string,
+  toSessionId: string,
+): ComposerQueueItem[] {
+  if (!fromSessionId || !toSessionId || fromSessionId === toSessionId) {
+    return getComposerSessionQueue(toSessionId);
+  }
+
+  const fromItems = getComposerSessionQueue(fromSessionId);
+  const toItems = getComposerSessionQueue(toSessionId);
+  const moved = fromItems.map((item) =>
+    item.status === "sending" ? { ...item, status: "queued" as const } : { ...item },
+  );
+  const merged = [...toItems, ...moved];
+  setComposerSessionQueue(toSessionId, merged);
+
+  if (queuesBySessionId.has(fromSessionId)) {
+    queuesBySessionId.delete(fromSessionId);
+    notify(fromSessionId);
+  }
+
+  return merged;
+}
+
+/** Rekey in-memory queue and best-effort persist under the new session id. */
+export async function migrateComposerSessionQueue(
+  fromSessionId: string,
+  toSessionId: string,
+): Promise<ComposerQueueItem[]> {
+  const merged = rekeyComposerSessionQueue(fromSessionId, toSessionId);
+  if (merged.length > 0) {
+    await persistQueueOnly(toSessionId, merged);
+  }
+  return merged;
+}
+
 /** Test helper: clear all in-memory queues. */
 export function resetComposerSessionQueuesForTests() {
   queuesBySessionId.clear();

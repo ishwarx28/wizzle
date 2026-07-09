@@ -8,6 +8,7 @@ const {
   applyComposerQueueSendResult,
   createComposerQueueItem,
   markComposerQueueItemStatus,
+  rekeyComposerSessionQueue,
   removeComposerQueueItem,
   resetComposerSessionQueuesForTests,
   selectNextQueuedComposerItem,
@@ -53,6 +54,22 @@ function main() {
   setComposerSessionQueue("s1", [a]);
   assert(getComposerSessionQueue("s1").length === 1, "module get/set");
   assert(removeComposerQueueItem([a, b], a.id)[0]?.id === b.id, "remove");
+
+  resetComposerSessionQueuesForTests();
+  const draftA = createComposerQueueItem({ attachments: [], prompt: "queued on draft" });
+  const draftB = createComposerQueueItem({ attachments: [], prompt: "sending on draft" });
+  setComposerSessionQueue("draft-project", [
+    draftA,
+    { ...draftB, status: "sending" },
+  ]);
+  const rekeyed = rekeyComposerSessionQueue("draft-project", "session-real");
+  assert(rekeyed.length === 2, "rekey moves both items");
+  assert(getComposerSessionQueue("draft-project").length === 0, "draft queue cleared");
+  assert(getComposerSessionQueue("session-real").length === 2, "real session has queue");
+  assert(
+    getComposerSessionQueue("session-real").every((item) => item.status === "queued"),
+    "sending becomes queued after promote rekey",
+  );
 
   console.log("composer-session-queue tests passed");
 }
