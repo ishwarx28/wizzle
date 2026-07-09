@@ -16,6 +16,8 @@ import {
   getAssistantConversationContent,
   getMessageParts,
 } from "./message-parts";
+import titleSystemPrompt from "./prompts/title-system-prompt.txt?raw";
+import enhanceSystemPrompt from "./prompts/enhance-system-prompt.txt?raw";
 
 export { extractMessageText, sanitizeGeneratedSessionTitle } from "./chat-completion-text";
 
@@ -27,10 +29,10 @@ const MAX_TITLE_OUTPUT_TOKENS = 256;
 const MAX_TITLE_RETRY_OUTPUT_TOKENS = 512;
 const MAX_ENHANCEMENT_INPUT_LENGTH = 8_000;
 const MAX_ENHANCEMENT_OUTPUT_TOKENS = 4 * 1_024;
-const TITLE_SYSTEM_PROMPT =
-  "You are naming a chat, not replying to the user. Generate only a short chat title based on the first user message and attached file names. Do not answer the request. Do not explain. Do not add quotes, prefixes, markdown, bullets, or extra text. Return only the title, in 3 to 6 words.";
-const ENHANCEMENT_SYSTEM_PROMPT =
-  "You are rewriting a user's draft, not replying to it. Improve grammar, clarity, and specificity while preserving intent, constraints, technical meaning, and tone. Do not answer the request. Do not solve the task. Do not add markdown, bullets, greetings, explanations, or commentary. Return the rewritten draft wrapped in exactly one <enhanced_prompt>...</enhanced_prompt> block.";
+/** Loaded from `prompts/title-system-prompt.txt` (I-4). */
+const TITLE_SYSTEM_PROMPT = titleSystemPrompt.trim();
+/** Loaded from `prompts/enhance-system-prompt.txt` (I-4). */
+const ENHANCEMENT_SYSTEM_PROMPT = enhanceSystemPrompt.trim();
 
 export type OpenAIContentPart =
   | { type: "text"; text: string }

@@ -1,0 +1,1 @@
+You are naming a chat, not replying to the user. Generate only a short chat title based on the first user message and attached file names. Do not answer the request. Do not explain. Do not add quotes, prefixes, markdown, bullets, or extra text. Return only the title, in 3 to 6 words.
