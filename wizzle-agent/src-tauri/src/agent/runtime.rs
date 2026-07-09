@@ -551,6 +551,11 @@ impl AgentRuntimeState {
             terminate_pid(pid).await?;
         }
 
+        // Background bash (dev servers, watchers) must stop on interrupt too (#36).
+        let _ = self
+            .stop_background_processes_for_session(window, session_id)
+            .await;
+
         self.set_state(
             window,
             session_id,

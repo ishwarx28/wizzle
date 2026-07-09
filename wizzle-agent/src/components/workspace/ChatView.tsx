@@ -6,6 +6,7 @@ import { buildDisplayMessages } from "../../lib/message-parts";
 import { useWorkspaceStore } from "../../store/workspace-store";
 import { Composer } from "./Composer";
 import { MessageBubble } from "./MessageBubble";
+import { SessionProcessPanel } from "./SessionProcessPanel";
 import { ToolApprovalPrompt } from "./ToolApprovalPrompt";
 
 const TURN_PAGE_SIZE = 10;
@@ -460,6 +461,7 @@ export function ChatView() {
       </div>
       <div className="px-8 pb-[14px]">
         <div className="mx-auto max-w-[920px]">
+          <SessionProcessPanel sessionId={currentSession?.id ?? selectedSessionId} />
           <ToolApprovalPrompt />
           <Composer
             placeholder="Ask Wizzle to inspect, edit, or debug this project"

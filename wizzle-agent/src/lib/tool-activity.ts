@@ -2,6 +2,7 @@ import type { MessagePart, ToolCall, ToolResult } from "../types/workspace";
 
 export type ParsedToolPayload = {
   afterContent?: string;
+  background?: boolean;
   beforeContent?: string;
   bytesWritten?: number;
   combinedOutput?: string;
@@ -17,6 +18,10 @@ export type ParsedToolPayload = {
   mimeType?: string;
   ok?: boolean;
   path?: string;
+  process?: {
+    id?: string;
+    status?: string;
+  } | null;
   replacements?: number;
   startLine?: number;
   status?: string;
@@ -90,8 +95,12 @@ function buildRunDetailLabel(
       return `${resolveWriteLabel(resultPayload)} ${resourceLabel ?? "resource"}`;
     case "edit":
       return `Edited ${resourceLabel ?? "resource"}`;
-    case "bash":
+    case "bash": {
+      if (resultPayload?.background === true || resultPayload?.process?.id) {
+        return "Started a background process";
+      }
       return "Ran a command";
+    }
     default:
       return toolCall.name;
   }

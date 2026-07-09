@@ -2,6 +2,10 @@ import { useMemo, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 
 import { useAutoDisclosure } from "../../hooks/use-auto-disclosure";
+import {
+  isBackgroundBashPayload,
+  resolveBackgroundProcessId,
+} from "../../lib/session-processes";
 import { summarizeToolRuns, type ToolRunEntry } from "../../lib/tool-activity";
 import { ToolDiffViewer } from "./ToolDiffViewer";
 
@@ -48,6 +52,9 @@ function ToolRunRow({
     typeof run.resultPayload?.afterContent === "string";
   const errorText = run.resultPayload?.error ?? run.result?.error ?? "";
   const isExpandable = run.isExpandable || Boolean(outputText) || Boolean(errorText) || isActive;
+  const isBackgroundBash =
+    run.kind === "bash" && isBackgroundBashPayload(run.resultPayload);
+  const backgroundProcessId = resolveBackgroundProcessId(run.resultPayload);
 
   return (
     <div>
@@ -66,10 +73,20 @@ function ToolRunRow({
             <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-tertiary)]" />
           )}
           <span className="min-w-0 flex-1 truncate">{run.detailLabel}</span>
+          {isBackgroundBash ? (
+            <span className="shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--color-text-tertiary)]">
+              Background
+            </span>
+          ) : null}
         </button>
       ) : (
         <div className="flex items-center gap-2 py-1 text-[13px] text-[var(--color-text-secondary)]">
           <span className="min-w-0 flex-1 truncate">{run.detailLabel}</span>
+          {isBackgroundBash ? (
+            <span className="shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--color-text-tertiary)]">
+              Background
+            </span>
+          ) : null}
         </div>
       )}
 
@@ -91,10 +108,12 @@ function ToolRunRow({
                   title={run.resourceLabel}
                 />
               ) : null}
-              {run.kind === "bash" && (outputText || isActive) ? (
+              {run.kind === "bash" && (outputText || isActive || isBackgroundBash) ? (
                 <div className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-panel-muted)_68%,transparent)]">
                   <div className="border-b border-[var(--color-border)] px-3 py-2 text-[11px] text-[var(--color-text-tertiary)]">
-                    Terminal
+                    {isBackgroundBash
+                      ? `Background${backgroundProcessId ? ` · ${backgroundProcessId}` : ""}`
+                      : "Terminal"}
                   </div>
                   <pre
                     className="max-h-[160px] overflow-auto whitespace-pre-wrap break-words px-3 py-2 font-mono text-[11px] leading-5 text-[var(--color-text-secondary)]"
