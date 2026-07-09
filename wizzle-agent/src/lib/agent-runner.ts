@@ -6,7 +6,10 @@ import {
   runAgentTool,
   type AgentToolOutputChunk,
 } from "./agent-runtime";
-import { resolveAgentTools } from "./agent/tool-definitions";
+import {
+  resolveAgentTools,
+  resolveToolDefinitionsMetadata,
+} from "./agent/tool-definitions";
 import {
   createAssistantMessage,
   createPendingToolMessage,
@@ -285,6 +288,13 @@ export async function runWorkspaceAgent(options: {
   onCompactionEnded?: (result: "compacted" | "skipped" | "failed") => Promise<void> | void;
   onToolMessage: (message: Message) => Promise<void> | void;
   onToolChunk?: (chunk: AgentToolOutputChunk) => void;
+  /** Persist prompt cache hashes once the real system prompt is built (#77). */
+  onSessionPromptMetadata?: (metadata: {
+    systemPromptHash: string;
+    tokenizerKind?: string | null;
+    toolDefTokens: number;
+    toolDefsHash: string;
+  }) => Promise<void> | void;
   onTurnFinished: (payload: { status: "done" | "error" | "interrupted"; turnId: string }) => void;
   compactedContext?: CompactedContextRecord | null;
   maxContextTokens?: number;
@@ -343,6 +353,14 @@ export async function runWorkspaceAgent(options: {
     systemPrompt,
     tokenizerKind: options.selectedModel.tokenizerKind ?? options.tokenizerKind,
     tools,
+  });
+  // Session SQL already stores tooldefs-v* hash; also write system_prompt_hash (#77).
+  const toolDefinitionsMetadata = resolveToolDefinitionsMetadata();
+  await options.onSessionPromptMetadata?.({
+    systemPromptHash: promptCacheKeyData.systemPromptHash,
+    tokenizerKind: options.selectedModel.tokenizerKind ?? options.tokenizerKind ?? null,
+    toolDefTokens: toolDefinitionsMetadata.tokens,
+    toolDefsHash: toolDefinitionsMetadata.hash,
   });
   const replayEstimateCache = new Map<string, { replayMessageCount: number; tokens: number }>();
   const conversationHistory = [...options.history];

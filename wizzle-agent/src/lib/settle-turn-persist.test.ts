@@ -1,5 +1,6 @@
 import {
   describeSettledTurnPersistResult,
+  isSettledTurnPersistIncomplete,
   isTurnAlreadyFinalizedError,
   runSettledTurnPersistence,
 } from "./settle-turn-persist.ts";
@@ -70,10 +71,39 @@ async function testAlreadyFinalizedIsSoftForMessages() {
   );
 }
 
+async function testIncompleteDetectsPersistGaps() {
+  assert(
+    !isSettledTurnPersistIncomplete({
+      finalizeError: null,
+      messageErrors: [],
+      summaryError: null,
+    }),
+    "clean persist is complete",
+  );
+  assert(
+    isSettledTurnPersistIncomplete({
+      finalizeError: "boom",
+      messageErrors: [],
+      summaryError: null,
+    }),
+    "finalize error incomplete",
+  );
+  assert(
+    isSettledTurnPersistIncomplete({
+      finalizeError: null,
+      messageErrors: ["m1"],
+      summaryError: null,
+    }),
+    "message errors incomplete",
+  );
+  assert(!isSettledTurnPersistIncomplete(null), "null is not incomplete");
+}
+
 async function main() {
   await testFinalizeRunsEvenWhenMessagesFail();
   await testFinalizeErrorSurfaced();
   await testAlreadyFinalizedIsSoftForMessages();
+  await testIncompleteDetectsPersistGaps();
   console.log("settle-turn-persist tests passed");
 }
 

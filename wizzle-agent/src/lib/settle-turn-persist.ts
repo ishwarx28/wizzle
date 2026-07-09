@@ -105,3 +105,18 @@ export function describeSettledTurnPersistResult(result: SettledTurnPersistResul
 
   return `The reply finished, but some chat data may not be fully saved. ${parts.join(" ")}`;
 }
+
+/** True when settle ran but finalize/message/summary durable writes were incomplete (#44). */
+export function isSettledTurnPersistIncomplete(
+  result: SettledTurnPersistResult | null | undefined,
+): boolean {
+  if (!result) {
+    return false;
+  }
+
+  return Boolean(
+    result.finalizeError ||
+      result.summaryError ||
+      result.messageErrors.length > 0,
+  );
+}

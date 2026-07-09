@@ -55,10 +55,12 @@ import { formatPromptTooLargeError, isPromptOverLimit, resolvePromptMaxChars } f
 import { frontendLogger } from "../lib/logger";
 import {
   describeSettledTurnPersistResult,
+  isSettledTurnPersistIncomplete,
   isTurnAlreadyFinalizedError,
   runSettledTurnPersistence,
   type SettledTurnPersistResult,
 } from "../lib/settle-turn-persist";
+import { resolveHydratedSessionSelection } from "../lib/session-selection";
 import { settleNonToolTurnMessage } from "../lib/settle-turn-status";
 import {
   addSendingSessionId,
@@ -556,10 +558,21 @@ function applyWorkspaceSnapshotToState(
     : {};
 
   const selectedProjectId = snapshot.selectedProjectId;
-  const selectedDraftSessionId =
-    selectedProjectId && nextDraftSessions[selectedProjectId] && !snapshot.selectedSessionId
+  const projects = snapshot.projects.map((project) => {
+    const currentProject = state.projects.find((p) => p.id === project.id);
+    return currentProject
+      ? { ...project, isExpanded: currentProject.isExpanded }
+      : project;
+  });
+  const selectedProject = projects.find((project) => project.id === selectedProjectId);
+  // #74: project selected + session null/stale → draft if any, else latest session.
+  const selectedSessionId = resolveHydratedSessionSelection({
+    draftSessionId: selectedProjectId
       ? nextDraftSessions[selectedProjectId]?.id ?? null
-      : snapshot.selectedSessionId;
+      : null,
+    projectSessions: selectedProject?.sessions ?? [],
+    selectedSessionId: snapshot.selectedSessionId,
+  });
 
   return {
     activeFileId: null,
@@ -572,14 +585,9 @@ function applyWorkspaceSnapshotToState(
     openedFileIds: [],
     permissionMode: snapshot.permissionMode,
     previewFiles: mergeHydratedPreviewFiles(snapshot.previewFiles, state.previewFiles, nextDraftSessions),
-    projects: snapshot.projects.map((project) => {
-      const currentProject = state.projects.find((p) => p.id === project.id);
-      return currentProject
-        ? { ...project, isExpanded: currentProject.isExpanded }
-        : project;
-    }),
+    projects,
     selectedProjectId,
-    selectedSessionId: selectedDraftSessionId,
+    selectedSessionId,
   };
 }
 
@@ -711,16 +719,27 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     // Fresh process / hydrate: in-memory approval waiters are dead — treat as interrupted.
     rejectAllPendingToolApprovals(true);
 
+    const appliedPreview = applyWorkspaceSnapshotToState(currentState, snapshot);
+    const repairedSessionId = appliedPreview.selectedSessionId ?? null;
+
     set((state) => {
-      const nextSelectedSessionId = snapshot.selectedSessionId;
+      const applied = applyWorkspaceSnapshotToState(state, snapshot);
+      const nextSelectedSessionId = applied.selectedSessionId ?? null;
       return {
         ...state,
-        ...applyWorkspaceSnapshotToState(state, snapshot),
+        ...applied,
         activeMessageEdit: didChangeWorkspaceContext ? null : state.activeMessageEdit,
         chatError: didChangeWorkspaceContext ? null : state.chatError,
         ...withPendingApprovalsState(nextSelectedSessionId, {}),
       };
     });
+
+    // Persist repaired half-null selection so the next cold start stays consistent (#74).
+    if (repairedSessionId && repairedSessionId !== snapshot.selectedSessionId) {
+      window.setTimeout(() => {
+        void persistWorkspaceSettingsForCurrentState().catch(() => undefined);
+      }, 0);
+    }
   },
   toggleProjectExpanded: (projectId) =>
     set((state) => {
@@ -2820,6 +2839,36 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         },
         onToolChunk: appendToolChunk,
         onToolMessage: appendToolMessage,
+        onSessionPromptMetadata: async (metadata) => {
+          let sessionToPersist: Session | null = null;
+          set((state) => {
+            const nextProjects = updatePersistedSession(
+              state.projects,
+              targetProjectId,
+              targetSessionId as string,
+              (sessionEntry) => {
+                sessionEntry.systemPromptHash = metadata.systemPromptHash;
+                sessionEntry.toolDefsHash = metadata.toolDefsHash;
+                sessionEntry.toolDefTokens = metadata.toolDefTokens;
+                if (metadata.tokenizerKind) {
+                  sessionEntry.tokenizerKind = metadata.tokenizerKind;
+                }
+                sessionEntry.updatedAtMs = Date.now();
+                sessionToPersist = sessionEntry;
+              },
+            );
+            return nextProjects ? { projects: nextProjects } : state;
+          });
+
+          if (sessionToPersist) {
+            await createSessionIfNeeded({
+              projectId: targetProjectId,
+              selectedProjectId: targetProjectId,
+              selectedSessionId: targetSessionId as string,
+              session: sessionToPersist,
+            });
+          }
+        },
         onTurnFinished: () => undefined,
         permissionMode: currentState.permissionMode,
         previewFileMap: new Map(currentState.previewFiles.map((file) => [file.id, file] as const)),
@@ -2859,6 +2908,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         sessionIdLength: targetSessionId.length,
         turnIdLength: turnId.length,
       });
+      // #44: accepted keeps draft cleared / queue dequeued; ok reflects durable settle.
+      if (persistResult && isSettledTurnPersistIncomplete(persistResult)) {
+        const error =
+          describeSettledTurnPersistResult(persistResult) ??
+          "The reply finished, but some chat data may not be fully saved.";
+        return { accepted: true, error, ok: false, turnId };
+      }
       return { accepted: true, ok: true, turnId };
     } catch (error) {
       if (isInterruptedWorkspaceChatError(error)) {
@@ -2886,6 +2942,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           sessionIdLength: targetSessionId.length,
           turnIdLength: turnId.length,
         });
+        if (persistResult && isSettledTurnPersistIncomplete(persistResult)) {
+          const error =
+            describeSettledTurnPersistResult(persistResult) ??
+            "The reply finished, but some chat data may not be fully saved.";
+          return { accepted: true, error, ok: false, turnId };
+        }
         return { accepted: true, ok: true, turnId };
       }
 
