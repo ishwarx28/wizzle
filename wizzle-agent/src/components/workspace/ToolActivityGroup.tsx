@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 
 import { useAutoDisclosure } from "../../hooks/use-auto-disclosure";
+import { shouldOpenToolGroup } from "../../lib/activity-disclosure";
 import {
   isBackgroundBashPayload,
   resolveBackgroundProcessId,
@@ -10,9 +11,11 @@ import { summarizeToolRuns, type ToolRunEntry } from "../../lib/tool-activity";
 import { ToolDiffViewer } from "./ToolDiffViewer";
 
 interface ToolActivityGroupProps {
+  /** Last tool group in the streaming turn (I-8). */
+  isActiveGroup?: boolean;
+  isStreamingTurn?: boolean;
   onManualExpandChange?: (hasManualExpansion: boolean) => void;
   runs: ToolRunEntry[];
-  turnStatus?: string;
 }
 
 function terminalOutput(run: ToolRunEntry) {
@@ -45,6 +48,7 @@ function ToolRunRow({
   run: ToolRunEntry;
 }) {
   const isActive = isLiveRun(run);
+  // I-8: individual tool calls stay collapsed unless the user expands them.
   const { isOpen, toggle } = useAutoDisclosure(false);
   const outputText = terminalOutput(run).trim();
   const hasDiff =
@@ -137,15 +141,20 @@ function ToolRunRow({
 }
 
 export function ToolActivityGroup({
+  isActiveGroup = false,
+  isStreamingTurn = false,
   onManualExpandChange,
   runs,
-  turnStatus,
 }: ToolActivityGroupProps) {
   const hasMultipleRuns = runs.length > 1;
   const summaryLabel = useMemo(() => summarizeToolRuns(runs), [runs]);
   const [manuallyExpandedRunIds, setManuallyExpandedRunIds] = useState(() => new Set<string>());
   const hasManualExpansion = manuallyExpandedRunIds.size > 0;
-  const shouldAutoOpen = runs.some((run) => isLiveRun(run)) || (turnStatus !== "streaming" && hasManualExpansion);
+  const shouldAutoOpen = shouldOpenToolGroup({
+    hasManualExpansion,
+    isActiveGroup,
+    isStreaming: isStreamingTurn,
+  });
   const { isOpen, toggle } = useAutoDisclosure(shouldAutoOpen);
 
   if (runs.length === 0) {
@@ -153,6 +162,7 @@ export function ToolActivityGroup({
   }
 
   if (!hasMultipleRuns) {
+    // Single tool call: no grouping chrome; row stays collapsed by default (I-8).
     return <ToolRunRow onManualExpandChange={onManualExpandChange} run={runs[0]!} />;
   }
 
