@@ -3,6 +3,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   ArrowLeft,
+  Check,
+  ChevronDown,
   Download,
   Eye,
   EyeOff,
@@ -38,11 +40,15 @@ type ProviderModelFormRow = {
   maxContext: string;
   maxOutputTokens: string;
   modelId: string;
-  reasoningLevels: string;
+  /** Selected reasoning levels for this model (multi-select). */
+  reasoningLevels: string[];
   tokenizerJson: string;
   /** UI mode for tokenizer: heuristic (default) or custom path/URL. */
   tokenizerMode: TokenizerMode;
 };
+
+const KNOWN_REASONING_LEVELS = ["low", "medium", "high", "max", "xhigh"] as const;
+const DEFAULT_MODEL_REASONING_LEVELS = ["low", "medium", "high", "max"];
 
 type DialogState =
   | { type: "provider-form"; mode: "add" | "edit"; providerId?: string }
@@ -63,7 +69,7 @@ const emptyModelRow: ProviderModelFormRow = {
   maxContext: "",
   maxOutputTokens: "",
   modelId: "",
-  reasoningLevels: "low, medium, high, max",
+  reasoningLevels: [...DEFAULT_MODEL_REASONING_LEVELS],
   tokenizerJson: "",
   tokenizerMode: "heuristic",
 };
@@ -143,7 +149,7 @@ function toModelInput(row: ProviderModelFormRow) {
     maxContext: parseOptionalInteger(row.maxContext),
     maxOutputTokens: parseOptionalInteger(row.maxOutputTokens),
     modelId,
-    reasoningLevels: parseList(row.reasoningLevels),
+    reasoningLevels: row.reasoningLevels,
     tokenizerJson,
     tokenizerKind: isCustomTokenizer
       ? tokenizerJson
@@ -151,6 +157,14 @@ function toModelInput(row: ProviderModelFormRow) {
         : "custom"
       : "heuristic",
   };
+}
+
+function isDefaultReasoningLevels(levels: string[]) {
+  if (levels.length !== DEFAULT_MODEL_REASONING_LEVELS.length) {
+    return false;
+  }
+
+  return DEFAULT_MODEL_REASONING_LEVELS.every((level, index) => levels[index] === level);
 }
 
 function isEmptyDraftRow(row: ProviderModelFormRow) {
@@ -162,8 +176,200 @@ function isEmptyDraftRow(row: ProviderModelFormRow) {
     !row.tokenizerJson.trim() &&
     row.tokenizerMode === "heuristic" &&
     (row.capabilities.trim() === "" || row.capabilities.trim() === "text") &&
-    (row.reasoningLevels.trim() === "" ||
-      row.reasoningLevels.trim() === "low, medium, high, max")
+    (row.reasoningLevels.length === 0 || isDefaultReasoningLevels(row.reasoningLevels))
+  );
+}
+
+function formatReasoningLevelLabel(level: string) {
+  const trimmed = level.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
+}
+
+function sortReasoningLevels(levels: string[]) {
+  const order = new Map<string, number>(
+    KNOWN_REASONING_LEVELS.map((level, index) => [level, index]),
+  );
+
+  return [...levels].sort((left, right) => {
+    const leftRank = order.get(left.toLowerCase()) ?? 1000;
+    const rightRank = order.get(right.toLowerCase()) ?? 1000;
+    if (leftRank !== rightRank) {
+      return leftRank - rightRank;
+    }
+    return left.localeCompare(right);
+  });
+}
+
+function ReasoningLevelsMultiSelect({
+  onChange,
+  value,
+}: {
+  onChange: (next: string[]) => void;
+  value: string[];
+}) {
+  const [menuRect, setMenuRect] = useState<{ left: number; top: number; width: number } | null>(
+    null,
+  );
+  const [open, setOpen] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const selected = useMemo(() => new Set(value.map((level) => level.toLowerCase())), [value]);
+
+  const options = useMemo(() => {
+    const known = [...KNOWN_REASONING_LEVELS];
+    const extras = value
+      .map((level) => level.trim())
+      .filter(Boolean)
+      .filter((level) => !known.some((entry) => entry === level.toLowerCase()));
+    return [...known, ...extras];
+  }, [value]);
+
+  function openMenu() {
+    const rect = buttonRef.current?.getBoundingClientRect();
+    if (!rect) {
+      setOpen(true);
+      return;
+    }
+
+    setMenuRect({
+      left: rect.left,
+      top: rect.bottom + 4,
+      width: rect.width,
+    });
+    setOpen(true);
+  }
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target as Node | null;
+      if (buttonRef.current?.contains(target) || menuRef.current?.contains(target)) {
+        return;
+      }
+      setOpen(false);
+    }
+
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    }
+
+    function handleReposition() {
+      const rect = buttonRef.current?.getBoundingClientRect();
+      if (!rect) {
+        return;
+      }
+      setMenuRect({
+        left: rect.left,
+        top: rect.bottom + 4,
+        width: rect.width,
+      });
+    }
+
+    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleEscape);
+    window.addEventListener("resize", handleReposition);
+    window.addEventListener("scroll", handleReposition, true);
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleEscape);
+      window.removeEventListener("resize", handleReposition);
+      window.removeEventListener("scroll", handleReposition, true);
+    };
+  }, [open]);
+
+  function toggleLevel(level: string) {
+    const key = level.toLowerCase();
+    const next = selected.has(key)
+      ? value.filter((entry) => entry.toLowerCase() !== key)
+      : sortReasoningLevels([...value, key]);
+    onChange(next);
+  }
+
+  const summary =
+    value.length === 0
+      ? "Select levels"
+      : sortReasoningLevels(value).map(formatReasoningLevelLabel).join(", ");
+
+  return (
+    <div className="relative">
+      <button
+        className={`${modelFieldClassName} flex items-center justify-between gap-2 text-left`}
+        onClick={() => {
+          if (open) {
+            setOpen(false);
+            return;
+          }
+          openMenu();
+        }}
+        ref={buttonRef}
+        type="button"
+      >
+        <span
+          className={[
+            "min-w-0 truncate",
+            value.length === 0 ? "text-[var(--color-text-tertiary)]" : "",
+          ].join(" ")}
+        >
+          {summary}
+        </span>
+        <ChevronDown
+          className={[
+            "h-3.5 w-3.5 shrink-0 text-[var(--color-text-tertiary)] transition-transform",
+            open ? "rotate-180" : "",
+          ].join(" ")}
+        />
+      </button>
+      {open && menuRect
+        ? createPortal(
+            <div
+              className="fixed z-[450] max-h-[220px] overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] p-1.5 shadow-[0_12px_32px_rgba(0,0,0,0.24)]"
+              data-reasoning-levels-menu
+              ref={menuRef}
+              style={{
+                left: menuRect.left,
+                top: menuRect.top,
+                width: menuRect.width,
+              }}
+            >
+              {options.map((level) => {
+                const key = level.toLowerCase();
+                const isChecked = selected.has(key);
+
+                return (
+                  <button
+                    className="flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-left text-[12px] text-[var(--color-text)] transition hover:bg-[var(--color-panel-hover)]"
+                    key={level}
+                    onClick={() => toggleLevel(level)}
+                    type="button"
+                  >
+                    <span>{formatReasoningLevelLabel(level)}</span>
+                    <span
+                      className={[
+                        "flex h-4 w-4 items-center justify-center rounded border",
+                        isChecked
+                          ? "border-[var(--color-text)] bg-[var(--color-text)] text-[var(--color-panel)]"
+                          : "border-[var(--color-border-strong)] text-transparent",
+                      ].join(" ")}
+                    >
+                      <Check className="h-2.5 w-2.5" />
+                    </span>
+                  </button>
+                );
+              })}
+            </div>,
+            document.body,
+          )
+        : null}
+    </div>
   );
 }
 
@@ -383,7 +589,9 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
             maxContext: String(model.maxContext ?? ""),
             maxOutputTokens: model.maxOutputTokens ? String(model.maxOutputTokens) : "",
             modelId: model.modelId,
-            reasoningLevels: (model.reasoningLevels ?? []).join(", "),
+            reasoningLevels: sortReasoningLevels(
+              (model.reasoningLevels ?? []).map((level) => level.trim()).filter(Boolean),
+            ),
             tokenizerJson: model.tokenizerJson ?? "",
             tokenizerMode: resolveTokenizerMode(model.tokenizerJson, model.tokenizerKind),
           }))
@@ -1063,12 +1271,8 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                 </div>
                 <div>
                   <FieldLabel>Reasoning levels</FieldLabel>
-                  <input
-                    className={modelFieldClassName}
-                    onChange={(event) =>
-                      patchModelRow({ reasoningLevels: event.currentTarget.value })
-                    }
-                    placeholder="low, medium, high, max"
+                  <ReasoningLevelsMultiSelect
+                    onChange={(next) => patchModelRow({ reasoningLevels: next })}
                     value={row.reasoningLevels}
                   />
                 </div>
