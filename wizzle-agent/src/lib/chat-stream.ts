@@ -78,7 +78,10 @@ type ChatCompletionJson = {
   }>;
 };
 
-let activeStreamRequestId: string | null = null;
+/** Per-session stream request ids so interrupt targets the correct run (#17 / #27). */
+const activeStreamRequestIdBySession = new Map<string, string>();
+/** Last-started stream (prompt enhancement / title-less helpers without a session scope). */
+let activeGlobalStreamRequestId: string | null = null;
 
 function resolveFallbackReasoningLevel(modelId: ModelId): ReasoningLevel {
   return modelId.includes("max") ? "max" : "balanced";
@@ -771,7 +774,12 @@ export async function streamWorkspaceChat(options: {
   }
 
   const requestId = crypto.randomUUID();
-  activeStreamRequestId = requestId;
+  const sessionKey = options.chatId.trim();
+  if (sessionKey) {
+    activeStreamRequestIdBySession.set(sessionKey, requestId);
+  } else {
+    activeGlobalStreamRequestId = requestId;
+  }
   frontendLogger.info("frontend.chat-stream", "stream_started", {
     chatIdLength: options.chatId.length,
     historyCount: options.history.length,
@@ -857,8 +865,11 @@ export async function streamWorkspaceChat(options: {
     });
     throw new Error(getErrorMessage(error, "Wizzle could not complete the request."));
   } finally {
-    if (activeStreamRequestId === requestId) {
-      activeStreamRequestId = null;
+    if (sessionKey && activeStreamRequestIdBySession.get(sessionKey) === requestId) {
+      activeStreamRequestIdBySession.delete(sessionKey);
+    }
+    if (!sessionKey && activeGlobalStreamRequestId === requestId) {
+      activeGlobalStreamRequestId = null;
     }
 
     lastChunkKind = null;
@@ -868,26 +879,30 @@ export async function streamWorkspaceChat(options: {
 }
 
 export async function interruptWorkspaceChat(options: { sessionId?: string } = {}) {
-  if (!activeStreamRequestId) {
-    if (options.sessionId) {
-      await invoke("interrupt_session_run", {
-        input: {
-          sessionId: options.sessionId,
-        },
-      });
-    }
+  const sessionId = options.sessionId?.trim();
+  const requestId = sessionId
+    ? activeStreamRequestIdBySession.get(sessionId) ?? null
+    : activeGlobalStreamRequestId;
 
-    return;
+  if (requestId) {
+    frontendLogger.info("frontend.chat-stream", "interrupt_requested", {
+      requestIdLength: requestId.length,
+      sessionScoped: Boolean(sessionId),
+    });
+    await invoke("cancel_provider_chat", {
+      input: {
+        requestId,
+      },
+    });
   }
 
-  frontendLogger.info("frontend.chat-stream", "interrupt_requested", {
-    requestIdLength: activeStreamRequestId.length,
-  });
-  await invoke("cancel_provider_chat", {
-    input: {
-      requestId: activeStreamRequestId,
-    },
-  });
+  if (sessionId) {
+    await invoke("interrupt_session_run", {
+      input: {
+        sessionId,
+      },
+    });
+  }
 }
 
 export async function interruptWorkspacePromptEnhancement() {

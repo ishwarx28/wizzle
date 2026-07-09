@@ -39,6 +39,11 @@ import {
   type SettledTurnPersistResult,
 } from "../lib/settle-turn-persist";
 import { settleNonToolTurnMessage } from "../lib/settle-turn-status";
+import {
+  addSendingSessionId,
+  removeSendingSessionId,
+  resolveIsSendingMessage,
+} from "../lib/session-sending";
 import { extractLinkedFileFromToolResult } from "../lib/tool-activity";
 import type {
   Message,
@@ -71,7 +76,10 @@ interface WorkspaceState {
   isSidebarOpen: boolean;
   isFilePanelOpen: boolean;
   hasHydratedWorkspace: boolean;
+  /** True when the *selected* session is mid-run (derived from sendingSessionIds). */
   isSendingMessage: boolean;
+  /** Session ids with an in-flight agent run (multi-session isolated). */
+  sendingSessionIds: string[];
   pendingToolApproval: ToolApprovalRequest | null;
   providerModels: ProviderModelInfo[];
   providerModelsError: string | null;
@@ -132,10 +140,21 @@ type PendingToolApprovalResolver = {
 
 type SubmitPromptResult =
   | { ok: true; accepted: true; turnId: string }
-  | { ok: false; accepted: false; error: string };
+  | { ok: false; accepted: false; error: string }
+  | { ok: false; accepted: true; turnId: string; error: string };
 
 let pendingToolApprovalResolver: PendingToolApprovalResolver | null = null;
 const activeRunRequestIdsBySession = new Map<string, string>();
+
+function withSendingSessionState(
+  selectedSessionId: string | null,
+  sendingSessionIds: string[],
+) {
+  return {
+    isSendingMessage: resolveIsSendingMessage(selectedSessionId, sendingSessionIds),
+    sendingSessionIds,
+  };
+}
 
 function rejectPendingToolApproval(interrupted = false) {
   if (pendingToolApprovalResolver) {
@@ -584,6 +603,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   hasHydratedWorkspace: false,
   isFilePanelOpen: true,
   isSendingMessage: false,
+  sendingSessionIds: [],
   isSidebarOpen: true,
   loadingSessionId: null,
   modelId: "",
@@ -748,6 +768,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       const snapshotState = applyWorkspaceSnapshotToState(state, snapshot);
       const isDeletedSessionSelected =
         state.selectedProjectId === projectId && state.selectedSessionId === sessionId;
+      const nextSelectedSessionId = isDeletedSessionSelected ? null : state.selectedSessionId;
+      const sendingSessionIds = removeSendingSessionId(sessionId, state.sendingSessionIds);
 
       return {
         ...state,
@@ -759,7 +781,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
             : state.activeMessageEdit,
         pendingToolApproval: isDeletedSessionSelected ? null : state.pendingToolApproval,
         selectedProjectId: isDeletedSessionSelected ? projectId : state.selectedProjectId,
-        selectedSessionId: isDeletedSessionSelected ? null : state.selectedSessionId,
+        selectedSessionId: nextSelectedSessionId,
+        ...withSendingSessionState(nextSelectedSessionId, sendingSessionIds),
       };
     });
   },
@@ -787,6 +810,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       pendingToolApproval: didChangeSelection ? null : state.pendingToolApproval,
       selectedProjectId: projectId,
       selectedSessionId: sessionId,
+      ...withSendingSessionState(sessionId, state.sendingSessionIds),
     }));
     void persistWorkspaceSettingsForCurrentState().catch(() => undefined);
 
@@ -984,23 +1008,28 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     }),
   cancelMessageEdit: () => set({ activeMessageEdit: null }),
   interruptPrompt: async () => {
-    rejectPendingToolApproval(true);
-    set({ pendingToolApproval: null });
+    const state = useWorkspaceStore.getState();
+    const sessionId = state.selectedSessionId;
 
-    const sessionId = useWorkspaceStore.getState().selectedSessionId;
-
-    if (sessionId) {
-      await interruptWorkspaceChat({ sessionId });
+    // Only interrupt the selected session's run (#27 / #46).
+    if (!sessionId || !state.sendingSessionIds.includes(sessionId)) {
       return;
     }
 
-    await interruptWorkspaceChat();
+    rejectPendingToolApproval(true);
+    set({ pendingToolApproval: null });
+    await interruptWorkspaceChat({ sessionId });
   },
   sendPrompt: async (prompt, attachments = []) => {
     const initialState = useWorkspaceStore.getState();
     const content = prompt.trim();
+    const selectedSessionId = initialState.selectedSessionId;
 
-    if (initialState.isSendingMessage || (!content && attachments.length === 0)) {
+    // Block only if *this* session is already running (#27). Other sessions can send.
+    if (
+      (selectedSessionId && initialState.sendingSessionIds.includes(selectedSessionId)) ||
+      (!content && attachments.length === 0)
+    ) {
       return { accepted: false, error: "The chat is not ready for another message.", ok: false };
     }
 
@@ -1098,14 +1127,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         const nextDraftSessions = { ...state.draftSessions };
         delete nextDraftSessions[targetProjectId];
 
+        const sendingSessionIds = addSendingSessionId(targetSessionId, state.sendingSessionIds);
+
         return {
           chatError: null,
           draftSessions: nextDraftSessions,
-          isSendingMessage: true,
           previewFiles: nextPreviewFiles,
           projects: nextProjects,
           selectedProjectId: targetProjectId,
           selectedSessionId: targetSessionId,
+          ...withSendingSessionState(targetSessionId, sendingSessionIds),
         };
       });
       frontendLogger.info("frontend.workspace", "draft_session_promoted", {
@@ -1167,12 +1198,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           return state;
         }
 
+        const sendingSessionIds = addSendingSessionId(
+          targetSessionId as string,
+          state.sendingSessionIds,
+        );
+
         return {
           activeMessageEdit: null,
           chatError: null,
-          isSendingMessage: true,
           previewFiles: nextPreviewFiles,
           projects: nextProjects,
+          ...withSendingSessionState(state.selectedSessionId, sendingSessionIds),
         };
       });
       frontendLogger.info(
@@ -1187,7 +1223,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
     if (!targetProjectId || !targetSessionId) {
       const error = "Could not resolve the active chat.";
-      set({ chatError: error, isSendingMessage: false });
+      set((state) => ({
+        chatError: error,
+        ...withSendingSessionState(state.selectedSessionId, state.sendingSessionIds),
+      }));
       return { accepted: false, error, ok: false };
     }
 
@@ -1203,11 +1242,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         error instanceof Error && error.message.trim()
           ? error.message
           : "That session already has an active run.";
-      set({
+      set((state) => ({
         ...rollbackState,
         chatError: message,
-        isSendingMessage: false,
-      });
+        ...withSendingSessionState(
+          rollbackState.selectedSessionId,
+          removeSendingSessionId(targetSessionId, state.sendingSessionIds),
+        ),
+      }));
       return { accepted: false, error: message, ok: false };
     }
     const runRequestId = crypto.randomUUID();
@@ -1304,11 +1346,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         error instanceof Error && error.message.trim()
           ? error.message
           : "Wizzle could not save the chat.";
-      set({
+      set((state) => ({
         ...rollbackState,
         chatError: message,
-        isSendingMessage: false,
-      });
+        ...withSendingSessionState(
+          rollbackState.selectedSessionId,
+          removeSendingSessionId(targetSessionId, state.sendingSessionIds),
+        ),
+      }));
       frontendLogger.error("frontend.workspace", "session_persist_before_run_failed", {
         error,
         projectIdLength: targetProjectId.length,
@@ -2455,7 +2500,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       if (isActiveRunRequest()) {
         activeRunRequestIdsBySession.delete(targetSessionId);
       }
-      set({ isSendingMessage: false });
+      set((state) => ({
+        ...withSendingSessionState(
+          state.selectedSessionId,
+          removeSendingSessionId(targetSessionId, state.sendingSessionIds),
+        ),
+      }));
       frontendLogger.info("frontend.workspace", "agent_run_completed", {
         finalizeError: persistResult?.finalizeError ?? null,
         messageErrorCount: persistResult?.messageErrors.length ?? 0,
@@ -2477,7 +2527,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         if (isActiveRunRequest()) {
           activeRunRequestIdsBySession.delete(targetSessionId);
         }
-        set({ isSendingMessage: false });
+        set((state) => ({
+          ...withSendingSessionState(
+            state.selectedSessionId,
+            removeSendingSessionId(targetSessionId, state.sendingSessionIds),
+          ),
+        }));
         frontendLogger.info("frontend.workspace", "agent_run_interrupted", {
           finalizeError: persistResult?.finalizeError ?? null,
           sessionIdLength: targetSessionId.length,
@@ -2522,11 +2577,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       if (isActiveRunRequest()) {
         activeRunRequestIdsBySession.delete(targetSessionId);
       }
-      set({
+      set((state) => ({
         chatError: errorMessage,
-        isSendingMessage: false,
-      });
-      return { accepted: false, error: errorMessage, ok: false };
+        ...withSendingSessionState(
+          state.selectedSessionId,
+          removeSendingSessionId(targetSessionId, state.sendingSessionIds),
+        ),
+      }));
+      // Message was accepted into the session; keep accepted so composer does not restore draft (#79).
+      return { accepted: true, error: errorMessage, ok: false, turnId };
     }
   },
 }));

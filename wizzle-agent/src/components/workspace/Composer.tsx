@@ -816,16 +816,25 @@ export function Composer({
       shouldRestoreComposerAfterEditRef.current = false;
     }
 
-    window.dispatchEvent(new CustomEvent("wizzle:composer-send"));
-    const result = await sendPrompt(nextPrompt, attachments);
+    // Clear as soon as send starts; restore only if the message was never accepted (#79).
+    const draftSnapshot = nextPrompt;
+    const attachmentSnapshot = attachments;
+    setDraft("");
+    setAttachments([]);
 
-    if (result.ok) {
-      setDraft("");
-      setAttachments([]);
+    window.dispatchEvent(new CustomEvent("wizzle:composer-send"));
+    const result = await sendPrompt(nextPrompt, attachmentSnapshot);
+
+    if (!result.accepted) {
+      setDraft(draftSnapshot);
+      setAttachments(attachmentSnapshot);
+      showToast(result.error);
       return;
     }
 
-    showToast(result.error);
+    if (!result.ok && "error" in result && result.error) {
+      showToast(result.error);
+    }
   }
 
   function handleCancelEdit() {
@@ -1016,17 +1025,20 @@ export function Composer({
     void sendPrompt(nextSubmission.prompt, nextSubmission.attachments)
       .then((result) => {
         setQueuedSubmissions((current) => {
-          if (!result.ok) {
-            return current.map((submission) =>
-              submission.id === nextSubmission.id ? { ...submission, status: "failed" } : submission,
-            );
+          // Accepted means the user message entered the session; drop queue item.
+          if (result.accepted) {
+            return current.filter((submission) => submission.id !== nextSubmission.id);
           }
 
-          return current.filter((submission) => submission.id !== nextSubmission.id);
+          return current.map((submission) =>
+            submission.id === nextSubmission.id ? { ...submission, status: "failed" } : submission,
+          );
         });
 
-        if (!result.ok) {
+        if (!result.accepted) {
           showToast(result.error || "Queued prompt failed. Retry or delete it.");
+        } else if (!result.ok && "error" in result && result.error) {
+          showToast(result.error);
         }
       })
       .catch(() => {
