@@ -1815,7 +1815,7 @@ export function Composer({
                 >
                   <span className="min-w-0 truncate">{modelIdLabel}</span>
                   {selectedReasoningLevel ? (
-                    <span className="hidden shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 text-[13px] font-normal leading-none text-[var(--color-text-tertiary)] sm:inline">
+                    <span className="hidden shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 text-[11px] font-normal leading-none text-[var(--color-text-tertiary)] sm:inline">
                       {reasoningLevelLabel}
                     </span>
                   ) : null}
@@ -1849,7 +1849,7 @@ export function Composer({
                             return (
                               <button
                                 className={[
-                                  "rounded-full border px-2 py-0.5 text-[13px] font-normal leading-none transition",
+                                  "rounded-full border px-2 py-0.5 text-[11px] font-normal leading-none transition",
                                   isSelectedLevel
                                     ? "border-[var(--color-border-strong)] bg-[var(--color-accent)] text-[var(--color-accent-foreground)]"
                                     : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]",
@@ -1907,7 +1907,7 @@ export function Composer({
                                       </div>
                                     </div>
                                     {model.reasoningLevels.length > 0 ? (
-                                      <span className="shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 text-[13px] font-normal leading-none text-[var(--color-text-tertiary)]">
+                                      <span className="shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 text-[11px] font-normal leading-none text-[var(--color-text-tertiary)]">
                                         {model.reasoningLevels
                                           .map(formatReasoningLevelLabel)
                                           .join(", ")}
