@@ -18,7 +18,7 @@ use super::{
 };
 
 const DEFAULT_CONTEXT_TOKENS: u64 = 128_000;
-const DEFAULT_REASONING_LEVELS: &[&str] = &["fast", "balanced", "max"];
+const DEFAULT_REASONING_LEVELS: &[&str] = &["low", "medium", "high", "max"];
 const PROVIDER_YAML_MAX_BYTES: usize = 512 * 1024;
 const PROVIDER_YAML_PATH_ENV: &str = "WIZZLE_PROVIDERS_YAML_PATH";
 const PROVIDER_YAML_INLINE_ENV: &str = "WIZZLE_PROVIDERS_YAML";
@@ -744,7 +744,7 @@ mod tests {
         assert_eq!(model.model_id, "gpt-test");
         assert_eq!(model.max_context, 128_000);
         assert_eq!(model.capabilities, vec!["text", "image"]);
-        assert_eq!(model.reasoning_levels, vec!["fast", "balanced", "max"]);
+        assert_eq!(model.reasoning_levels, vec!["low", "medium", "high", "max"]);
     }
 
     #[test]

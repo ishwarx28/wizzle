@@ -33,7 +33,7 @@ const emptyModelRow: ProviderModelFormRow = {
   maxContext: "",
   maxOutputTokens: "",
   modelId: "",
-  reasoningLevels: "fast, balanced, max",
+  reasoningLevels: "low, medium, high, max",
   tokenizerKind: "",
 };
 

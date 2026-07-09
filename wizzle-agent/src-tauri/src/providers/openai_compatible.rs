@@ -241,22 +241,14 @@ fn endpoint_with_path(endpoint: &str, path: &str) -> String {
     )
 }
 
-/// Map UI / model reasoning level labels into OpenAI-compatible `reasoning_effort` values.
+/// Normalize reasoning level labels into OpenAI-compatible `reasoning_effort` values.
+/// Accepted levels: low, medium, high, xhigh, max (and case/whitespace variants).
 pub fn resolve_reasoning_effort(level: &str) -> Option<String> {
     let normalized = level.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
-        return None;
+    match normalized.as_str() {
+        "low" | "medium" | "high" | "xhigh" | "max" => Some(normalized),
+        _ => None,
     }
-
-    // Wizzle's historical defaults map onto common effort labels.
-    // Model-specific values (low/medium/high/max) pass through unchanged.
-    let effort = match normalized.as_str() {
-        "fast" => "low",
-        "balanced" => "medium",
-        other => other,
-    };
-
-    Some(effort.to_string())
 }
 
 fn model_supports_reasoning(model: &ProviderResolvedModel) -> bool {
@@ -545,8 +537,9 @@ pub async fn fetch_models(
             max_output_tokens: None,
             model_id: model_id.to_string(),
             reasoning_levels: vec![
-                "fast".to_string(),
-                "balanced".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
                 "max".to_string(),
             ],
             tokenizer_kind: Some("heuristic".to_string()),
@@ -625,17 +618,15 @@ mod tests {
     }
 
     #[test]
-    fn resolves_wizzle_and_provider_reasoning_levels() {
-        assert_eq!(
-            resolve_reasoning_effort("fast").as_deref(),
-            Some("low")
-        );
-        assert_eq!(
-            resolve_reasoning_effort("balanced").as_deref(),
-            Some("medium")
-        );
-        assert_eq!(resolve_reasoning_effort("max").as_deref(), Some("max"));
+    fn resolves_standard_reasoning_levels() {
+        assert_eq!(resolve_reasoning_effort("low").as_deref(), Some("low"));
+        assert_eq!(resolve_reasoning_effort("medium").as_deref(), Some("medium"));
         assert_eq!(resolve_reasoning_effort("high").as_deref(), Some("high"));
+        assert_eq!(resolve_reasoning_effort("xhigh").as_deref(), Some("xhigh"));
+        assert_eq!(resolve_reasoning_effort("max").as_deref(), Some("max"));
+        assert_eq!(resolve_reasoning_effort("MAX").as_deref(), Some("max"));
+        assert_eq!(resolve_reasoning_effort("fast").as_deref(), None);
+        assert_eq!(resolve_reasoning_effort("balanced").as_deref(), None);
         assert_eq!(resolve_reasoning_effort("  ").as_deref(), None);
     }
 
@@ -654,7 +645,7 @@ mod tests {
                 "model": "ignored",
             }),
             true,
-            Some("balanced"),
+            Some("medium"),
         );
 
         assert_eq!(

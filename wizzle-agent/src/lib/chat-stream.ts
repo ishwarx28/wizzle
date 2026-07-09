@@ -12,7 +12,7 @@ import {
 
 type ReasoningLevel = string;
 export const INTERRUPTED_WORKSPACE_CHAT_ERROR = "__WIZZLE_PROVIDER_CHAT_INTERRUPTED__";
-const DEFAULT_REASONING_LEVELS = ["fast", "balanced", "max"] as const;
+const DEFAULT_REASONING_LEVELS = ["low", "medium", "high", "max"] as const;
 const MAX_TITLE_INPUT_LENGTH = 1_000;
 const MAX_TITLE_OUTPUT_TOKENS = 256;
 const MAX_TITLE_RETRY_OUTPUT_TOKENS = 512;
@@ -84,7 +84,7 @@ const activeStreamRequestIdBySession = new Map<string, string>();
 let activeGlobalStreamRequestId: string | null = null;
 
 function resolveFallbackReasoningLevel(modelId: ModelId): ReasoningLevel {
-  return modelId.includes("max") ? "max" : "balanced";
+  return modelId.includes("max") ? "max" : "medium";
 }
 
 function normalizeReasoningLevels(reasoningLevels?: string[]) {
