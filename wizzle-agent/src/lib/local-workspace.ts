@@ -479,3 +479,20 @@ export async function finalizeTurn(input: {
     },
   });
 }
+
+/** Drop SQL turns not in keepTurnIds immediately after an in-memory edit (#3/#57). */
+export async function truncateSessionTranscriptToTurns(input: {
+  keepTurnIds: string[];
+  sessionId: string;
+}) {
+  frontendLogger.info("frontend.workspace-api", "truncate_session_transcript_requested", {
+    keepTurnCount: input.keepTurnIds.length,
+    sessionIdLength: input.sessionId.length,
+  });
+  return invoke<number>("truncate_session_transcript_to_turns", {
+    input: {
+      keepTurnIds: input.keepTurnIds,
+      sessionId: input.sessionId,
+    },
+  });
+}

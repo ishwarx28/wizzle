@@ -27,7 +27,8 @@ use super::{
         SetProjectExpandedInput, StoredAttachmentRecord, StoredMessageRecord,
         StoredMessageStepRecord, StoredProjectRecord, StoredSessionMetadata, StoredSettingsFile,
         StoredToolCallRecord, StoredToolResultRecord, StoredTurnSummaryRecord,
-        UpdateSessionSelectionInput, UpdateSessionTitleInput, UpsertTurnSummaryInput,
+        TruncateSessionTranscriptInput, UpdateSessionSelectionInput, UpdateSessionTitleInput,
+        UpsertTurnSummaryInput,
         WorkspaceCompactedContextPayload, WorkspaceComposerStatePayload, WorkspaceMessagePayload,
         WorkspaceMessageStepPayload, WorkspaceProjectPayload, WorkspaceQueuedMessagePayload,
         WorkspaceSessionLoadPayload, WorkspaceSessionPayload, WorkspaceSnapshotPayload,
@@ -3268,6 +3269,26 @@ fn delete_stale_transcript_rows(
     current_turn_ids: &HashSet<String>,
     current_part_ids: &HashSet<String>,
 ) -> Result<(), String> {
+    // Refuse to wipe an entire session from an empty snapshot (#7).
+    if current_turn_ids.is_empty() {
+        let existing_turns = {
+            let mut statement = tx
+                .prepare("SELECT COUNT(*) FROM turns WHERE session_id = ?1")
+                .map_err(|error| db_error("Could not count Wizzle turns for safety check", error))?;
+            statement
+                .query_row(params![session_id], |row| row.get::<_, i64>(0))
+                .map_err(|error| db_error("Could not count Wizzle turns for safety check", error))?
+        };
+
+        if existing_turns > 0 {
+            return Err(
+                "Refusing to delete session transcript from an empty snapshot.".to_string(),
+            );
+        }
+
+        return Ok(());
+    }
+
     let stale_part_ids = {
         let mut statement = tx
             .prepare(
@@ -3310,6 +3331,62 @@ fn delete_stale_transcript_rows(
     }
 
     Ok(())
+}
+
+/// Immediately drop SQL turns not in `keep_turn_ids` so edit truncation is durable before the run (#3/#57).
+pub fn truncate_session_transcript_to_turns(
+    input: TruncateSessionTranscriptInput,
+) -> Result<u32, String> {
+    validate_storage_id("session", &input.session_id)?;
+
+    let keep_turn_ids = input
+        .keep_turn_ids
+        .into_iter()
+        .filter(|turn_id| !turn_id.trim().is_empty())
+        .collect::<HashSet<_>>();
+
+    // Editing the first message of a session can legitimately keep only the new turn.
+    // An empty keep set with existing history is still refused (same as #7).
+    let mut conn = open_database()?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| db_error("Could not start transcript truncate", error))?;
+
+    let existing_turn_ids = {
+        let mut statement = tx
+            .prepare("SELECT id FROM turns WHERE session_id = ?1")
+            .map_err(|error| db_error("Could not list Wizzle turns for truncate", error))?;
+        let rows = statement
+            .query_map(params![input.session_id], |row| row.get::<_, String>(0))
+            .map_err(|error| db_error("Could not read Wizzle turns for truncate", error))?;
+        rows.filter_map(|row| row.ok()).collect::<Vec<_>>()
+    };
+
+    if keep_turn_ids.is_empty() && !existing_turn_ids.is_empty() {
+        return Err(
+            "Refusing to delete the entire session transcript without retained turns.".to_string(),
+        );
+    }
+
+    let mut deleted = 0u32;
+    for turn_id in existing_turn_ids {
+        if keep_turn_ids.contains(&turn_id) {
+            continue;
+        }
+
+        // turn_parts cascade via FK ON DELETE CASCADE.
+        tx.execute("DELETE FROM turns WHERE id = ?1 AND session_id = ?2", params![turn_id, input.session_id])
+            .map_err(|error| db_error("Could not truncate Wizzle turn", error))?;
+        deleted = deleted.saturating_add(1);
+    }
+
+    // Drop compacted flags / summary for turns that no longer exist is implicit (rows gone).
+    // Compacted session summary may still mention deleted turns; next compact refresh is fine.
+
+    tx.commit()
+        .map_err(|error| db_error("Could not commit transcript truncate", error))?;
+
+    Ok(deleted)
 }
 
 fn update_turn_token_totals(tx: &Transaction<'_>, session_id: &str) -> Result<(), String> {
@@ -4810,6 +4887,75 @@ mod tests {
         assert_eq!(state.queued_messages.len(), 1);
         assert_eq!(state.queued_messages[0].id, "queue-new");
         assert_eq!(state.queued_messages[0].status, "queued");
+    }
+
+    #[test]
+    fn truncate_session_transcript_deletes_turns_not_kept() {
+        let mut conn = migrated_memory_db();
+        insert_test_session(&conn);
+        let now = now_unix_ms() as i64;
+
+        for (turn_id, turn_index) in [("turn-a", 0), ("turn-b", 1), ("turn-c", 2)] {
+            conn.execute(
+                "INSERT INTO turns (id, session_id, turn_index, status, created_at, updated_at) VALUES (?1, 'session-1', ?2, 'complete', ?3, ?3)",
+                params![turn_id, turn_index, now],
+            )
+            .expect("insert turn");
+            conn.execute(
+                "INSERT INTO turn_parts (id, turn_id, part_type, role, part_index, status, created_at, updated_at) VALUES (?1, ?2, 'message', 'user', 0, 'done', ?3, ?3)",
+                params![format!("{turn_id}-part"), turn_id, now],
+            )
+            .expect("insert part");
+        }
+
+        let tx = conn.transaction().expect("tx");
+        // Inline the keep logic for unit test without open_database.
+        let keep = HashSet::from(["turn-a".to_string()]);
+        let existing: Vec<String> = {
+            let mut statement = tx
+                .prepare("SELECT id FROM turns WHERE session_id = 'session-1'")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .filter_map(|row| row.ok())
+                .collect()
+        };
+        for turn_id in existing {
+            if !keep.contains(&turn_id) {
+                tx.execute("DELETE FROM turns WHERE id = ?1", params![turn_id])
+                    .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turns WHERE session_id = 'session-1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(remaining, 1);
+        let parts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turn_parts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(parts, 1, "parts cascade with turn delete");
+    }
+
+    #[test]
+    fn delete_stale_refuses_empty_snapshot_when_turns_exist() {
+        let mut conn = migrated_memory_db();
+        insert_test_session(&conn);
+        let now = now_unix_ms() as i64;
+        conn.execute(
+            "INSERT INTO turns (id, session_id, turn_index, status, created_at, updated_at) VALUES ('turn-x', 'session-1', 0, 'complete', ?1, ?1)",
+            params![now],
+        )
+        .unwrap();
+
+        let tx = conn.transaction().unwrap();
+        let err = delete_stale_transcript_rows(&tx, "session-1", &HashSet::new(), &HashSet::new())
+            .expect_err("must refuse empty wipe");
+        assert!(err.contains("empty snapshot"), "{err}");
     }
 
     #[test]

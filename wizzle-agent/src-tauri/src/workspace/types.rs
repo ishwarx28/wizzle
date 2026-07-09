@@ -481,6 +481,15 @@ pub struct FinalizeTurnInput {
     pub updated_at_ms: u64,
 }
 
+/// Keep only these turn ids in SQL; delete all other turns (and cascaded parts) for the session.
+/// Used immediately on message edit so crash mid-run cannot resurrect truncated history (#3/#57).
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TruncateSessionTranscriptInput {
+    pub keep_turn_ids: Vec<String>,
+    pub session_id: String,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedSessionInput {

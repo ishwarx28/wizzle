@@ -21,12 +21,17 @@ import {
   renameWorkspaceSession,
   saveWorkspaceSettings,
   setProjectExpanded,
+  truncateSessionTranscriptToTurns,
   updateSessionSelection,
   updateSessionTitle,
   setSessionRuntimeState,
   wakeSessionRun,
   upsertTurnSummary as persistTurnSummary,
 } from "../lib/local-workspace";
+import {
+  collectRetainedTurnIds,
+  filterCompactedTurnIds,
+} from "../lib/session-edit-truncate";
 import {
   completeSessionRunFinish,
   isSessionAlreadyRunningError,
@@ -1411,6 +1416,40 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           tokenizerKind: initialProviderModel?.tokenizerKind ?? null,
         });
       }
+      // Edit: make SQL match in-memory truncation before the agent runs (#3/#57).
+      if (activeMessageEdit) {
+        const keepTurnIds = collectRetainedTurnIds(sessionToPersist.messages);
+        const deletedTurnCount = await truncateSessionTranscriptToTurns({
+          keepTurnIds,
+          sessionId: targetSessionId,
+        });
+        const retained = new Set(keepTurnIds);
+        set((state) => {
+          const nextProjects = updatePersistedSession(
+            state.projects,
+            targetProjectId,
+            targetSessionId as string,
+            (session) => {
+              if (session.compactedContext?.compactedTurnIds?.length) {
+                session.compactedContext = {
+                  ...session.compactedContext,
+                  compactedTurnIds: filterCompactedTurnIds(
+                    session.compactedContext.compactedTurnIds,
+                    retained,
+                  ),
+                };
+              }
+            },
+          );
+          return nextProjects ? { projects: nextProjects } : state;
+        });
+        frontendLogger.info("frontend.workspace", "session_transcript_truncated_for_edit", {
+          deletedTurnCount,
+          keepTurnCount: keepTurnIds.length,
+          sessionIdLength: targetSessionId.length,
+        });
+      }
+
       await appendOrUpdateMessage({
         message: userMessage,
         previewFiles: nextPreviewFiles,
