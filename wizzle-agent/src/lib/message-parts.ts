@@ -29,11 +29,14 @@ function buildLegacyToolParts(message: Message): MessagePart[] {
   const parts: MessagePart[] = [];
 
   for (const toolCall of message.toolCalls ?? []) {
+    const toolCallPartId = `${message.id}-tool-call-${toolCall.id}`;
     parts.push({
       createdAtMs: message.startedAtMs ?? message.createdAtMs,
-      id: `${message.id}-tool-call-${toolCall.id}`,
+      id: toolCallPartId,
       input: toolCall.input,
       name: toolCall.name,
+      // tool_call parents the assistant message; tool_result parents the tool_call.
+      parentPartId: message.id,
       status: toolCall.status,
       toolCallId: toolCall.id,
       type: "tool_call",
@@ -45,6 +48,7 @@ function buildLegacyToolParts(message: Message): MessagePart[] {
         error: toolResult.error,
         id: toolResult.id,
         output: toolResult.output,
+        parentPartId: toolCallPartId,
         status: toolResult.status,
         toolCallId: toolResult.toolCallId ?? toolCall.id,
         type: "tool_result",

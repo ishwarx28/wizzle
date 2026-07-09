@@ -2128,10 +2128,18 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
               const existingPart = existingParts.find(
                 (part) => part.type === "tool_call" && (part.toolCallId ?? part.id) === toolCall.id,
               );
+              const toolCallPartId =
+                existingPart?.id ?? `${targetMessage.id}-tool-call-${toolCall.id}`;
+              // Parent is the assistant message, never the tool_call itself.
+              const parentPartId =
+                existingPart?.parentPartId &&
+                existingPart.parentPartId !== toolCallPartId
+                  ? existingPart.parentPartId
+                  : targetMessage.id;
 
               return {
                 createdAtMs: existingPart?.createdAtMs ?? Date.now(),
-                id: existingPart?.id ?? `${targetMessage.id}-tool-call-${toolCall.id}`,
+                id: toolCallPartId,
                 input: toolCall.input,
                 metadata: {
                   arguments: toolCall.input,
@@ -2139,6 +2147,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
                   toolName: toolCall.name,
                 },
                 name: toolCall.name,
+                parentPartId,
                 status: toolCall.status,
                 toolCallId: toolCall.id,
                 type: "tool_call" as const,

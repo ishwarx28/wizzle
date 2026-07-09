@@ -303,6 +303,7 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
         ensure_session_metadata_columns(conn)?;
         ensure_process_link_columns(conn)?;
         ensure_tokenizer_json_columns(conn)?;
+        repair_self_parent_tool_calls(conn)?;
         return Ok(());
     }
 
@@ -549,6 +550,7 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
     ensure_turn_budget_columns(conn)?;
     ensure_process_link_columns(conn)?;
     ensure_tokenizer_json_columns(conn)?;
+    repair_self_parent_tool_calls(conn)?;
     Ok(())
 }
 
@@ -584,6 +586,32 @@ fn ensure_process_link_columns(conn: &Connection) -> Result<(), String> {
             .map_err(|error| db_error("Could not update Wizzle process link columns", error))?;
         }
     }
+
+    Ok(())
+}
+
+/// Repair tool_call rows that parented themselves (re-upsert bug).
+fn repair_self_parent_tool_calls(conn: &Connection) -> Result<(), String> {
+    if !table_has_column(conn, "turn_parts", "parent_part_id")?
+        || !table_has_column(conn, "turn_parts", "message_id")?
+    {
+        return Ok(());
+    }
+
+    conn.execute(
+        "
+        UPDATE turn_parts
+        SET parent_part_id = message_id
+        WHERE part_type = 'tool_call'
+          AND parent_part_id IS NOT NULL
+          AND parent_part_id = id
+          AND message_id IS NOT NULL
+          AND message_id != ''
+          AND message_id != id
+        ",
+        [],
+    )
+    .map_err(|error| db_error("Could not repair self-parent tool_call parts", error))?;
 
     Ok(())
 }
@@ -1377,11 +1405,14 @@ fn derive_legacy_steps(record: &StoredMessageRecord) -> Vec<StoredMessageStepRec
     let mut steps = Vec::new();
 
     for tool_call in &record.tool_calls {
+        let tool_call_part_id = format!("{}-tool-call-{}", record.id, tool_call.id);
         steps.push(StoredMessageStepRecord {
             created_at_ms: record.started_at_ms.or(Some(record.created_at)),
-            id: format!("{}-tool-call-{}", record.id, tool_call.id),
+            id: tool_call_part_id.clone(),
             input: tool_call.input.clone(),
             name: Some(tool_call.name.clone()),
+            // tool_call parents the assistant message anchor.
+            parent_part_id: Some(record.id.clone()),
             status: tool_call.status.clone(),
             tool_call_id: Some(tool_call.id.clone()),
             r#type: "tool_call".to_string(),
@@ -1398,6 +1429,7 @@ fn derive_legacy_steps(record: &StoredMessageRecord) -> Vec<StoredMessageStepRec
                 error: tool_result.error.clone(),
                 id: tool_result.id.clone(),
                 output: tool_result.output.clone(),
+                parent_part_id: Some(tool_call_part_id.clone()),
                 status: tool_result.status.clone(),
                 tool_call_id: tool_result
                     .tool_call_id
@@ -3327,19 +3359,39 @@ fn part_id_exists(
 
 /// Resolve a durable parent link for tool results.
 /// Prefer the requested parent when it exists (this transaction or DB).
-/// Fall back to the tool_call part matching `tool_call_id`.
+/// Resolve parent for a turn part.
+/// - `tool_call` → assistant message anchor (`message_id`), never self
+/// - `tool_result` → matching `tool_call` part (by tool_call_id)
+/// - never returns the part's own id as parent
 fn resolve_parent_part_id(
     tx: &Transaction<'_>,
     inserted_part_ids: &HashSet<String>,
+    step_id: &str,
+    step_type: &str,
+    message_id: &str,
     requested_parent_part_id: Option<&str>,
     tool_call_id: Option<&str>,
 ) -> Result<Option<String>, String> {
-    if let Some(parent_id) = requested_parent_part_id {
+    let requested = requested_parent_part_id.filter(|parent_id| *parent_id != step_id);
+
+    if let Some(parent_id) = requested {
         if part_id_exists(tx, inserted_part_ids, parent_id)? {
             return Ok(Some(parent_id.to_string()));
         }
     }
 
+    // tool_call parents the assistant message, not another tool_call (which became self on re-upsert).
+    if step_type == "tool_call" {
+        if !message_id.is_empty()
+            && message_id != step_id
+            && part_id_exists(tx, inserted_part_ids, message_id)?
+        {
+            return Ok(Some(message_id.to_string()));
+        }
+        return Ok(None);
+    }
+
+    // tool_result (and similar) fall back to the tool_call part matching tool_call_id.
     let Some(tool_call_id) = tool_call_id.filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
@@ -3360,7 +3412,7 @@ fn resolve_parent_part_id(
         .optional()
         .map_err(|error| db_error("Could not resolve Wizzle tool-call parent part", error))?;
 
-    Ok(parent_from_tool_call)
+    Ok(parent_from_tool_call.filter(|parent_id| parent_id != step_id))
 }
 
 fn insert_normalized_message_steps(
@@ -3391,6 +3443,9 @@ fn insert_normalized_message_steps(
         let parent_part_id = resolve_parent_part_id(
             tx,
             inserted_part_ids,
+            &step.id,
+            &step.r#type,
+            &message.id,
             step.parent_part_id.as_deref(),
             step.tool_call_id.as_deref(),
         )?;
@@ -4872,6 +4927,49 @@ mod tests {
             .expect("insert assistant with tool_call");
             tx.commit().expect("commit assistant");
         }
+
+        let tool_call_parent: Option<String> = conn
+            .query_row(
+                "SELECT parent_part_id FROM turn_parts WHERE id = ?1",
+                params![tool_call_part_id],
+                |row| row.get(0),
+            )
+            .expect("read tool_call parent");
+        assert_eq!(
+            tool_call_parent.as_deref(),
+            Some(assistant_id),
+            "tool_call must parent the assistant message, not itself"
+        );
+        assert_ne!(
+            tool_call_parent.as_deref(),
+            Some(tool_call_part_id.as_str()),
+            "tool_call must not self-parent"
+        );
+
+        // Re-upsert the same assistant tool_call — must not flip parent to self.
+        {
+            let tx = conn.transaction().expect("start assistant reupsert");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("indexes");
+            let mut inserted = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted,
+                "session-1",
+                &mut turn_indexes,
+                &assistant,
+                Some("running"),
+            )
+            .expect("reupsert assistant with tool_call");
+            tx.commit().expect("commit assistant reupsert");
+        }
+        let tool_call_parent_after: Option<String> = conn
+            .query_row(
+                "SELECT parent_part_id FROM turn_parts WHERE id = ?1",
+                params![tool_call_part_id],
+                |row| row.get(0),
+            )
+            .expect("read tool_call parent after reupsert");
+        assert_eq!(tool_call_parent_after.as_deref(), Some(assistant_id));
 
         // Separate transaction (targeted persist of tool message alone).
         let tool_message = StoredMessageRecord {
