@@ -1512,10 +1512,12 @@ fn load_session_history(
 
         match message.role.as_str() {
             "assistant" => {
+                // Include activity_content so reload keeps pre-tool assistant text
+                // on the message anchor (matches frontend synchronizeMessageFromParts).
                 message.content = message
                     .parts
                     .iter()
-                    .filter(|part| part.r#type == "content")
+                    .filter(|part| part.r#type == "content" || part.r#type == "activity_content")
                     .filter_map(|part| part.content.clone())
                     .collect::<Vec<_>>()
                     .join("");
