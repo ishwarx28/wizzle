@@ -11,6 +11,7 @@ import {
   resolveHealthyContextPercent,
   resolveOutputReservedPercent,
 } from "./env";
+import { countWithActiveTokenizer } from "./tokenizer-runtime";
 import type {
   CompactedContextRecord,
   Message,
@@ -24,7 +25,6 @@ export const FALLBACK_CONTEXT_LIMIT = 128_000;
 export const TOTAL_CONTEXT_LIMIT = FALLBACK_CONTEXT_LIMIT;
 export const REPLAY_ESTIMATOR_VERSION = 4;
 
-const UNKNOWN_TOKENIZER_MULTIPLIER = 1.15;
 const MESSAGE_OVERHEAD_TOKENS = 6;
 const CONTENT_PART_OVERHEAD_TOKENS = 4;
 const TOOL_CALL_OVERHEAD_TOKENS = 24;
@@ -90,17 +90,13 @@ export function estimateTextTokens(
   text: string,
   options: {
     tokenizerKind?: string | null;
+    /** Cached local tokenizer.json path; uses active HF counter when loaded. */
+    tokenizerLocalPath?: string | null;
   } = {},
 ) {
-  if (!text) {
-    return 0;
-  }
-
-  const baseTokens = Math.ceil(text.length / 3.5);
-
-  return options.tokenizerKind?.trim()
-    ? baseTokens
-    : Math.ceil(baseTokens * UNKNOWN_TOKENIZER_MULTIPLIER);
+  // Prefer an activated HuggingFace tokenizer.json counter when the path matches.
+  // Loaded via activateTokenizer() when the selected model is ready.
+  return countWithActiveTokenizer(text, options);
 }
 
 function stableHash(value: string) {

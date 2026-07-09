@@ -44,6 +44,8 @@ import {
   isSessionAlreadyRunningError,
 } from "../lib/session-run-wake";
 import { resolveImageAttachmentHardFailError } from "../lib/image-capability";
+import { resolveEffectiveTokenizer } from "../lib/tokenizer-resolve";
+import { activateTokenizer } from "../lib/tokenizer-runtime";
 import {
   appendMessagePart,
   synchronizeMessageFromParts,
@@ -1224,6 +1226,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     }
     const initialProviderModel =
       initialState.providerModels.find((model) => model.id === initialState.modelId) ?? null;
+    const initialProvider = initialState.providers.find(
+      (provider) => provider.id === initialProviderModel?.providerId,
+    );
+    const initialTokenizer = resolveEffectiveTokenizer(initialProviderModel, initialProvider);
 
     const imageAttachmentError = resolveImageAttachmentHardFailError(
       initialProviderModel?.capabilities,
@@ -1476,7 +1482,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           projectId: targetProjectId,
           selectedModelUuid: sessionToPersist.selectedModelUuid ?? currentPersistState.modelId,
           sessionId: targetSessionId,
-          tokenizerKind: initialProviderModel?.tokenizerKind ?? null,
+          tokenizerKind: initialTokenizer.kind,
         });
       }
       // Edit: make SQL match in-memory truncation before the agent runs (#3/#57).
@@ -2786,6 +2792,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         throw new Error("Choose a provider model before sending a message.");
       }
 
+      const selectedProvider = currentState.providers.find(
+        (provider) => provider.id === selectedProviderModel.providerId,
+      );
+      const effectiveTokenizer = resolveEffectiveTokenizer(
+        selectedProviderModel,
+        selectedProvider,
+      );
+      await activateTokenizer(effectiveTokenizer.localPath);
+
       await runWorkspaceAgent({
         chatId: targetSessionId,
         history: session.messages,
@@ -2919,7 +2934,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         selectedModel: selectedProviderModel,
         turnSummaries: session.replayTurnSummaries ?? [],
         turnId,
-        tokenizerKind: selectedProviderModel.tokenizerKind,
+        tokenizerKind: effectiveTokenizer.kind,
       });
       settleTurn("done", "The model returned an empty response.");
       const persistResult = await awaitSettledTurnPersist();

@@ -648,6 +648,7 @@ pub async fn fetch_models(
                 "high".to_string(),
                 "max".to_string(),
             ],
+            tokenizer_json: None,
             tokenizer_kind: Some("heuristic".to_string()),
         });
     }
@@ -688,6 +689,7 @@ mod tests {
                 max_output_tokens: None,
                 model_id: "test-model".to_string(),
                 reasoning_levels,
+                tokenizer_json: None,
                 tokenizer_kind: Some("heuristic".to_string()),
             },
             model_uuid: "uuid-1".to_string(),

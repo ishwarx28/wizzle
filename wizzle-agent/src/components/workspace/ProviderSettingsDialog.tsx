@@ -24,6 +24,7 @@ type ProviderModelFormRow = {
   maxOutputTokens: string;
   modelId: string;
   reasoningLevels: string;
+  tokenizerJson: string;
   tokenizerKind: string;
 };
 
@@ -34,6 +35,7 @@ const emptyModelRow: ProviderModelFormRow = {
   maxOutputTokens: "",
   modelId: "",
   reasoningLevels: "low, medium, high, max",
+  tokenizerJson: "",
   tokenizerKind: "",
 };
 
@@ -81,6 +83,7 @@ function toModelInput(row: ProviderModelFormRow) {
     maxOutputTokens: parseOptionalInteger(row.maxOutputTokens),
     modelId,
     reasoningLevels: parseList(row.reasoningLevels),
+    tokenizerJson: row.tokenizerJson.trim() || undefined,
     tokenizerKind: row.tokenizerKind.trim() || undefined,
   };
 }
@@ -95,6 +98,7 @@ function providerModelsForExport(provider: ProviderInfo, models: ProviderModelIn
       maxOutputTokens: model.maxOutputTokens ?? undefined,
       modelId: model.modelId,
       reasoningLevels: model.reasoningLevels,
+      tokenizerJson: model.tokenizerJson ?? undefined,
       tokenizerKind: model.tokenizerKind ?? undefined,
     }));
 }
@@ -116,6 +120,10 @@ function buildProvidersYaml(providers: ProviderInfo[], models: ProviderModelInfo
 
     if (provider.defaultModelId) {
       lines.push(`    defaultModelId: ${yamlString(provider.defaultModelId)}`);
+    }
+
+    if (provider.tokenizerJson) {
+      lines.push(`    tokenizerJson: ${yamlString(provider.tokenizerJson)}`);
     }
 
     const providerModels = providerModelsForExport(provider, models);
@@ -142,6 +150,10 @@ function buildProvidersYaml(providers: ProviderInfo[], models: ProviderModelInfo
 
         if (model.reasoningLevels.length > 0) {
           lines.push(`        reasoningLevels: [${model.reasoningLevels.map(yamlString).join(", ")}]`);
+        }
+
+        if (model.tokenizerJson) {
+          lines.push(`        tokenizerJson: ${yamlString(model.tokenizerJson)}`);
         }
 
         if (model.tokenizerKind) {
@@ -180,6 +192,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
   const [name, setName] = useState("OpenAI");
   const [onlySpecifiedModels, setOnlySpecifiedModels] = useState(false);
   const [providerType, setProviderType] = useState("openai_compatible");
+  const [tokenizerJson, setTokenizerJson] = useState("");
   const [yaml, setYaml] = useState("");
   const yamlFileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -208,6 +221,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
     setName("OpenAI");
     setOnlySpecifiedModels(false);
     setProviderType("openai_compatible");
+    setTokenizerJson("");
   }
 
   function editProvider(provider: ProviderInfo) {
@@ -227,6 +241,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
             maxOutputTokens: model.maxOutputTokens ? String(model.maxOutputTokens) : "",
             modelId: model.modelId,
             reasoningLevels: model.reasoningLevels.join(", "),
+            tokenizerJson: model.tokenizerJson ?? "",
             tokenizerKind: model.tokenizerKind ?? "",
           }))
         : [{ ...emptyModelRow }],
@@ -234,6 +249,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
     setName(provider.name);
     setOnlySpecifiedModels(false);
     setProviderType(provider.providerType);
+    setTokenizerJson(provider.tokenizerJson ?? "");
   }
 
   async function handleSaveProvider() {
@@ -256,6 +272,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
         name,
         onlySpecifiedModels,
         providerType,
+        tokenizerJson: tokenizerJson.trim() || undefined,
       });
 
       if (!onlySpecifiedModels) {
@@ -503,7 +520,11 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
               <input className="h-10 rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-3 text-[13px] text-[var(--color-text)] outline-none focus:border-[var(--color-border-strong)] md:col-span-2" onChange={(event) => setEndpoint(event.currentTarget.value)} placeholder="https://api.openai.com" value={endpoint} />
               <input className="h-10 rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-3 text-[13px] text-[var(--color-text)] outline-none focus:border-[var(--color-border-strong)]" onChange={(event) => setDefaultModelId(event.currentTarget.value)} placeholder="Default model ID" value={defaultModelId} />
               <input className="h-10 rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-3 text-[13px] text-[var(--color-text)] outline-none focus:border-[var(--color-border-strong)]" onChange={(event) => setApiKey(event.currentTarget.value)} placeholder={editingProviderId ? "New API key (blank keeps current)" : "API key"} type="password" value={apiKey} />
+              <input className="h-10 rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-3 text-[13px] text-[var(--color-text)] outline-none focus:border-[var(--color-border-strong)] md:col-span-2" onChange={(event) => setTokenizerJson(event.currentTarget.value)} placeholder="Provider tokenizer.json path or HTTPS URL (optional)" value={tokenizerJson} />
             </div>
+            <p className="mt-2 text-[11px] text-[var(--color-text-tertiary)]">
+              Tokenizer fallback: model tokenizer.json → provider tokenizer.json → character heuristic. URLs are downloaded and validated on save; cache is removed when the provider is deleted.
+            </p>
             <label className="mt-3 flex items-center gap-2 text-[13px] text-[var(--color-text-secondary)]">
               <input checked={onlySpecifiedModels} onChange={(event) => setOnlySpecifiedModels(event.currentTarget.checked)} type="checkbox" />
               Use only the manually specified models below
@@ -522,7 +543,8 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                   <input className="h-9 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-3 text-[12px] text-[var(--color-text)] outline-none" onChange={(event) => setModelRows((rows) => rows.map((entry, rowIndex) => rowIndex === index ? { ...entry, maxOutputTokens: event.currentTarget.value } : entry))} placeholder="maxOutputTokens" value={row.maxOutputTokens} />
                   <input className="h-9 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-3 text-[12px] text-[var(--color-text)] outline-none" onChange={(event) => setModelRows((rows) => rows.map((entry, rowIndex) => rowIndex === index ? { ...entry, capabilities: event.currentTarget.value } : entry))} placeholder="capabilities" value={row.capabilities} />
                   <input className="h-9 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-3 text-[12px] text-[var(--color-text)] outline-none" onChange={(event) => setModelRows((rows) => rows.map((entry, rowIndex) => rowIndex === index ? { ...entry, reasoningLevels: event.currentTarget.value } : entry))} placeholder="reasoningLevels" value={row.reasoningLevels} />
-                  <input className="h-9 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-3 text-[12px] text-[var(--color-text)] outline-none" onChange={(event) => setModelRows((rows) => rows.map((entry, rowIndex) => rowIndex === index ? { ...entry, tokenizerKind: event.currentTarget.value } : entry))} placeholder="tokenizerKind" value={row.tokenizerKind} />
+                  <input className="h-9 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-3 text-[12px] text-[var(--color-text)] outline-none md:col-span-2" onChange={(event) => setModelRows((rows) => rows.map((entry, rowIndex) => rowIndex === index ? { ...entry, tokenizerJson: event.currentTarget.value } : entry))} placeholder="model tokenizer.json path or HTTPS URL (optional, overrides provider)" value={row.tokenizerJson} />
+                  <input className="h-9 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-3 text-[12px] text-[var(--color-text)] outline-none" onChange={(event) => setModelRows((rows) => rows.map((entry, rowIndex) => rowIndex === index ? { ...entry, tokenizerKind: event.currentTarget.value } : entry))} placeholder="tokenizerKind (optional label)" value={row.tokenizerKind} />
                   <button className="h-9 rounded-xl px-3 text-[12px] text-[var(--color-danger)] transition hover:bg-[var(--color-panel-hover)]" onClick={() => setModelRows((rows) => rows.length === 1 ? [{ ...emptyModelRow }] : rows.filter((_, rowIndex) => rowIndex !== index))} type="button">Remove</button>
                 </div>
               ))}

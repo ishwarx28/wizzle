@@ -132,11 +132,13 @@ export async function upsertProvider(input: {
     maxOutputTokens?: number;
     modelId: string;
     reasoningLevels?: string[];
+    tokenizerJson?: string;
     tokenizerKind?: string;
   }>;
   name: string;
   onlySpecifiedModels?: boolean;
   providerType: string;
+  tokenizerJson?: string;
 }) {
   return invoke<string>("upsert_provider", { input });
 }

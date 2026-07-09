@@ -13,8 +13,8 @@ use agent::{
 use logging::{log_desktop_event, write_frontend_logs};
 use providers::{
     cancel_provider_chat, complete_provider_chat, delete_provider, import_provider_yaml,
-    list_provider_models, list_providers, refresh_provider_models, stream_provider_chat,
-    upsert_provider, ProviderChatRequestStore,
+    list_provider_models, list_providers, read_tokenizer_asset, refresh_provider_models,
+    stream_provider_chat, upsert_provider, ProviderChatRequestStore,
 };
 use workspace::{
     add_project_from_path, append_or_update_message, build_attachment_preview_from_bytes,
@@ -88,6 +88,7 @@ pub fn run() {
             list_provider_models,
             refresh_provider_models,
             import_provider_yaml,
+            read_tokenizer_asset,
             cancel_provider_chat,
             complete_provider_chat,
             stream_provider_chat

@@ -1,6 +1,7 @@
 mod crypto;
 mod openai_compatible;
 mod repository;
+mod tokenizer_assets;
 mod types;
 
 use futures_util::future::{AbortHandle, Abortable, Aborted};
@@ -15,7 +16,7 @@ use crate::logging::log_desktop_event;
 pub use types::{
     CancelProviderChatInput, DeleteProviderInput, ImportProviderYamlInput,
     ProviderChatCompletionInput, ProviderChatStreamInput, ProviderModelPayload, ProviderPayload,
-    RefreshProviderModelsInput, UpsertProviderInput,
+    ReadTokenizerAssetInput, RefreshProviderModelsInput, UpsertProviderInput,
 };
 
 const INTERRUPTED_ERROR: &str = "__WIZZLE_PROVIDER_CHAT_INTERRUPTED__";
@@ -73,6 +74,11 @@ pub async fn refresh_provider_models(
 #[tauri::command]
 pub fn import_provider_yaml(input: ImportProviderYamlInput) -> Result<(), String> {
     repository::import_provider_yaml(input)
+}
+
+#[tauri::command]
+pub fn read_tokenizer_asset(input: ReadTokenizerAssetInput) -> Result<String, String> {
+    repository::read_tokenizer_asset(&input.path)
 }
 
 #[tauri::command]

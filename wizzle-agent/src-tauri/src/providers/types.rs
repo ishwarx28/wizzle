@@ -11,6 +11,8 @@ pub struct ProviderModelDefinitionInput {
     pub model_id: String,
     pub reasoning_levels: Option<Vec<String>>,
     pub tokenizer_kind: Option<String>,
+    /// Local path or HTTPS URL to a HuggingFace `tokenizer.json`.
+    pub tokenizer_json: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -24,6 +26,8 @@ pub struct UpsertProviderInput {
     pub name: String,
     pub only_specified_models: Option<bool>,
     pub provider_type: String,
+    /// Provider-level HuggingFace `tokenizer.json` path or HTTPS URL.
+    pub tokenizer_json: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -56,6 +60,8 @@ pub struct ProviderPayload {
     pub model_count: u64,
     pub name: String,
     pub provider_type: String,
+    pub tokenizer_json: Option<String>,
+    pub tokenizer_local_path: Option<String>,
     pub updated_at_ms: u64,
 }
 
@@ -74,7 +80,9 @@ pub struct ProviderModelPayload {
     pub provider_name: String,
     pub provider_type: String,
     pub reasoning_levels: Vec<String>,
+    pub tokenizer_json: Option<String>,
     pub tokenizer_kind: Option<String>,
+    pub tokenizer_local_path: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -130,7 +138,14 @@ pub struct ProviderModelRecord {
     pub max_output_tokens: Option<u64>,
     pub model_id: String,
     pub reasoning_levels: Vec<String>,
+    pub tokenizer_json: Option<String>,
     pub tokenizer_kind: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadTokenizerAssetInput {
+    pub path: String,
 }
 
 #[derive(Clone)]

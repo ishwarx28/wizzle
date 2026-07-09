@@ -10,6 +10,10 @@ use crate::workspace::sqlite_repository::{db_error, now_unix_ms, open_database};
 use super::{
     crypto::{decrypt_api_key, encrypt_api_key},
     openai_compatible,
+    tokenizer_assets::{
+        self, cleanup_provider_tokenizers, clear_tokenizer, materialize_tokenizer,
+        normalize_tokenizer_source, resolve_local_path_if_present, TokenizerScope,
+    },
     types::{
         ImportProviderYamlInput, ProviderModelDefinitionInput, ProviderModelPayload,
         ProviderModelRecord, ProviderPayload, ProviderResolvedModel, ProviderSecretRecord,
@@ -40,6 +44,7 @@ struct ProviderYamlEntry {
     only_specified_models: Option<bool>,
     #[serde(alias = "type")]
     provider_type: String,
+    tokenizer_json: Option<String>,
 }
 
 fn normalize_provider_type(provider_type: &str) -> String {
@@ -197,6 +202,12 @@ fn insert_or_update_model(
     let model_uuid = Uuid::new_v4().to_string();
     let capabilities = serialize_string_list(&model.capabilities)?;
     let reasoning_levels = serialize_string_list(&model.reasoning_levels)?;
+    let tokenizer_json = normalize_tokenizer_source(model.tokenizer_json.clone());
+    let tokenizer_kind = model.tokenizer_kind.clone().or_else(|| {
+        tokenizer_json
+            .as_ref()
+            .map(|_| "hf-json".to_string())
+    });
 
     conn.execute(
         "
@@ -210,9 +221,10 @@ fn insert_or_update_model(
           max_context,
           max_output_tokens,
           tokenizer_kind,
+          tokenizer_json,
           created_at,
           updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
         ON CONFLICT(provider_id, model_id) DO UPDATE SET
           display_name = excluded.display_name,
           capabilities = excluded.capabilities,
@@ -220,6 +232,7 @@ fn insert_or_update_model(
           max_context = excluded.max_context,
           max_output_tokens = excluded.max_output_tokens,
           tokenizer_kind = excluded.tokenizer_kind,
+          tokenizer_json = excluded.tokenizer_json,
           updated_at = excluded.updated_at
         ",
         params![
@@ -231,13 +244,60 @@ fn insert_or_update_model(
             reasoning_levels,
             model.max_context as i64,
             model.max_output_tokens.map(|value| value as i64),
-            model.tokenizer_kind,
+            tokenizer_kind,
+            tokenizer_json,
             now,
             now
         ],
     )
     .map_err(|error| db_error("Could not save provider model", error))?;
 
+    Ok(())
+}
+
+fn load_model_tokenizer_json(
+    conn: &Connection,
+    provider_id: &str,
+    model_id: &str,
+) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT tokenizer_json FROM models WHERE provider_id = ?1 AND model_id = ?2",
+        params![provider_id, model_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|error| db_error("Could not read model tokenizer source", error))
+}
+
+fn sync_model_tokenizer_asset(
+    provider_id: &str,
+    model_id: &str,
+    tokenizer_json: Option<&str>,
+) -> Result<(), String> {
+    let scope = TokenizerScope::Model { model_id };
+    match normalize_tokenizer_source(tokenizer_json.map(|value| value.to_string())) {
+        Some(source) => {
+            materialize_tokenizer(provider_id, scope, &source)?;
+        }
+        None => {
+            clear_tokenizer(provider_id, scope)?;
+        }
+    }
+    Ok(())
+}
+
+fn sync_provider_tokenizer_asset(
+    provider_id: &str,
+    tokenizer_json: Option<&str>,
+) -> Result<(), String> {
+    match normalize_tokenizer_source(tokenizer_json.map(|value| value.to_string())) {
+        Some(source) => {
+            materialize_tokenizer(provider_id, TokenizerScope::Provider, &source)?;
+        }
+        None => {
+            clear_tokenizer(provider_id, TokenizerScope::Provider)?;
+        }
+    }
     Ok(())
 }
 
@@ -249,6 +309,16 @@ pub fn model_from_definition(
     if model_id.is_empty() {
         return Err("Provider model id is required.".to_string());
     }
+
+    let tokenizer_json = normalize_tokenizer_source(input.tokenizer_json);
+    let tokenizer_kind = input.tokenizer_kind.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    }).or_else(|| tokenizer_json.as_ref().map(|_| "hf-json".to_string()));
 
     Ok(ProviderModelRecord {
         capabilities: normalize_capabilities(input.capabilities),
@@ -264,14 +334,8 @@ pub fn model_from_definition(
         max_output_tokens: input.max_output_tokens,
         model_id,
         reasoning_levels: normalize_list(input.reasoning_levels, DEFAULT_REASONING_LEVELS),
-        tokenizer_kind: input.tokenizer_kind.and_then(|value| {
-            let trimmed = value.trim().to_string();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
-        }),
+        tokenizer_json,
+        tokenizer_kind,
     })
 }
 
@@ -283,10 +347,29 @@ fn save_provider_with_conn(
     let name = input.name.trim().to_string();
     let provider_type = validate_provider_type(&input.provider_type)?;
     let endpoint = validate_endpoint(&input.endpoint)?;
+    let tokenizer_json = normalize_tokenizer_source(input.tokenizer_json);
     let now = now_unix_ms() as i64;
 
     if name.is_empty() {
         return Err("Provider name is required.".to_string());
+    }
+
+    // Validate + cache tokenizer assets before writing DB so a bad URL fails the save.
+    sync_provider_tokenizer_asset(&provider_id, tokenizer_json.as_deref())?;
+
+    let models = input
+        .models
+        .unwrap_or_default()
+        .into_iter()
+        .map(model_from_definition)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for model in &models {
+        sync_model_tokenizer_asset(
+            &provider_id,
+            &model.model_id,
+            model.tokenizer_json.as_deref(),
+        )?;
     }
 
     let existing_api_key: Option<Vec<u8>> = conn
@@ -313,15 +396,17 @@ fn save_provider_with_conn(
           endpoint,
           api_key_encrypted,
           default_model_id,
+          tokenizer_json,
           created_at,
           updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           type = excluded.type,
           endpoint = excluded.endpoint,
           api_key_encrypted = excluded.api_key_encrypted,
           default_model_id = excluded.default_model_id,
+          tokenizer_json = excluded.tokenizer_json,
           updated_at = excluded.updated_at
         ",
         params![
@@ -331,14 +416,15 @@ fn save_provider_with_conn(
             endpoint,
             api_key_encrypted,
             input.default_model_id,
+            tokenizer_json,
             now,
             now
         ],
     )
     .map_err(|error| db_error("Could not save provider", error))?;
 
-    for model in input.models.unwrap_or_default() {
-        insert_or_update_model(conn, &provider_id, model_from_definition(model)?)?;
+    for model in models {
+        insert_or_update_model(conn, &provider_id, model)?;
     }
 
     Ok(provider_id)
@@ -353,6 +439,8 @@ pub fn delete_provider(provider_id: &str) -> Result<(), String> {
     let conn = open_database()?;
     conn.execute("DELETE FROM providers WHERE id = ?1", params![provider_id])
         .map_err(|error| db_error("Could not delete provider", error))?;
+    // Best-effort: DB row is already gone even if cache cleanup fails.
+    let _ = cleanup_provider_tokenizers(provider_id);
     Ok(())
 }
 
@@ -369,6 +457,7 @@ pub fn list_providers() -> Result<Vec<ProviderPayload>, String> {
               providers.endpoint,
               providers.api_key_encrypted IS NOT NULL,
               providers.default_model_id,
+              providers.tokenizer_json,
               providers.created_at,
               providers.updated_at,
               COUNT(models.id)
@@ -382,16 +471,24 @@ pub fn list_providers() -> Result<Vec<ProviderPayload>, String> {
 
     let providers = statement
         .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let tokenizer_json: Option<String> = row.get(6)?;
             Ok(ProviderPayload {
-                id: row.get(0)?,
+                id: id.clone(),
                 name: row.get(1)?,
                 provider_type: row.get(2)?,
                 endpoint: row.get(3)?,
                 has_api_key: row.get::<_, i64>(4)? != 0,
                 default_model_id: row.get(5)?,
-                created_at_ms: row.get::<_, i64>(6)? as u64,
-                updated_at_ms: row.get::<_, i64>(7)? as u64,
-                model_count: row.get::<_, i64>(8)? as u64,
+                tokenizer_json: tokenizer_json.clone(),
+                tokenizer_local_path: resolve_local_path_if_present(
+                    &id,
+                    TokenizerScope::Provider,
+                    tokenizer_json.as_deref(),
+                ),
+                created_at_ms: row.get::<_, i64>(7)? as u64,
+                updated_at_ms: row.get::<_, i64>(8)? as u64,
+                model_count: row.get::<_, i64>(9)? as u64,
             })
         })
         .map_err(|error| db_error("Could not read providers", error))?
@@ -419,6 +516,7 @@ pub fn list_models() -> Result<Vec<ProviderModelPayload>, String> {
               models.max_context,
               models.max_output_tokens,
               models.tokenizer_kind,
+              models.tokenizer_json,
               models.is_pinned,
               models.last_used_at
             FROM models
@@ -430,20 +528,31 @@ pub fn list_models() -> Result<Vec<ProviderModelPayload>, String> {
 
     let models = statement
         .query_map([], |row| {
+            let provider_id: String = row.get(1)?;
+            let model_id: String = row.get(4)?;
+            let tokenizer_json: Option<String> = row.get(11)?;
             Ok(ProviderModelPayload {
                 id: row.get(0)?,
-                provider_id: row.get(1)?,
+                provider_id: provider_id.clone(),
                 provider_name: row.get(2)?,
                 provider_type: row.get(3)?,
-                model_id: row.get(4)?,
+                model_id: model_id.clone(),
                 display_name: row.get(5)?,
                 capabilities: deserialize_string_list(row.get(6)?, &["text"]),
                 reasoning_levels: deserialize_string_list(row.get(7)?, DEFAULT_REASONING_LEVELS),
                 max_context: row.get::<_, i64>(8)? as u64,
                 max_output_tokens: row.get::<_, Option<i64>>(9)?.map(|value| value as u64),
                 tokenizer_kind: row.get(10)?,
-                is_pinned: row.get::<_, i64>(11)? != 0,
-                last_used_at_ms: row.get::<_, Option<i64>>(12)?.map(|value| value as u64),
+                tokenizer_json: tokenizer_json.clone(),
+                tokenizer_local_path: resolve_local_path_if_present(
+                    &provider_id,
+                    TokenizerScope::Model {
+                        model_id: model_id.as_str(),
+                    },
+                    tokenizer_json.as_deref(),
+                ),
+                is_pinned: row.get::<_, i64>(12)? != 0,
+                last_used_at_ms: row.get::<_, Option<i64>>(13)?.map(|value| value as u64),
             })
         })
         .map_err(|error| db_error("Could not read provider models", error))?
@@ -468,11 +577,20 @@ pub async fn refresh_provider_models(
     let models = openai_compatible::fetch_models(&provider).await?;
     let conn = open_database()?;
 
-    for model in models {
+    for mut model in models {
+        // Refresh must not wipe a user-configured tokenizer.json.
+        if model.tokenizer_json.is_none() {
+            model.tokenizer_json =
+                load_model_tokenizer_json(&conn, &provider.id, &model.model_id)?;
+        }
         insert_or_update_model(&conn, &provider.id, model)?;
     }
 
     list_models()
+}
+
+pub fn read_tokenizer_asset(path: &str) -> Result<String, String> {
+    tokenizer_assets::read_tokenizer_asset(path)
 }
 
 pub fn import_provider_yaml(input: ImportProviderYamlInput) -> Result<(), String> {
@@ -526,6 +644,7 @@ pub fn import_provider_yaml_text(yaml: &str, source: &str) -> Result<(), String>
                 name: provider.name,
                 only_specified_models: provider.only_specified_models,
                 provider_type: provider.provider_type,
+                tokenizer_json: provider.tokenizer_json,
             },
         )?;
 
@@ -701,6 +820,7 @@ pub fn resolve_model(model_uuid: &str) -> Result<ProviderResolvedModel, String> 
             max_output_tokens: max_output_tokens.map(|value| value as u64),
             model_id,
             reasoning_levels: deserialize_string_list(reasoning_levels, DEFAULT_REASONING_LEVELS),
+            tokenizer_json: None,
             tokenizer_kind,
         },
         provider: ProviderSecretRecord {
@@ -738,6 +858,7 @@ mod tests {
             model_id: "gpt-test".to_string(),
             reasoning_levels: None,
             tokenizer_kind: None,
+            tokenizer_json: None,
         })
         .expect("model definition");
 

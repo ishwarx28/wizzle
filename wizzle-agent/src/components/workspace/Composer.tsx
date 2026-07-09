@@ -48,6 +48,8 @@ import {
   resolvePromptMaxChars,
 } from "../../lib/prompt-size";
 import { SESSION_RUN_WAKE_EVENT } from "../../lib/session-run-wake";
+import { resolveEffectiveTokenizer } from "../../lib/tokenizer-resolve";
+import { activateTokenizer } from "../../lib/tokenizer-runtime";
 import { useWorkspaceStore } from "../../store/workspace-store";
 import type {
   MessageEditState,
@@ -329,6 +331,7 @@ export function Composer({
   const permissionMode = useWorkspaceStore((state) => state.permissionMode);
   const previewFiles = useWorkspaceStore((state) => state.previewFiles);
   const projects = useWorkspaceStore((state) => state.projects);
+  const providers = useWorkspaceStore((state) => state.providers);
   const providerModels = useWorkspaceStore((state) => state.providerModels);
   const reasoningLevel = useWorkspaceStore((state) => state.reasoningLevel);
   const selectedProjectId = useWorkspaceStore((state) => state.selectedProjectId);
@@ -417,7 +420,16 @@ export function Composer({
   const hasEnhanceableDraft = draft.trim().length > 0;
   const shouldShowInterrupt = isSendingMessage && !hasDraftContent;
   const selectedProviderModel = providerModels.find((model) => model.id === modelId) ?? null;
+  const selectedProvider = providers.find((provider) => provider.id === selectedProviderModel?.providerId) ?? null;
+  const effectiveTokenizer = useMemo(
+    () => resolveEffectiveTokenizer(selectedProviderModel, selectedProvider),
+    [selectedProvider, selectedProviderModel],
+  );
   const isModelMissing = !selectedProviderModel;
+
+  useEffect(() => {
+    void activateTokenizer(effectiveTokenizer.localPath);
+  }, [effectiveTokenizer.localPath]);
   const isDisabled = isEnhancingPrompt || isModelMissing || (!isSendingMessage && !hasDraftContent);
   const shouldShowFloatingEnhanceAction =
     showFloatingEnhanceAction && hasEnhanceableDraft && !isEnhancingPrompt && !isSendingMessage;
@@ -543,7 +555,7 @@ export function Composer({
         previewFileMap,
         selectedModelUuid: modelId,
         systemPrompt: "",
-        tokenizerKind: selectedProviderModel?.tokenizerKind,
+        tokenizerKind: effectiveTokenizer.kind,
         turnSummaries: currentSession.replayTurnSummaries ?? [],
       });
       const used = selection.estimatedTokens;
@@ -565,13 +577,14 @@ export function Composer({
     }
   }, [
     currentSession,
+    effectiveTokenizer.kind,
+    effectiveTokenizer.localPath,
     modelCapabilities,
     modelContextLimit,
     modelId,
     previewFileMap,
     selectedProviderModel?.maxContext,
     selectedProviderModel?.maxOutputTokens,
-    selectedProviderModel?.tokenizerKind,
   ]);
   const budgetColor = budgetUsage.ratio === 0 ? "var(--color-text-tertiary)" : resolveBudgetColor(budgetUsage.ratio);
   const budgetRingSize = 30;

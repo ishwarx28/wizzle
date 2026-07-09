@@ -27,6 +27,10 @@ export interface ProviderInfo {
   modelCount: number;
   name: string;
   providerType: string;
+  /** Configured path or URL for provider-level tokenizer.json */
+  tokenizerJson?: string | null;
+  /** Cached local path under ~/.wizzle/tokenizers when ready */
+  tokenizerLocalPath?: string | null;
   updatedAtMs: number;
 }
 
@@ -43,7 +47,11 @@ export interface ProviderModelInfo {
   providerName: string;
   providerType: string;
   reasoningLevels: string[];
+  /** Configured path or URL for model-level tokenizer.json (overrides provider) */
+  tokenizerJson?: string | null;
   tokenizerKind?: string | null;
+  /** Cached local path when model tokenizer is ready */
+  tokenizerLocalPath?: string | null;
 }
 
 export interface ToolApprovalRequest {

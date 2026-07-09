@@ -302,6 +302,7 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
         // Includes turn part + turn budget column ensures / legacy summary migration.
         ensure_session_metadata_columns(conn)?;
         ensure_process_link_columns(conn)?;
+        ensure_tokenizer_json_columns(conn)?;
         return Ok(());
     }
 
@@ -318,6 +319,7 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
           endpoint TEXT NOT NULL,
           api_key_encrypted BLOB NULL,
           default_model_id TEXT NULL,
+          tokenizer_json TEXT NULL,
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL
         );
@@ -332,6 +334,7 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
           max_context INTEGER NOT NULL,
           max_output_tokens INTEGER NULL,
           tokenizer_kind TEXT NULL,
+          tokenizer_json TEXT NULL,
           is_pinned INTEGER NOT NULL DEFAULT 0,
           last_used_at INTEGER NULL,
           created_at INTEGER NOT NULL,
@@ -545,6 +548,25 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
     ensure_session_metadata_columns(conn)?;
     ensure_turn_budget_columns(conn)?;
     ensure_process_link_columns(conn)?;
+    ensure_tokenizer_json_columns(conn)?;
+    Ok(())
+}
+
+/// Provider/model HuggingFace tokenizer.json source paths (#53).
+fn ensure_tokenizer_json_columns(conn: &Connection) -> Result<(), String> {
+    if !table_has_column(conn, "providers", "tokenizer_json")? {
+        conn.execute(
+            "ALTER TABLE providers ADD COLUMN tokenizer_json TEXT NULL",
+            [],
+        )
+        .map_err(|error| db_error("Could not update provider tokenizer columns", error))?;
+    }
+
+    if !table_has_column(conn, "models", "tokenizer_json")? {
+        conn.execute("ALTER TABLE models ADD COLUMN tokenizer_json TEXT NULL", [])
+            .map_err(|error| db_error("Could not update model tokenizer columns", error))?;
+    }
+
     Ok(())
 }
 
