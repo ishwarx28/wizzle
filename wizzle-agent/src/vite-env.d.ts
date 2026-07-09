@@ -1,14 +1,19 @@
 /// <reference types="vite/client" />
 
+type WizzleClientEnv = {
+  readonly WIZZLE_COMPACTED_CONTEXT_TOKENS?: string;
+  readonly WIZZLE_MAX_AGENT_STEPS?: string;
+  readonly WIZZLE_MAX_PROMPT_SIZE?: string;
+  readonly WIZZLE_OUTPUT_RESERVED_PERCENT?: string;
+  readonly WIZZLE_HEALTHY_CONTEXT_PERCENT?: string;
+  readonly WIZZLE_FRONTEND_LOG_MODE?: string;
+  readonly WIZZLE_FRONTEND_LOG_RETENTION_DAYS?: string;
+};
+
+declare const __WIZZLE_ENV__: WizzleClientEnv;
+
 interface ImportMetaEnv {
-  readonly VITE_FIREBASE_API_KEY: string;
-  readonly VITE_FIREBASE_AUTH_DOMAIN: string;
-  readonly VITE_FIREBASE_PROJECT_ID: string;
-  readonly VITE_FIREBASE_APP_ID: string;
-  readonly VITE_FIREBASE_MESSAGING_SENDER_ID?: string;
-  readonly VITE_GOOGLE_OAUTH_CLIENT_ID?: string;
-  readonly VITE_GOOGLE_OAUTH_CLIENT_SECRET?: string;
-  readonly VITE_WIZZLE_PROXY_BASE_URL?: string;
+  readonly WIZZLE_PUBLIC_SAMPLE?: string;
 }
 
 interface ImportMeta {

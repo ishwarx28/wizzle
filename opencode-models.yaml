@@ -1,0 +1,41 @@
+providers:
+  - name: OpenCode
+    providerType: openai_compatible
+    endpoint: https://opencode.ai/zen
+    apiKey: ""
+    defaultModelId: deepseek-v4-flash-free
+    onlySpecifiedModels: true
+    models:
+      - modelId: deepseek-v4-flash-free
+        displayName: deepseek-v4-flash
+        capabilities:
+          - text
+        reasoningLevels:
+          - low
+          - medium
+          - high
+          - max
+        maxContext: 128000
+        tokenizerKind: heuristic
+      - modelId: hy3-free
+        displayName: hy3
+        capabilities:
+          - text
+        reasoningLevels:
+          - low
+          - medium
+          - high
+        maxContext: 128000
+        tokenizerKind: heuristic
+      - modelId: mimo-v2.5-free
+        displayName: mimo-v2.5
+        capabilities:
+          - text
+          - image
+        reasoningLevels:
+          - low
+          - medium
+          - high
+        maxContext: 128000
+        tokenizerKind: heuristic
+      

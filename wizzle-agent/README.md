@@ -4,11 +4,12 @@
 
 ## Responsibilities
 
-- Render the auth flow and workspace UI
-- Store local projects, chats, settings, and permission mode
-- Load local instructions such as `AGENTS.md` and `harness.md`
+- Render the local workspace UI
+- Store local projects, sessions, composer state, provider metadata, settings, and permission mode in SQLite
+- Load local instructions from `AGENTS.md`
+- Load global skills metadata for the agent prompt
 - Handle local file access and shell execution inside the selected project root
-- Send model requests through `wizzle-proxy`
+- Call configured AI providers directly from the Tauri backend
 
 ## Stack
 
@@ -18,6 +19,7 @@
 - Vite
 - Tailwind CSS
 - Zustand
+- SQLite through `rusqlite`
 
 ## Scripts
 
@@ -47,56 +49,48 @@ Production frontend build:
 npm run build
 ```
 
-## Firebase Setup
+## Local State
 
-Copy the example env file and fill in your Firebase web app values:
+The desktop app stores state under the user's home directory:
+
+- Database: `~/.wizzle/wizzle.db`
+- Session attachments: `~/.wizzle/sessions/<session-id>/attachments`
+- Legacy JSON files may still be read for migration, but new writes go through SQLite.
+
+## Provider Setup
+
+Copy the example env file, then adjust provider import settings if needed:
 
 ```bash
 cp .env.example .env
 ```
 
-Required values:
+Useful values:
 
-- `VITE_FIREBASE_API_KEY`
-- `VITE_FIREBASE_AUTH_DOMAIN`
-- `VITE_FIREBASE_PROJECT_ID`
-- `VITE_FIREBASE_APP_ID`
+- `WIZZLE_PROVIDERS_YAML_PATH` points to the initial provider YAML file. The default is `../opencode-models.yaml`.
+- `WIZZLE_PROVIDER_KEY` optionally overrides the local encryption key used for stored provider API keys. Leave it empty for normal local development.
+- `WIZZLE_DESKTOP_LOG_MODE` and `VITE_WIZZLE_FRONTEND_LOG_MODE` control desktop/frontend logging.
 
-Optional but recommended:
+The initial provider file lives at `/Users/mrdev.288/StudioProjects/wizzle/opencode-models.yaml`. It seeds OpenAI-compatible providers and model metadata when the local provider import table is empty. Additional providers can be added from the Providers dialog.
 
-- `VITE_FIREBASE_MESSAGING_SENDER_ID`
-- `VITE_WIZZLE_PROXY_BASE_URL`
+Provider records are stored locally. API keys are encrypted before being written to SQLite and are not exposed through frontend provider/model state.
 
-Required for Google sign-in from the desktop app:
+## Direct Provider Calls
 
-- `VITE_GOOGLE_OAUTH_CLIENT_ID`
-- `VITE_GOOGLE_OAUTH_CLIENT_SECRET`
+The app no longer depends on a separate proxy process for model discovery, chat streaming, title generation, or prompt enhancement. Provider requests are made by Rust Tauri commands:
 
-## Google Desktop OAuth Setup
+- `list_providers`
+- `list_provider_models`
+- `refresh_provider_models`
+- `stream_provider_chat`
+- `complete_provider_chat`
+- `cancel_provider_chat`
 
-Wizzle uses the system browser for Google sign-in, then returns to the app through a temporary loopback callback such as `http://127.0.0.1:<port>/google/callback`.
+OpenAI-compatible providers are supported by the current adapter. Other provider types can be saved in settings, but direct native calls require dedicated adapters before use.
 
-Create a Google OAuth client for a desktop app, then set the client id and client secret in `/Users/mrdev.288/StudioProjects/wizzle/wizzle-agent/.env`:
+## Agent Prompt and Skills
 
-```bash
-VITE_GOOGLE_OAUTH_CLIENT_ID=your-google-desktop-oauth-client-id.apps.googleusercontent.com
-VITE_GOOGLE_OAUTH_CLIENT_SECRET=your-google-desktop-oauth-client-secret
-```
-
-Notes:
-
-- This client id is separate from the Firebase web app config.
-- For this Google desktop OAuth client, Wizzle also sends the client secret during the token exchange.
-- Google sign-in works from the Tauri desktop app, not from plain `npm run dev` in a browser tab.
-- The app starts a short-lived localhost listener only for the Google OAuth callback.
-
-Auth behavior in MVP:
-
-- Email + password signs in if the account exists
-- If the email does not exist yet, the app creates the account automatically
-- New email/password accounts get their display name from the part before `@`
-- Google sign-in keeps the Google name and profile photo
-- Email/password accounts must verify email before entering the app
+The frontend builds the agent system prompt from `src/lib/prompts/system-prompt.md`, local `AGENTS.md`, and discovered global skills. Replay history is trimmed by `src/lib/context-budget.ts` before model calls so large sessions stay inside the selected model's context budget.
 
 ## Package Builds
 
@@ -139,6 +133,7 @@ CI builds are also configured in `/Users/mrdev.288/StudioProjects/wizzle/.github
 ## Notes
 
 - The desktop app owns local state and local tool execution.
+- The app launches directly into the workspace without sign-in.
 - MVP permission modes are `ask` and `full-access`.
 - `full-access` must stay limited to the selected project root.
 
