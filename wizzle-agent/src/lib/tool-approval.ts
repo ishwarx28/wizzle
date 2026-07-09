@@ -82,6 +82,7 @@ export function createToolApprovalRequest(input: {
 
 export function createRejectedToolPayload(request: ToolApprovalRequest): ToolExecutionPayload {
   return {
+    error: "The user rejected this tool request.",
     output: JSON.stringify({
       command: request.command,
       error: "The user rejected this tool request.",
@@ -90,6 +91,7 @@ export function createRejectedToolPayload(request: ToolApprovalRequest): ToolExe
       rejected: true,
       timeout: request.timeout,
     }),
-    status: "done",
+    // Not "done" — rejection must not look like a successful tool run (#39).
+    status: "error",
   };
 }

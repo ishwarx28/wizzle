@@ -1,5 +1,6 @@
 import { create } from "zustand";
 
+import { shouldFinalizeStreamingPartOnAssistantFinish } from "../lib/agent/assistant-stream-finish";
 import { runWorkspaceAgent } from "../lib/agent-runner";
 import { loadPreviewFilesFromPaths } from "../lib/attachments";
 import {
@@ -1899,9 +1900,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
               (targetMessage.startedAtMs
                 ? Math.max(0, completedAtMs - targetMessage.startedAtMs)
                 : undefined);
+            // Content stream is finished; phase "working" still has tool_call parts (#15).
             targetMessage.status = "done";
             targetMessage.parts = (targetMessage.parts ?? []).map((part) => {
-              if (part.status !== "streaming") {
+              if (
+                part.status !== "streaming" ||
+                !shouldFinalizeStreamingPartOnAssistantFinish(part.type)
+              ) {
                 return part;
               }
               return {

@@ -20,6 +20,7 @@ import {
   type ForcedFinalOutcome,
 } from "./agent/forced-final";
 import { createRejectedToolPayload, createToolApprovalRequest } from "./tool-approval";
+import { resolvePostStreamAssistantAction } from "./agent/assistant-stream-finish";
 import { normalizeStreamedToolCalls, streamAgentTurn } from "./agent/stream-turn";
 import {
   buildCompactedContextMessage,
@@ -528,35 +529,37 @@ export async function runWorkspaceAgent(options: {
 
     const normalizedToolCalls = normalizeStreamedToolCalls(streamedTurn.toolCalls, step);
     const toolCallItems = normalizedToolCalls.items;
-    const hasToolCallItems = toolCallItems.length > 0;
+    const postStreamAction = resolvePostStreamAssistantAction({
+      hadToolCallIntents: normalizedToolCalls.hadToolCallIntents,
+      toolCallItemCount: toolCallItems.length,
+    });
 
-    options.onAssistantStreamFinished(
-      assistantMessage.id,
-      hasToolCallItems ? "working" : "final",
-    );
     frontendLogger.info("frontend.agent", "step_stream_finished", {
       contentLength: streamedTurn.content.length,
       hadToolCallIntents: normalizedToolCalls.hadToolCallIntents,
       invalidToolCallCount: toolCallItems.filter((item) => item.kind === "invalid").length,
+      postStreamAction: postStreamAction.type,
       reasoningLength: streamedTurn.reasoning.length,
       readyToolCallCount: toolCallItems.filter((item) => item.kind === "ready").length,
       step,
       toolCallCount: toolCallItems.length,
     });
 
-    if (!hasToolCallItems) {
-      // Stream claimed tools but none survived as items (should be rare after #38 normalize).
-      if (normalizedToolCalls.hadToolCallIntents) {
-        frontendLogger.error("frontend.agent", "malformed_tool_call_stream", {
-          rawToolCallSlots: streamedTurn.toolCalls.length,
-          step,
-          turnIdLength: options.turnId.length,
-        });
-        options.onTurnFinished({ status: "error", turnId: options.turnId });
-        throw new Error(
-          "The model returned tool calls that could not be executed (missing or invalid tool names).",
-        );
-      }
+    if (postStreamAction.type === "malformed_tool_stream") {
+      // Do not finish as a clean final answer when the model intended tools (#38).
+      frontendLogger.error("frontend.agent", "malformed_tool_call_stream", {
+        rawToolCallSlots: streamedTurn.toolCalls.length,
+        step,
+        turnIdLength: options.turnId.length,
+      });
+      options.onTurnFinished({ status: "error", turnId: options.turnId });
+      throw new Error(
+        "The model returned tool calls that could not be executed (missing or invalid tool names).",
+      );
+    }
+
+    if (postStreamAction.type === "finish_final") {
+      options.onAssistantStreamFinished(assistantMessage.id, "final");
 
       const hasFinalContent = streamedTurn.content.trim().length > 0;
 
@@ -599,10 +602,12 @@ export async function runWorkspaceAgent(options: {
       return;
     }
 
+    // #15: attach tool_call parts before finishing the assistant stream as working.
     const openAiToolCalls = toolCallItems.map((item) => item.toolCall);
     let toolCallState = openAiToolCalls.map(createToolCallState);
     usedToolsInTurn = true;
     options.onAssistantToolCalls(assistantMessage.id, toolCallState);
+    options.onAssistantStreamFinished(assistantMessage.id, "working");
     conversationHistory.push({
       ...assistantMessage,
       assistantPhase: "working",
