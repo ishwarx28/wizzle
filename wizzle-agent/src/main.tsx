@@ -4,6 +4,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import logoSrc from "./assets/brand/wizzle-logo.png";
 import darkLogoSrc from "./assets/brand/wizzle-logo-dark.png";
+import { frontendLogger, installFrontendLogHandlers } from "./lib/logger";
 import "./styles.css";
 import {
   getStoredThemePreference,
@@ -40,6 +41,10 @@ function applyFavicon() {
 applyPlatformClass();
 initializeThemePreference();
 applyFavicon();
+installFrontendLogHandlers();
+frontendLogger.info("frontend.app", "bootstrapped", {
+  userAgentLength: navigator.userAgent.length,
+});
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
