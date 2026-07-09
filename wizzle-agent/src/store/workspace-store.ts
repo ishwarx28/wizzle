@@ -38,6 +38,7 @@ import {
   runSettledTurnPersistence,
   type SettledTurnPersistResult,
 } from "../lib/settle-turn-persist";
+import { settleNonToolTurnMessage } from "../lib/settle-turn-status";
 import { extractLinkedFileFromToolResult } from "../lib/tool-activity";
 import type {
   Message,
@@ -2190,6 +2191,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
               if (
                 fallbackContent &&
+                targetMessage.role === "assistant" &&
                 targetMessage.id === lastAssistantMessage?.id &&
                 targetMessage.content.trim().length === 0 &&
                 (targetMessage.reasoning ?? "").trim().length === 0
@@ -2203,32 +2205,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
                 });
               }
 
-              targetMessage.completedAtMs = targetMessage.completedAtMs ?? completedAtMs;
-              targetMessage.durationMs = targetMessage.startedAtMs
-                ? Math.max(0, targetMessage.completedAtMs - targetMessage.startedAtMs)
-                : targetMessage.durationMs;
-              targetMessage.reasoningDurationMs =
-                targetMessage.reasoningDurationMs ??
-                (targetMessage.startedAtMs
-                  ? Math.max(0, targetMessage.completedAtMs - targetMessage.startedAtMs)
-                  : targetMessage.reasoningDurationMs);
-              if (!targetMessage.assistantPhase) {
-                targetMessage.assistantPhase =
-                  (targetMessage.toolCalls?.length ?? 0) > 0 ? "working" : "final";
+              settleNonToolTurnMessage(targetMessage, status, completedAtMs);
+              if (targetMessage.role === "assistant" || targetMessage.role === "user") {
+                synchronizeMessageFromParts(targetMessage);
               }
-              targetMessage.status = status;
-              targetMessage.parts = (targetMessage.parts ?? []).map((part) => ({
-                ...part,
-                status:
-                  status === "error"
-                    ? "error"
-                    : part.status === "error"
-                      ? part.status
-                      : status === "interrupted"
-                        ? "interrupted"
-                        : "done",
-              }));
-              synchronizeMessageFromParts(targetMessage);
             }
 
             sessionEntry.updatedAtLabel = nowLabel();
