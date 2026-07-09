@@ -32,6 +32,7 @@ import {
   collectRetainedTurnIds,
   filterCompactedTurnIds,
 } from "../lib/session-edit-truncate";
+import { drainComposerSessionQueue } from "../lib/composer-session-queue";
 import {
   completeSessionRunFinish,
   isSessionAlreadyRunningError,
@@ -136,7 +137,11 @@ interface WorkspaceState {
   startMessageEdit: (edit: MessageEditState) => void;
   cancelMessageEdit: () => void;
   interruptPrompt: () => Promise<void>;
-  sendPrompt: (prompt: string, attachments?: PreviewFile[]) => Promise<SubmitPromptResult>;
+  sendPrompt: (
+    prompt: string,
+    attachments?: PreviewFile[],
+    options?: { projectId?: string; sessionId?: string },
+  ) => Promise<SubmitPromptResult>;
 }
 
 const DRAFT_SESSION_TITLE = "New session";
@@ -173,6 +178,30 @@ type SubmitPromptResult =
 /** Resolvers live for the whole wait; not cleared on session switch (#26). */
 const pendingToolApprovalResolversBySessionId = new Map<string, PendingToolApprovalResolver>();
 const activeRunRequestIdsBySession = new Map<string, string>();
+
+function requestComposerQueueDrain(sessionId: string) {
+  if (!sessionId) {
+    return;
+  }
+
+  queueMicrotask(() => {
+    void drainComposerSessionQueue(sessionId, {
+      isSessionSending: (id) =>
+        useWorkspaceStore.getState().sendingSessionIds.includes(id),
+      resolveProjectIdForSession: (id) => {
+        const state = useWorkspaceStore.getState();
+        for (const project of state.projects) {
+          if (project.sessions.some((session) => session.id === id)) {
+            return project.id;
+          }
+        }
+        return null;
+      },
+      sendPrompt: (prompt, attachments, options) =>
+        useWorkspaceStore.getState().sendPrompt(prompt, attachments, options),
+    });
+  });
+}
 
 function withSendingSessionState(
   selectedSessionId: string | null,
@@ -901,6 +930,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       ...withSendingSessionState(sessionId, state.sendingSessionIds),
       ...withPendingApprovalsState(sessionId, state.pendingToolApprovalsBySessionId),
     }));
+    // Drain any stranded queue for the session we left and the one we open (#43).
+    if (currentState.selectedSessionId && currentState.selectedSessionId !== sessionId) {
+      requestComposerQueueDrain(currentState.selectedSessionId);
+    }
+    requestComposerQueueDrain(sessionId);
     void persistWorkspaceSettingsForCurrentState().catch(() => undefined);
 
     if (!needsHydration) {
@@ -1141,14 +1175,25 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     });
     await interruptWorkspaceChat({ sessionId });
   },
-  sendPrompt: async (prompt, attachments = []) => {
+  sendPrompt: async (prompt, attachments = [], options) => {
     const initialState = useWorkspaceStore.getState();
     const content = prompt.trim();
-    const selectedSessionId = initialState.selectedSessionId;
+    // Allow queue drain for a non-selected session (#43).
+    let targetProjectId = options?.projectId ?? initialState.selectedProjectId;
+    let targetSessionId = options?.sessionId ?? initialState.selectedSessionId;
+
+    if (options?.sessionId && !options.projectId) {
+      for (const project of initialState.projects) {
+        if (project.sessions.some((session) => session.id === options.sessionId)) {
+          targetProjectId = project.id;
+          break;
+        }
+      }
+    }
 
     // Block only if *this* session is already running (#27). Other sessions can send.
     if (
-      (selectedSessionId && initialState.sendingSessionIds.includes(selectedSessionId)) ||
+      (targetSessionId && initialState.sendingSessionIds.includes(targetSessionId)) ||
       (!content && attachments.length === 0)
     ) {
       return { accepted: false, error: "The chat is not ready for another message.", ok: false };
@@ -1162,7 +1207,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       return { accepted: false, error, ok: false };
     }
 
-    if (!initialState.selectedProjectId) {
+    if (!targetProjectId) {
       const error = "Choose a project before sending a message.";
       set({ chatError: error });
       return { accepted: false, error, ok: false };
@@ -1185,7 +1230,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       return { accepted: false, error: imageAttachmentError, ok: false };
     }
 
-    if (initialState.loadingSessionId && initialState.loadingSessionId === initialState.selectedSessionId) {
+    if (initialState.loadingSessionId && initialState.loadingSessionId === targetSessionId) {
       const error = "Wait for the selected session to finish loading.";
       set({ chatError: error });
       return { accepted: false, error, ok: false };
@@ -1193,8 +1238,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
     const activeMessageEdit =
       initialState.activeMessageEdit &&
-      initialState.activeMessageEdit.projectId === initialState.selectedProjectId &&
-      initialState.activeMessageEdit.sessionId === initialState.selectedSessionId
+      initialState.activeMessageEdit.projectId === targetProjectId &&
+      initialState.activeMessageEdit.sessionId === targetSessionId
         ? initialState.activeMessageEdit
         : null;
     const userMessage = createUserMessage(content, attachments, {
@@ -1202,8 +1247,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     });
     const turnId = userMessage.turnId ?? `turn-${crypto.randomUUID()}`;
     const nextPreviewFiles = mergePreviewFiles(initialState.previewFiles, attachments);
-    const draftSession = initialState.draftSessions[initialState.selectedProjectId];
-    const isDraftSelection = draftSession?.id === initialState.selectedSessionId;
+    const draftSession = initialState.draftSessions[targetProjectId];
+    const isDraftSelection = draftSession?.id === targetSessionId;
     const rollbackState = {
       activeMessageEdit: initialState.activeMessageEdit,
       draftSessions: initialState.draftSessions,
@@ -1217,13 +1262,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       isEditingMessage: Boolean(activeMessageEdit),
       isDraftSelection,
       promptLength: content.length,
-      selectedProjectIdLength: initialState.selectedProjectId.length,
-      selectedSessionPresent: Boolean(initialState.selectedSessionId),
+      selectedProjectIdLength: targetProjectId.length,
+      selectedSessionPresent: Boolean(targetSessionId),
       turnIdLength: turnId.length,
     });
 
-    let targetProjectId = initialState.selectedProjectId;
-    let targetSessionId = initialState.selectedSessionId;
     let shouldGenerateTitle = false;
     let fallbackTitle = deriveSessionTitle(content, attachments);
 
@@ -2729,6 +2772,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           removeSendingSessionId(targetSessionId, state.sendingSessionIds),
         ),
       }));
+      requestComposerQueueDrain(targetSessionId);
       frontendLogger.info("frontend.workspace", "agent_run_completed", {
         finalizeError: persistResult?.finalizeError ?? null,
         messageErrorCount: persistResult?.messageErrors.length ?? 0,
@@ -2756,6 +2800,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
             removeSendingSessionId(targetSessionId, state.sendingSessionIds),
           ),
         }));
+        requestComposerQueueDrain(targetSessionId);
         frontendLogger.info("frontend.workspace", "agent_run_interrupted", {
           finalizeError: persistResult?.finalizeError ?? null,
           sessionIdLength: targetSessionId.length,
@@ -2807,6 +2852,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           removeSendingSessionId(targetSessionId, state.sendingSessionIds),
         ),
       }));
+      requestComposerQueueDrain(targetSessionId);
       // Message was accepted into the session; keep accepted so composer does not restore draft (#79).
       return { accepted: true, error: errorMessage, ok: false, turnId };
     }

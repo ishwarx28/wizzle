@@ -15,7 +15,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { useScrollActivity } from "../../hooks/use-scroll-activity";
 import {
@@ -29,6 +29,15 @@ import {
   interruptWorkspacePromptEnhancement,
   isInterruptedWorkspaceChatError,
 } from "../../lib/chat-stream";
+import {
+  createComposerQueueItem,
+  drainComposerSessionQueue,
+  getComposerSessionQueue,
+  hydrateComposerSessionQueue,
+  setComposerSessionQueue,
+  subscribeComposerSessionQueue,
+  type ComposerQueueItem,
+} from "../../lib/composer-session-queue";
 import { MAX_REPLAY_INPUT, selectReplayHistoryWithinBudget } from "../../lib/context-budget";
 import { loadComposerState, saveComposerState } from "../../lib/local-workspace";
 import { isImageAttachment, modelSupportsImages } from "../../lib/image-capability";
@@ -53,12 +62,7 @@ interface ComposerProps {
   showFloatingEnhanceAction?: boolean;
 }
 
-interface QueuedSubmission {
-  attachments: PreviewFile[];
-  id: string;
-  prompt: string;
-  status?: "queued" | "sending" | "sent" | "failed";
-}
+type QueuedSubmission = ComposerQueueItem;
 
 interface SessionComposerMemory {
   attachments: PreviewFile[];
@@ -68,6 +72,7 @@ interface SessionComposerMemory {
 
 const MAX_ATTACHMENTS = 5;
 const MAX_QUEUED_SUBMISSIONS = 6;
+const EMPTY_QUEUE: ComposerQueueItem[] = [];
 const TEXT_ENTRY_SELECTOR = [
   "input",
   "textarea",
@@ -336,7 +341,6 @@ export function Composer({
   const [draft, setDraftRaw] = useState("");
   const [attachments, setAttachments] = useState<PreviewFile[]>([]);
   const [isEnhancingPrompt, setIsEnhancingPrompt] = useState(false);
-  const [queuedSubmissions, setQueuedSubmissions] = useState<QueuedSubmission[]>([]);
   const [isModelSelectorOpen, setIsModelSelectorOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
   const [renderFloatingEnhanceAction, setRenderFloatingEnhanceAction] = useState(false);
@@ -364,6 +368,28 @@ export function Composer({
     },
     [],
   );
+
+  // Session-scoped queue survives Composer unmount; drain is store-driven (#43).
+  const queueSessionId = selectedSessionId ?? "";
+  const queuedSubmissions = useSyncExternalStore(
+    (onStoreChange) =>
+      queueSessionId ? subscribeComposerSessionQueue(queueSessionId, onStoreChange) : () => undefined,
+    () => (queueSessionId ? getComposerSessionQueue(queueSessionId) : EMPTY_QUEUE),
+    () => EMPTY_QUEUE,
+  );
+
+  const setQueuedSubmissions = useCallback(
+    (value: QueuedSubmission[] | ((previous: QueuedSubmission[]) => QueuedSubmission[])) => {
+      if (!queueSessionId) {
+        return;
+      }
+      const current = getComposerSessionQueue(queueSessionId);
+      const next = typeof value === "function" ? value(current) : value;
+      setComposerSessionQueue(queueSessionId, next);
+    },
+    [queueSessionId],
+  );
+
   const shimmerOverlayRef = useRef<HTMLDivElement | null>(null);
   const modelSelectorRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -376,8 +402,6 @@ export function Composer({
   const persistedComposerSessionIdRef = useRef<string | null>(null);
   const enhanceOriginalDraftRef = useRef<string | null>(null);
   const enhanceRequestIdRef = useRef(0);
-  const isDispatchingQueuedPromptRef = useRef(false);
-  const [queueDrainTick, setQueueDrainTick] = useState(0);
   const [isComposerStateReady, setIsComposerStateReady] = useState(false);
   const floatingEnhanceHideTimeoutRef = useRef<number | null>(null);
   const composerDraftBeforeEditRef = useRef<{
@@ -649,20 +673,6 @@ export function Composer({
     return true;
   }, [isEnhancingPrompt]);
 
-  function buildQueuedSubmission(prompt: string, nextAttachments: PreviewFile[]): QueuedSubmission {
-    const id =
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? `queue-${crypto.randomUUID()}`
-        : `queue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-    return {
-      attachments: nextAttachments,
-      id,
-      prompt,
-      status: "queued",
-    };
-  }
-
   function queueLabel(submission: QueuedSubmission) {
     const prompt = submission.prompt.trim();
 
@@ -859,7 +869,10 @@ export function Composer({
         return;
       }
 
-      setQueuedSubmissions((current) => [...current, buildQueuedSubmission(nextPrompt, attachments)]);
+      setQueuedSubmissions((current) => [
+        ...current,
+        createComposerQueueItem({ attachments, prompt: nextPrompt }),
+      ]);
       setDraft("");
       setAttachments([]);
       showToast("Queued for after the current response.");
@@ -966,7 +979,6 @@ export function Composer({
     if (!nextComposerKey) {
       setDraft("");
       setAttachments([]);
-      setQueuedSubmissions([]);
       setIsComposerStateReady(false);
       return;
     }
@@ -976,16 +988,18 @@ export function Composer({
     if (cachedState) {
       setDraft(cachedState.draft);
       setAttachments(cachedState.attachments);
-      setQueuedSubmissions(cachedState.queuedSubmissions);
+      hydrateComposerSessionQueue(nextComposerKey, cachedState.queuedSubmissions, {
+        overwrite: true,
+      });
       setIsComposerStateReady(Boolean(persistedComposerSessionId));
       return;
     }
 
     setDraft("");
     setAttachments([]);
-    setQueuedSubmissions([]);
 
     if (!persistedComposerSessionId) {
+      // Keep any in-memory queue for this session (e.g. remount after unmount).
       setIsComposerStateReady(false);
       return;
     }
@@ -1001,13 +1015,18 @@ export function Composer({
 
         setDraft(composerState.draftText);
         setAttachments([]);
-        setQueuedSubmissions(
+        hydrateComposerSessionQueue(
+          nextComposerKey,
           composerState.queuedMessages.map((message) => ({
             attachments: message.attachments,
             id: message.id,
             prompt: message.content,
-            status: message.status,
+            status:
+              message.status === "sending" || message.status === "failed"
+                ? message.status
+                : "queued",
           })),
+          { overwrite: true },
         );
         setIsComposerStateReady(true);
       })
@@ -1056,84 +1075,65 @@ export function Composer({
     [],
   );
 
+  // Drain when idle with queue items (remount / hydrate). Primary drain is store-driven (#43).
   useEffect(() => {
-    if (
-      isSendingMessage ||
-      isDispatchingQueuedPromptRef.current ||
-      !queuedSubmissionsRef.current.some((submission) => (submission.status ?? "queued") === "queued")
-    ) {
+    if (!selectedSessionId || isSendingMessage) {
+      return;
+    }
+    if (!queuedSubmissions.some((item) => (item.status ?? "queued") === "queued")) {
       return;
     }
 
-    const nextSubmission = queuedSubmissionsRef.current.find(
-      (submission) => (submission.status ?? "queued") === "queued",
-    );
-
-    if (!nextSubmission) {
-      return;
-    }
-
-    isDispatchingQueuedPromptRef.current = true;
-    clearChatError();
-    setQueuedSubmissions((current) =>
-      current.map((submission) =>
-        submission.id === nextSubmission.id ? { ...submission, status: "sending" } : submission,
-      ),
-    );
-    window.dispatchEvent(new CustomEvent("wizzle:composer-send"));
-    void sendPrompt(nextSubmission.prompt, nextSubmission.attachments)
-      .then((result) => {
-        setQueuedSubmissions((current) => {
-          // Accepted means the user message entered the session; drop queue item.
-          if (result.accepted) {
-            return current.filter((submission) => submission.id !== nextSubmission.id);
+    void drainComposerSessionQueue(selectedSessionId, {
+      isSessionSending: (sessionId) =>
+        useWorkspaceStore.getState().sendingSessionIds.includes(sessionId),
+      resolveProjectIdForSession: (sessionId) => {
+        const state = useWorkspaceStore.getState();
+        for (const project of state.projects) {
+          if (project.sessions.some((session) => session.id === sessionId)) {
+            return project.id;
           }
-
-          // Coalesced while a run is active: keep queued for wake drain (#29).
-          if ("retryable" in result && result.retryable) {
-            return current.map((submission) =>
-              submission.id === nextSubmission.id
-                ? { ...submission, status: "queued" }
-                : submission,
-            );
-          }
-
-          return current.map((submission) =>
-            submission.id === nextSubmission.id ? { ...submission, status: "failed" } : submission,
-          );
-        });
-
-        if (!result.accepted) {
-          if (!("retryable" in result && result.retryable)) {
-            showToast(result.error || "Queued prompt failed. Retry or delete it.");
-          }
-        } else if (!result.ok && "error" in result && result.error) {
-          showToast(result.error);
         }
-      })
-      .catch(() => {
-        setQueuedSubmissions((current) =>
-          current.map((submission) =>
-            submission.id === nextSubmission.id ? { ...submission, status: "failed" } : submission,
-          ),
-        );
+        return state.selectedProjectId;
+      },
+      sendPrompt: (prompt, attachments, options) =>
+        useWorkspaceStore.getState().sendPrompt(prompt, attachments, options),
+    }).then(() => {
+      const failed = getComposerSessionQueue(selectedSessionId).find(
+        (item) => item.status === "failed",
+      );
+      if (failed) {
         showToast("Queued prompt failed. Retry or delete it.");
-      })
-      .finally(() => {
-        isDispatchingQueuedPromptRef.current = false;
-        setQueueDrainTick((current) => current + 1);
-      });
-  }, [clearChatError, isSendingMessage, queueDrainTick, sendPrompt, queuedSubmissions]);
+      }
+    });
+  }, [isSendingMessage, queuedSubmissions, selectedSessionId]);
 
-  // When finishSessionRun reports a coalesced wake, re-tick the queue drain (#29).
+  // Coalesced wake: drain even if Composer was unmounted earlier (#29 / #43).
   useEffect(() => {
     const onSessionRunWake = (event: Event) => {
       const detail = (event as CustomEvent<{ sessionId?: string }>).detail;
-      const wakeSessionId = detail?.sessionId;
-      if (wakeSessionId && selectedSessionId && wakeSessionId !== selectedSessionId) {
+      const wakeSessionId = detail?.sessionId ?? selectedSessionId;
+      if (!wakeSessionId) {
         return;
       }
-      setQueueDrainTick((current) => current + 1);
+      if (selectedSessionId && wakeSessionId !== selectedSessionId) {
+        // Still drain the woken session in the background.
+      }
+      void drainComposerSessionQueue(wakeSessionId, {
+        isSessionSending: (sessionId) =>
+          useWorkspaceStore.getState().sendingSessionIds.includes(sessionId),
+        resolveProjectIdForSession: (sessionId) => {
+          const state = useWorkspaceStore.getState();
+          for (const project of state.projects) {
+            if (project.sessions.some((session) => session.id === sessionId)) {
+              return project.id;
+            }
+          }
+          return null;
+        },
+        sendPrompt: (prompt, attachments, options) =>
+          useWorkspaceStore.getState().sendPrompt(prompt, attachments, options),
+      });
     };
 
     window.addEventListener(SESSION_RUN_WAKE_EVENT, onSessionRunWake);
