@@ -154,6 +154,16 @@ function fileIcon(kind: PreviewFile["kind"]) {
   }
 }
 
+/** First letter capital, rest lower — not ALL CAPS (e.g. xhigh → Xhigh). */
+function formatReasoningLevelLabel(level: string) {
+  const trimmed = level.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
+}
+
 function inferPreviewKind(file: File, capabilities: ModelCapability[]): PreviewFile["kind"] | null {
   if (file.type.startsWith("image/")) {
     if (!capabilities.includes("image")) {
@@ -447,7 +457,7 @@ export function Composer({
       ? reasoningLevel
       : selectedReasoningLevels[0] ?? "";
   const reasoningLevelLabel = selectedReasoningLevel
-    ? selectedReasoningLevel.charAt(0).toUpperCase() + selectedReasoningLevel.slice(1)
+    ? formatReasoningLevelLabel(selectedReasoningLevel)
     : "Default";
   const modelCapabilities = selectedProviderModel?.capabilities ?? ["text"];
   const modelSupportsImageAttachments = modelSupportsImages(modelCapabilities);
@@ -1805,7 +1815,7 @@ export function Composer({
                 >
                   <span className="min-w-0 truncate">{modelIdLabel}</span>
                   {selectedReasoningLevel ? (
-                    <span className="hidden shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] leading-none text-[var(--color-text-tertiary)] sm:inline">
+                    <span className="hidden shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 text-[13px] font-normal leading-none text-[var(--color-text-tertiary)] sm:inline">
                       {reasoningLevelLabel}
                     </span>
                   ) : null}
@@ -1835,16 +1845,11 @@ export function Composer({
                         <div className="flex flex-wrap gap-1">
                           {selectedReasoningLevels.map((level) => {
                             const isSelectedLevel = level === selectedReasoningLevel;
-                            // Preserve casing for xhigh / max (I-13).
-                            const label =
-                              level.length <= 4
-                                ? level.toUpperCase()
-                                : level.charAt(0).toUpperCase() + level.slice(1);
 
                             return (
                               <button
                                 className={[
-                                  "rounded-full border px-2 py-0.5 text-[10px] leading-none transition",
+                                  "rounded-full border px-2 py-0.5 text-[13px] font-normal leading-none transition",
                                   isSelectedLevel
                                     ? "border-[var(--color-border-strong)] bg-[var(--color-accent)] text-[var(--color-accent-foreground)]"
                                     : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]",
@@ -1853,7 +1858,7 @@ export function Composer({
                                 onClick={() => setReasoningLevel(level)}
                                 type="button"
                               >
-                                {label}
+                                {formatReasoningLevelLabel(level)}
                               </button>
                             );
                           })}
@@ -1902,8 +1907,10 @@ export function Composer({
                                       </div>
                                     </div>
                                     {model.reasoningLevels.length > 0 ? (
-                                      <span className="shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-tertiary)]">
-                                        {model.reasoningLevels.join(", ")}
+                                      <span className="shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 text-[13px] font-normal leading-none text-[var(--color-text-tertiary)]">
+                                        {model.reasoningLevels
+                                          .map(formatReasoningLevelLabel)
+                                          .join(", ")}
                                       </span>
                                     ) : null}
                                     {isSelectedModel ? (
