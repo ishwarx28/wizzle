@@ -1,0 +1,136 @@
+(globalThis as { __WIZZLE_ENV__?: Record<string, string | undefined> }).__WIZZLE_ENV__ = {
+  WIZZLE_FRONTEND_LOG_MODE: "off",
+  WIZZLE_FRONTEND_LOG_RETENTION_DAYS: "7",
+};
+
+import type { OpenAIChatToolCall } from "../chat-stream.ts";
+
+const {
+  mergeStreamedToolNameFragment,
+  normalizeStreamedToolArguments,
+  normalizeStreamedToolCalls,
+} = await import("./stream-turn.ts");
+
+function assert(condition: unknown, message: string): asserts condition {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+
+function toolCall(partial: {
+  arguments?: string;
+  id?: string;
+  name?: string;
+}): OpenAIChatToolCall {
+  return {
+    function: {
+      arguments: partial.arguments ?? "",
+      name: partial.name ?? "",
+    },
+    id: partial.id ?? "",
+    type: "function",
+  };
+}
+
+function main() {
+  // --- #22 name merge ---
+  assert(mergeStreamedToolNameFragment("", "ba") === "ba", "empty + delta");
+  assert(mergeStreamedToolNameFragment("ba", "sh") === "bash", "token deltas");
+  assert(mergeStreamedToolNameFragment("ba", "bas") === "bas", "cumulative extend");
+  assert(mergeStreamedToolNameFragment("bas", "bash") === "bash", "cumulative full");
+  assert(mergeStreamedToolNameFragment("bash", "bash") === "bash", "full name repeat");
+  assert(mergeStreamedToolNameFragment("bash", "bas") === "bash", "stale shorter prefix");
+  // Blind += would produce "bashbash"
+  let name = "";
+  for (const delta of ["bash", "bash", "bash"]) {
+    name = mergeStreamedToolNameFragment(name, delta);
+  }
+  assert(name === "bash", "repeated full name stays bash not bashbash");
+
+  // --- #21 arguments ---
+  assert(normalizeStreamedToolArguments("").arguments === "{}", "empty → {}");
+  assert(normalizeStreamedToolArguments("   ").arguments === "{}", "whitespace → {}");
+  assert(
+    normalizeStreamedToolArguments('{"command":"ls"}').arguments === '{"command":"ls"}',
+    "valid object kept",
+  );
+  assert(
+    Boolean(normalizeStreamedToolArguments('{"command":').error),
+    "truncated JSON is invalid",
+  );
+  assert(
+    Boolean(normalizeStreamedToolArguments("not-json").error),
+    "plain text is invalid",
+  );
+  assert(
+    Boolean(normalizeStreamedToolArguments('"just-a-string"').error),
+    "JSON string is not an object",
+  );
+  assert(
+    !normalizeStreamedToolArguments("[]").error,
+    "JSON array accepted as structured args",
+  );
+
+  // --- normalizeStreamedToolCalls ---
+  const ready = normalizeStreamedToolCalls(
+    [toolCall({ id: "c1", name: "bash", arguments: '{"command":"pwd"}' })],
+    0,
+  );
+  assert(ready.items.length === 1 && ready.items[0]?.kind === "ready", "ready bash");
+  assert(ready.hadToolCallIntents, "intent true");
+
+  const emptyArgs = normalizeStreamedToolCalls(
+    [toolCall({ id: "c2", name: "read", arguments: "" })],
+    0,
+  );
+  assert(emptyArgs.items[0]?.kind === "ready", "empty args ready with {}");
+  assert(
+    emptyArgs.items[0]?.kind === "ready" &&
+      emptyArgs.items[0].toolCall.function.arguments === "{}",
+    "empty args become {}",
+  );
+
+  const badJson = normalizeStreamedToolCalls(
+    [toolCall({ id: "c3", name: "bash", arguments: '{"command":' })],
+    0,
+  );
+  assert(badJson.items[0]?.kind === "invalid", "bad json invalid not ready");
+  assert(
+    badJson.items[0]?.kind === "invalid" &&
+      badJson.items[0].toolCall.function.arguments.includes("{"),
+    "raw args preserved on invalid",
+  );
+
+  const missingName = normalizeStreamedToolCalls(
+    [toolCall({ id: "c4", name: "", arguments: "{}" })],
+    0,
+  );
+  assert(missingName.hadToolCallIntents, "id-only is intent");
+  assert(missingName.items[0]?.kind === "invalid", "missing name invalid");
+  assert(missingName.items.length === 1, "not filtered away (#38)");
+
+  const unknown = normalizeStreamedToolCalls(
+    [toolCall({ id: "c5", name: "deploy", arguments: "{}" })],
+    0,
+  );
+  assert(unknown.items[0]?.kind === "invalid", "unknown tool invalid");
+
+  const noise = normalizeStreamedToolCalls([toolCall({})], 0);
+  assert(!noise.hadToolCallIntents, "empty slot not intent");
+  assert(noise.items.length === 0, "noise dropped");
+
+  const mixed = normalizeStreamedToolCalls(
+    [
+      toolCall({ id: "a", name: "bash", arguments: "NOT_JSON" }),
+      toolCall({ id: "b", name: "read", arguments: '{"path":"x"}' }),
+    ],
+    1,
+  );
+  assert(mixed.items.length === 2, "mixed keeps both");
+  assert(mixed.items[0]?.kind === "invalid", "first invalid");
+  assert(mixed.items[1]?.kind === "ready", "second ready");
+
+  console.log("stream-turn tests passed");
+}
+
+main();

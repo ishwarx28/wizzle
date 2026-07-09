@@ -527,18 +527,37 @@ export async function runWorkspaceAgent(options: {
     }
 
     const normalizedToolCalls = normalizeStreamedToolCalls(streamedTurn.toolCalls, step);
+    const toolCallItems = normalizedToolCalls.items;
+    const hasToolCallItems = toolCallItems.length > 0;
+
     options.onAssistantStreamFinished(
       assistantMessage.id,
-      normalizedToolCalls.length > 0 ? "working" : "final",
+      hasToolCallItems ? "working" : "final",
     );
     frontendLogger.info("frontend.agent", "step_stream_finished", {
       contentLength: streamedTurn.content.length,
+      hadToolCallIntents: normalizedToolCalls.hadToolCallIntents,
+      invalidToolCallCount: toolCallItems.filter((item) => item.kind === "invalid").length,
       reasoningLength: streamedTurn.reasoning.length,
+      readyToolCallCount: toolCallItems.filter((item) => item.kind === "ready").length,
       step,
-      toolCallCount: normalizedToolCalls.length,
+      toolCallCount: toolCallItems.length,
     });
 
-    if (normalizedToolCalls.length === 0) {
+    if (!hasToolCallItems) {
+      // Stream claimed tools but none survived as items (should be rare after #38 normalize).
+      if (normalizedToolCalls.hadToolCallIntents) {
+        frontendLogger.error("frontend.agent", "malformed_tool_call_stream", {
+          rawToolCallSlots: streamedTurn.toolCalls.length,
+          step,
+          turnIdLength: options.turnId.length,
+        });
+        options.onTurnFinished({ status: "error", turnId: options.turnId });
+        throw new Error(
+          "The model returned tool calls that could not be executed (missing or invalid tool names).",
+        );
+      }
+
       const hasFinalContent = streamedTurn.content.trim().length > 0;
 
       if (usedToolsInTurn && !hasFinalContent) {
@@ -580,7 +599,8 @@ export async function runWorkspaceAgent(options: {
       return;
     }
 
-    let toolCallState = normalizedToolCalls.map(createToolCallState);
+    const openAiToolCalls = toolCallItems.map((item) => item.toolCall);
+    let toolCallState = openAiToolCalls.map(createToolCallState);
     usedToolsInTurn = true;
     options.onAssistantToolCalls(assistantMessage.id, toolCallState);
     conversationHistory.push({
@@ -590,7 +610,7 @@ export async function runWorkspaceAgent(options: {
       content: streamedTurn.content,
       reasoning: "",
       status: "done",
-      toolCalls: normalizedToolCalls.map((toolCall) => ({
+      toolCalls: openAiToolCalls.map((toolCall) => ({
         id: toolCall.id,
         input: toolCall.function.arguments,
         name: toolCall.function.name,
@@ -599,11 +619,13 @@ export async function runWorkspaceAgent(options: {
     });
     conversation = await rebuildConversation();
 
-    for (const toolCall of normalizedToolCalls) {
+    for (const item of toolCallItems) {
+      const toolCall = item.toolCall;
       frontendLogger.info("frontend.agent", "tool_started", {
         step,
         toolCallIdLength: toolCall.id.length,
         toolInputLength: toolCall.function.arguments.length,
+        toolKind: item.kind,
         toolName: toolCall.function.name,
       });
       toolCallState = toolCallState.map((entry) =>
@@ -624,59 +646,77 @@ export async function runWorkspaceAgent(options: {
 
       let toolPayload: ToolExecutionPayload;
 
-      try {
-        const approvalRequest = createToolApprovalRequest({
-          arguments: toolCall.function.arguments,
-          globalSkillsDir: projectContext.globalSkillsDir ?? undefined,
-          permissionMode: options.permissionMode,
-          projectRoot: projectContext.projectRoot,
-          sessionId: options.chatId,
-          toolCallId: toolCall.id,
+      if (item.kind === "invalid") {
+        // #21 / #38: never execute invalid args/names as empty tools.
+        frontendLogger.error("frontend.agent", "tool_call_rejected_before_run", {
+          error: item.error,
+          step,
+          toolCallIdLength: toolCall.id.length,
           toolName: toolCall.function.name,
         });
-        const isApproved =
-          !approvalRequest ||
-          (await options.requestToolApproval(approvalRequest));
+        toolPayload = {
+          error: item.error,
+          output: JSON.stringify({
+            error: item.error,
+            ok: false,
+          }),
+          status: "error",
+        };
+      } else {
+        try {
+          const approvalRequest = createToolApprovalRequest({
+            arguments: toolCall.function.arguments,
+            globalSkillsDir: projectContext.globalSkillsDir ?? undefined,
+            permissionMode: options.permissionMode,
+            projectRoot: projectContext.projectRoot,
+            sessionId: options.chatId,
+            toolCallId: toolCall.id,
+            toolName: toolCall.function.name,
+          });
+          const isApproved =
+            !approvalRequest ||
+            (await options.requestToolApproval(approvalRequest));
 
-        toolPayload = isApproved
-          ? await runAgentTool({
-              arguments: toolCall.function.arguments,
-              onChunk: (chunk) => options.onToolChunk?.(chunk),
-              projectId: options.projectId,
-              sessionId: options.chatId,
-              toolCallId: toolCall.id,
+          toolPayload = isApproved
+            ? await runAgentTool({
+                arguments: toolCall.function.arguments,
+                onChunk: (chunk) => options.onToolChunk?.(chunk),
+                projectId: options.projectId,
+                sessionId: options.chatId,
+                toolCallId: toolCall.id,
+                toolName: toolCall.function.name,
+              })
+            : createRejectedToolPayload(approvalRequest);
+        } catch (error) {
+          if (error instanceof Error && error.message === INTERRUPTED_WORKSPACE_CHAT_ERROR) {
+            frontendLogger.info("frontend.agent", "tool_execution_interrupted", {
+              step,
+              toolCallIdLength: toolCall.id.length,
               toolName: toolCall.function.name,
-            })
-          : createRejectedToolPayload(approvalRequest);
-      } catch (error) {
-        if (error instanceof Error && error.message === INTERRUPTED_WORKSPACE_CHAT_ERROR) {
-          frontendLogger.info("frontend.agent", "tool_execution_interrupted", {
-            step,
-            toolCallIdLength: toolCall.id.length,
-            toolName: toolCall.function.name,
-          });
-          toolPayload = {
-            error: "User interrupted",
-            output: JSON.stringify({
+            });
+            toolPayload = {
               error: "User interrupted",
-              ok: false,
-            }),
-            status: "interrupted",
-          };
-        } else {
-          const errorMessage = resolveToolExecutionErrorMessage(error);
-          frontendLogger.error("frontend.agent", "tool_execution_failed", {
-            error,
-            errorMessage,
-            step,
-            toolCallIdLength: toolCall.id.length,
-            toolName: toolCall.function.name,
-          });
-          toolPayload = {
-            error: errorMessage,
-            output: null,
-            status: "error",
-          };
+              output: JSON.stringify({
+                error: "User interrupted",
+                ok: false,
+              }),
+              status: "interrupted",
+            };
+          } else {
+            const errorMessage = resolveToolExecutionErrorMessage(error);
+            frontendLogger.error("frontend.agent", "tool_execution_failed", {
+              error,
+              errorMessage,
+              step,
+              toolCallIdLength: toolCall.id.length,
+              toolName: toolCall.function.name,
+            });
+            toolPayload = {
+              error: errorMessage,
+              output: null,
+              status: "error",
+            };
+          }
         }
       }
 
