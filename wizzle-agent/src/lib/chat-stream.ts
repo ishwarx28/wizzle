@@ -4,6 +4,11 @@ import { listen } from "@tauri-apps/api/event";
 import { frontendLogger } from "./logger";
 import { resolveMaxPromptSize } from "./env";
 import { resolveImageAttachmentHardFailError } from "./image-capability";
+import {
+  extractMessageText,
+  sanitizeGeneratedSessionTitle,
+  type ChatCompletionJson,
+} from "./chat-completion-text";
 import { shouldManageSessionRuntimeForHelperCompletion } from "./session-runtime-helpers";
 import type { Message, ModelCapability, ModelId, PreviewFile } from "../types/workspace";
 import {
@@ -11,6 +16,8 @@ import {
   getAssistantConversationContent,
   getMessageParts,
 } from "./message-parts";
+
+export { extractMessageText, sanitizeGeneratedSessionTitle } from "./chat-completion-text";
 
 type ReasoningLevel = string;
 export const INTERRUPTED_WORKSPACE_CHAT_ERROR = "__WIZZLE_PROVIDER_CHAT_INTERRUPTED__";
@@ -72,14 +79,6 @@ export type ProxyToolDefinition = {
   type: "function";
 };
 
-type ChatCompletionJson = {
-  choices?: Array<{
-    message?: {
-      content?: string | OpenAIContentPart[];
-    };
-  }>;
-};
-
 /** Per-session stream request ids so interrupt targets the correct run (#17 / #27). */
 const activeStreamRequestIdBySession = new Map<string, string>();
 /** Last-started stream (prompt enhancement / title-less helpers without a session scope). */
@@ -131,22 +130,6 @@ function getErrorMessage(error: unknown, fallback: string) {
   }
 
   return fallback;
-}
-
-export function extractMessageText(payload: ChatCompletionJson) {
-  const content = payload.choices?.[0]?.message?.content;
-
-  if (typeof content === "string") {
-    return content;
-  }
-
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => ("text" in part && typeof part.text === "string" ? part.text : ""))
-      .join("");
-  }
-
-  return "";
 }
 
 function extractTaggedEnhancedPrompt(responseText: string) {
@@ -958,6 +941,8 @@ export async function generateWorkspaceSessionTitle(options: {
       model: options.modelId,
       stream: false,
       max_tokens: maxTokens,
+      // Prefer short deterministic names when the provider honors temperature.
+      temperature: 0,
       messages: [
         {
           role: "system" as const,
@@ -966,12 +951,25 @@ export async function generateWorkspaceSessionTitle(options: {
         {
           role: "user" as const,
           content: [
-            "Generate a concise chat title in 3 to 6 words.",
+            "Reply with only the chat title (3 to 6 words). No punctuation wrapping. No explanation.",
             sourceText || "Generate a title for this chat.",
           ].join("\n\n"),
         },
       ],
     };
+  }
+
+  function parseTitleFromResponse(response: string) {
+    let payload: ChatCompletionJson;
+    try {
+      payload = JSON.parse(response) as ChatCompletionJson;
+    } catch {
+      // Some providers return bare text; treat the body as the title.
+      return sanitizeGeneratedSessionTitle(response);
+    }
+
+    const extracted = extractMessageText(payload);
+    return sanitizeGeneratedSessionTitle(extracted);
   }
 
   async function requestTitle(maxTokens: number) {
@@ -989,7 +987,7 @@ export async function generateWorkspaceSessionTitle(options: {
 
     return {
       responseLength: response.length,
-      title: extractMessageText(JSON.parse(response) as ChatCompletionJson).trim(),
+      title: parseTitleFromResponse(response),
     };
   }
 
@@ -1007,12 +1005,14 @@ export async function generateWorkspaceSessionTitle(options: {
     frontendLogger.info("frontend.chat-stream", "title_generation_finished", {
       responseLength: result.responseLength,
       titleLength: result.title.length,
+      titleEmpty: !result.title,
     });
     return result.title;
   } catch (error) {
     frontendLogger.error("frontend.chat-stream", "title_generation_failed", {
-      error,
+      error: getErrorMessage(error, "title generation failed"),
     });
+    // Surface empty string so caller keeps fallback title; do not throw past store.
     return "";
   }
 }

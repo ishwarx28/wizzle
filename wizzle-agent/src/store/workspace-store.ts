@@ -1547,34 +1547,69 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         sessionIdLength: targetSessionId.length,
       });
       if (shouldGenerateTitle) {
+        const titleSessionId = targetSessionId as string;
         void generateWorkspaceSessionTitle({
           attachments,
-          chatId: targetSessionId,
+          chatId: titleSessionId,
           modelId: initialState.modelId,
           projectId: targetProjectId,
           prompt: content,
           reasoningLevels: initialProviderModel?.reasoningLevels,
         })
-          .then((generatedTitle) => {
+          .then(async (generatedTitle) => {
             const nextTitle = normalizeGeneratedSessionTitle(generatedTitle, fallbackTitle);
+            // Skip no-op when generation failed and we already show the fallback.
+            if (nextTitle === fallbackTitle && !generatedTitle.trim()) {
+              frontendLogger.info("frontend.workspace", "title_generation_kept_fallback", {
+                sessionIdLength: titleSessionId.length,
+                fallbackTitleLength: fallbackTitle.length,
+              });
+              return;
+            }
+
             set((state) => {
               const nextProjects = updatePersistedSession(
                 state.projects,
                 targetProjectId,
-                targetSessionId as string,
+                titleSessionId,
                 (session) => {
+                  // Do not clobber a user rename that landed while generation ran.
+                  if (
+                    session.title.trim() &&
+                    session.title !== fallbackTitle &&
+                    session.title !== deriveSessionTitle(content, attachments)
+                  ) {
+                    return;
+                  }
                   session.title = nextTitle;
                 },
               );
 
               return nextProjects ? { projects: nextProjects } : state;
             });
-            return updateSessionTitle({
-              sessionId: targetSessionId as string,
-              title: nextTitle,
-            });
+
+            try {
+              await updateSessionTitle({
+                sessionId: titleSessionId,
+                title: nextTitle,
+              });
+              frontendLogger.info("frontend.workspace", "title_generation_persisted", {
+                sessionIdLength: titleSessionId.length,
+                titleLength: nextTitle.length,
+              });
+            } catch (persistError) {
+              frontendLogger.error("frontend.workspace", "title_generation_persist_failed", {
+                error: persistError,
+                sessionIdLength: titleSessionId.length,
+              });
+            }
           })
-          .catch(() => undefined);
+          .catch((error) => {
+            frontendLogger.error("frontend.workspace", "title_generation_unhandled", {
+              error,
+              sessionIdLength: titleSessionId.length,
+            });
+          });
       }
     } catch (error) {
       const message =
