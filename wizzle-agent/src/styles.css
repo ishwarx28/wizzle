@@ -136,11 +136,17 @@ a {
   color: inherit;
 }
 
+/*
+ * Do not use the `font` shorthand here. Unlayered `font: inherit` beats Tailwind
+ * `text-*` utilities (layered), so button labels ignore text size classes.
+ * Preflight already inherits family; keep size controllable via utilities.
+ */
 button,
 input,
 select,
 textarea {
-  font: inherit;
+  font-family: inherit;
+  letter-spacing: inherit;
 }
 
 button {

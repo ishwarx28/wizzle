@@ -164,6 +164,10 @@ function formatReasoningLevelLabel(level: string) {
   return trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
 }
 
+/** Same density as model id under model name in the selector list. */
+const MODEL_META_TEXT_CLASS =
+  "text-[11px] font-normal leading-none text-[var(--color-text-tertiary)]";
+
 function inferPreviewKind(file: File, capabilities: ModelCapability[]): PreviewFile["kind"] | null {
   if (file.type.startsWith("image/")) {
     if (!capabilities.includes("image")) {
@@ -1815,7 +1819,9 @@ export function Composer({
                 >
                   <span className="min-w-0 truncate">{modelIdLabel}</span>
                   {selectedReasoningLevel ? (
-                    <span className="hidden shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 text-[11px] font-normal leading-none text-[var(--color-text-tertiary)] sm:inline">
+                    <span
+                      className={`hidden shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 sm:inline ${MODEL_META_TEXT_CLASS}`}
+                    >
                       {reasoningLevelLabel}
                     </span>
                   ) : null}
@@ -1849,7 +1855,7 @@ export function Composer({
                             return (
                               <button
                                 className={[
-                                  "rounded-full border px-2 py-0.5 text-[11px] font-normal leading-none transition",
+                                  "rounded-full border px-2 py-0.5 transition",
                                   isSelectedLevel
                                     ? "border-[var(--color-border-strong)] bg-[var(--color-accent)] text-[var(--color-accent-foreground)]"
                                     : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]",
@@ -1858,7 +1864,9 @@ export function Composer({
                                 onClick={() => setReasoningLevel(level)}
                                 type="button"
                               >
-                                {formatReasoningLevelLabel(level)}
+                                <span className="text-[11px] font-normal leading-none">
+                                  {formatReasoningLevelLabel(level)}
+                                </span>
                               </button>
                             );
                           })}
@@ -1902,12 +1910,14 @@ export function Composer({
                                       <div className="truncate text-[13px]">
                                         {model.displayName ?? model.modelId}
                                       </div>
-                                      <div className="mt-0.5 truncate text-[11px] text-[var(--color-text-tertiary)]">
+                                      <div className={`mt-0.5 truncate ${MODEL_META_TEXT_CLASS}`}>
                                         {model.modelId}
                                       </div>
                                     </div>
                                     {model.reasoningLevels.length > 0 ? (
-                                      <span className="shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 text-[11px] font-normal leading-none text-[var(--color-text-tertiary)]">
+                                      <span
+                                        className={`shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 ${MODEL_META_TEXT_CLASS}`}
+                                      >
                                         {model.reasoningLevels
                                           .map(formatReasoningLevelLabel)
                                           .join(", ")}
