@@ -87,6 +87,7 @@ pub async fn run(
     window: &Window,
     runtime: &AgentRuntimeState,
     session_id: Option<&str>,
+    turn_id: Option<&str>,
 ) -> Result<AgentToolRunPayload, String> {
     let arguments: BashToolArguments = serde_json::from_value(arguments)
         .map_err(|error| format!("Invalid arguments for bash: {error}"))?;
@@ -101,6 +102,7 @@ pub async fn run(
                 window,
                 runtime,
                 session_id,
+                turn_id,
             )
             .await
         }
@@ -408,6 +410,7 @@ async fn run_command(
     window: &Window,
     runtime: &AgentRuntimeState,
     session_id: Option<&str>,
+    turn_id: Option<&str>,
 ) -> Result<AgentToolRunPayload, String> {
     let command = require_command(&arguments)?;
 
@@ -421,7 +424,16 @@ async fn run_command(
         let session_id = require_session_id(session_id)?;
         let lock = runtime.background_process_lock(session_id)?;
         let _guard = lock.lock().await;
-        return start_background_process(session_id, command, cwd, window, runtime).await;
+        return start_background_process(
+            session_id,
+            command,
+            cwd,
+            window,
+            runtime,
+            turn_id,
+            tool_call_id,
+        )
+        .await;
     }
 
     let session_key = session_id
@@ -540,6 +552,8 @@ async fn start_background_process(
     cwd: PathBuf,
     window: &Window,
     runtime: &AgentRuntimeState,
+    turn_id: Option<&str>,
+    tool_call_id: Option<&str>,
 ) -> Result<AgentToolRunPayload, String> {
     let mut command = build_shell_command(&command_text);
     command
@@ -564,6 +578,8 @@ async fn start_background_process(
         session_id: session_id.to_string(),
         started_at_ms: sqlite_repository::now_unix_ms(),
         status: "running".to_string(),
+        tool_call_id: tool_call_id.map(str::to_string),
+        turn_id: turn_id.map(str::to_string),
     }) {
         Ok(process) => process,
         Err(error) => {

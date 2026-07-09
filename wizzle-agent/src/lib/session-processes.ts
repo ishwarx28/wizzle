@@ -5,6 +5,8 @@ export type SessionProcessView = {
   id: string;
   isActive: boolean;
   status: string;
+  toolCallId?: string | null;
+  turnId?: string | null;
 };
 
 export function isActiveProcessStatus(status: string | undefined) {
@@ -27,7 +29,37 @@ export function toSessionProcessView(process: WorkspaceProcess): SessionProcessV
     id: process.id,
     isActive: isActiveProcessStatus(process.status),
     status: process.status,
+    toolCallId: process.toolCallId ?? null,
+    turnId: process.turnId ?? null,
   };
+}
+
+/** Short label for process panel (avoid dumping full UUIDs). */
+export function formatProcessOriginLabel(process: {
+  toolCallId?: string | null;
+  turnId?: string | null;
+}) {
+  const turn = process.turnId?.trim();
+  const tool = process.toolCallId?.trim();
+  if (!turn && !tool) {
+    return null;
+  }
+
+  const shortTurn = turn
+    ? turn.length > 14
+      ? `${turn.slice(0, 8)}…`
+      : turn
+    : null;
+  const shortTool = tool
+    ? tool.length > 16
+      ? `${tool.slice(0, 10)}…`
+      : tool
+    : null;
+
+  if (shortTurn && shortTool) {
+    return `${shortTurn} · ${shortTool}`;
+  }
+  return shortTurn ?? shortTool;
 }
 
 export function selectActiveSessionProcesses(processes: WorkspaceProcess[]) {

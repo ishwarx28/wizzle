@@ -114,6 +114,10 @@ export interface WorkspaceProcess {
   status: "pending" | "running" | "done" | "error" | "interrupted" | string;
   stderrTail: string;
   stdoutTail: string;
+  /** Tool call that spawned this process (#75). */
+  toolCallId?: string | null;
+  /** Conversation turn that spawned this process (#75). */
+  turnId?: string | null;
 }
 
 export type MessagePartType =

@@ -46,6 +46,8 @@ export async function runAgentTool(input: {
   sessionId?: string;
   toolCallId?: string;
   toolName: string;
+  /** Links background processes to this conversation turn (#75). */
+  turnId?: string;
 }) {
   const { onChunk, imageCapable = true, ...rest } = input;
   const invokeInput = {

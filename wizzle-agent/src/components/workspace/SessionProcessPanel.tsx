@@ -1,6 +1,7 @@
 import { LoaderCircle, Square, Terminal } from "lucide-react";
 
 import { useSessionProcesses } from "../../hooks/use-session-processes";
+import { formatProcessOriginLabel } from "../../lib/session-processes";
 
 export function SessionProcessPanel({ sessionId }: { sessionId: string | null }) {
   const { activeProcesses, error, stopProcess, stoppingIds } = useSessionProcesses(sessionId);
@@ -18,15 +19,26 @@ export function SessionProcessPanel({ sessionId }: { sessionId: string | null })
       <ul className="space-y-1">
         {activeProcesses.map((process) => {
           const isStopping = stoppingIds.includes(process.id);
+          const origin = formatProcessOriginLabel(process);
 
           return (
             <li
               className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-2.5 py-1.5"
               key={process.id}
             >
-              <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-[var(--color-text-secondary)]">
-                {process.commandSummary}
-              </span>
+              <div className="min-w-0 flex-1">
+                <span className="block truncate font-mono text-[12px] text-[var(--color-text-secondary)]">
+                  {process.commandSummary}
+                </span>
+                {origin ? (
+                  <span
+                    className="mt-0.5 block truncate font-mono text-[10px] text-[var(--color-text-tertiary)]"
+                    title={[process.turnId, process.toolCallId].filter(Boolean).join(" · ")}
+                  >
+                    {origin}
+                  </span>
+                ) : null}
+              </div>
               <span className="shrink-0 text-[10px] uppercase text-[var(--color-text-tertiary)]">
                 {process.status}
               </span>

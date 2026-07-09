@@ -767,6 +767,7 @@ export async function runWorkspaceAgent(options: {
                 projectId: options.projectId,
                 sessionId: options.chatId,
                 toolCallId: toolCall.id,
+                turnId: options.turnId,
                 toolName: toolCall.function.name,
               })
             : createRejectedToolPayload(approvalRequest);

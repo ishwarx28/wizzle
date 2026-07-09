@@ -62,6 +62,7 @@ pub async fn run_agent_tool(
                 &window,
                 runtime,
                 input.session_id.as_deref(),
+                input.turn_id.as_deref(),
             )
             .await
         }

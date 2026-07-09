@@ -1,5 +1,6 @@
 import {
   filterProcessesForSession,
+  formatProcessOriginLabel,
   isActiveProcessStatus,
   isBackgroundBashPayload,
   resolveBackgroundProcessId,
@@ -62,6 +63,12 @@ function main() {
   assert(isBackgroundBashPayload({ process: { id: "process-x" } }), "process id");
   assert(!isBackgroundBashPayload({ ok: true } as { background?: boolean }), "foreground");
   assert(resolveBackgroundProcessId({ process: { id: " process-x " } }) === "process-x", "id trim");
+
+  assert(formatProcessOriginLabel({}) === null, "no origin");
+  assert(
+    formatProcessOriginLabel({ turnId: "turn-abc", toolCallId: "call_1" })?.includes("turn"),
+    "origin label",
+  );
 
   console.log("session-processes tests passed");
 }

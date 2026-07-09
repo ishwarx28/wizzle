@@ -54,6 +54,11 @@ pub struct WorkspaceProcessPayload {
     pub status: String,
     pub stderr_tail: String,
     pub stdout_tail: String,
+    /// Conversation turn that spawned this process (#75).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 pub struct NewProcessRecord {
@@ -64,6 +69,8 @@ pub struct NewProcessRecord {
     pub session_id: String,
     pub started_at_ms: u64,
     pub status: String,
+    pub tool_call_id: Option<String>,
+    pub turn_id: Option<String>,
 }
 
 pub(crate) fn now_unix_ms() -> u64 {
@@ -294,6 +301,7 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
     if applied.is_some() {
         // Includes turn part + turn budget column ensures / legacy summary migration.
         ensure_session_metadata_columns(conn)?;
+        ensure_process_link_columns(conn)?;
         return Ok(());
     }
 
@@ -466,7 +474,9 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
           started_at INTEGER NOT NULL,
           ended_at INTEGER NULL,
           stdout_tail TEXT NOT NULL DEFAULT '',
-          stderr_tail TEXT NOT NULL DEFAULT ''
+          stderr_tail TEXT NOT NULL DEFAULT '',
+          turn_id TEXT NULL,
+          tool_call_id TEXT NULL
         );
 
         CREATE TABLE IF NOT EXISTS workspace_settings (
@@ -534,6 +544,25 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
 
     ensure_session_metadata_columns(conn)?;
     ensure_turn_budget_columns(conn)?;
+    ensure_process_link_columns(conn)?;
+    Ok(())
+}
+
+/// Link background processes to the turn/tool that spawned them (#75).
+fn ensure_process_link_columns(conn: &Connection) -> Result<(), String> {
+    for (column_name, column_type) in [
+        ("turn_id", "TEXT NULL"),
+        ("tool_call_id", "TEXT NULL"),
+    ] {
+        if !table_has_column(conn, "processes", column_name)? {
+            conn.execute(
+                &format!("ALTER TABLE processes ADD COLUMN {column_name} {column_type}"),
+                [],
+            )
+            .map_err(|error| db_error("Could not update Wizzle process link columns", error))?;
+        }
+    }
+
     Ok(())
 }
 
@@ -886,13 +915,15 @@ fn row_to_process_payload(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workspace
         status: row.get(8)?,
         stderr_tail: row.get(10)?,
         stdout_tail: row.get(9)?,
+        tool_call_id: row.get(12)?,
+        turn_id: row.get(11)?,
     })
 }
 
 fn process_select_sql() -> &'static str {
     "
     SELECT id, session_id, command, cwd, pid, exit_code, started_at, ended_at,
-           status, stdout_tail, stderr_tail
+           status, stdout_tail, stderr_tail, turn_id, tool_call_id
     FROM processes
     "
 }
@@ -922,14 +953,22 @@ pub fn mark_orphaned_processes_on_startup() -> Result<(), String> {
 pub fn insert_process(record: NewProcessRecord) -> Result<WorkspaceProcessPayload, String> {
     validate_storage_id("session", &record.session_id)?;
     validate_storage_id("process", &record.id)?;
+    if let Some(turn_id) = record.turn_id.as_deref() {
+        validate_storage_id("turn", turn_id)?;
+    }
+    // Tool call ids may include underscores (provider ids); same alphabet as storage ids.
+    if let Some(tool_call_id) = record.tool_call_id.as_deref() {
+        validate_storage_id("tool call", tool_call_id)?;
+    }
     let conn = open_database()?;
+    ensure_process_link_columns(&conn)?;
 
     conn.execute(
         "
         INSERT INTO processes (
           id, session_id, command, cwd, pid, status, exit_code, started_at,
-          ended_at, stdout_tail, stderr_tail
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, NULL, '', '')
+          ended_at, stdout_tail, stderr_tail, turn_id, tool_call_id
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, NULL, '', '', ?8, ?9)
         ",
         params![
             record.id,
@@ -938,7 +977,9 @@ pub fn insert_process(record: NewProcessRecord) -> Result<WorkspaceProcessPayloa
             record.cwd,
             record.pid.map(|pid| pid as i64),
             record.status,
-            record.started_at_ms as i64
+            record.started_at_ms as i64,
+            record.turn_id,
+            record.tool_call_id,
         ],
     )
     .map_err(|error| db_error("Could not record the Wizzle process", error))?;
@@ -5084,6 +5125,39 @@ mod tests {
         assert_eq!(process.status, "interrupted");
         assert_eq!(process.stdout_tail.len(), PROCESS_TAIL_BYTES);
         assert_eq!(process.ended_at_ms, Some((now + 1) as u64));
+    }
+
+    #[test]
+    fn insert_process_stores_turn_and_tool_call_ids() {
+        let conn = migrated_memory_db();
+        insert_test_session(&conn);
+        ensure_process_link_columns(&conn).expect("link columns");
+
+        conn.execute(
+            "
+            INSERT INTO processes (
+              id, session_id, command, cwd, pid, status, started_at,
+              stdout_tail, stderr_tail, turn_id, tool_call_id
+            ) VALUES (
+              'process-linked', 'session-1', 'npm run dev', '/tmp', 9, 'running', ?1,
+              '', '', 'turn-abc', 'call_00_xyz'
+            )
+            ",
+            params![now_unix_ms() as i64],
+        )
+        .expect("insert linked process");
+
+        let process = conn
+            .query_row(
+                &format!("{} WHERE id = 'process-linked'", process_select_sql()),
+                [],
+                row_to_process_payload,
+            )
+            .expect("read linked process");
+
+        assert_eq!(process.turn_id.as_deref(), Some("turn-abc"));
+        assert_eq!(process.tool_call_id.as_deref(), Some("call_00_xyz"));
+        assert_eq!(process.session_id, "session-1");
     }
 
     #[test]

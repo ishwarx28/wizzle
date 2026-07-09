@@ -37,6 +37,9 @@ pub struct RunAgentToolInput {
     pub session_id: Option<String>,
     pub tool_call_id: Option<String>,
     pub tool_name: String,
+    /// Conversation turn that owns this tool call (background process linkage, #75).
+    #[serde(default)]
+    pub turn_id: Option<String>,
 }
 
 fn default_image_capable() -> bool {
