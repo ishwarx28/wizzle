@@ -32,6 +32,7 @@ import {
 } from "../../lib/chat-stream";
 import { MAX_REPLAY_INPUT, selectReplayHistoryWithinBudget } from "../../lib/context-budget";
 import { loadComposerState, saveComposerState } from "../../lib/local-workspace";
+import { SESSION_RUN_WAKE_EVENT } from "../../lib/session-run-wake";
 import { useWorkspaceStore } from "../../store/workspace-store";
 import type {
   MessageEditState,
@@ -1030,13 +1031,24 @@ export function Composer({
             return current.filter((submission) => submission.id !== nextSubmission.id);
           }
 
+          // Coalesced while a run is active: keep queued for wake drain (#29).
+          if ("retryable" in result && result.retryable) {
+            return current.map((submission) =>
+              submission.id === nextSubmission.id
+                ? { ...submission, status: "queued" }
+                : submission,
+            );
+          }
+
           return current.map((submission) =>
             submission.id === nextSubmission.id ? { ...submission, status: "failed" } : submission,
           );
         });
 
         if (!result.accepted) {
-          showToast(result.error || "Queued prompt failed. Retry or delete it.");
+          if (!("retryable" in result && result.retryable)) {
+            showToast(result.error || "Queued prompt failed. Retry or delete it.");
+          }
         } else if (!result.ok && "error" in result && result.error) {
           showToast(result.error);
         }
@@ -1054,6 +1066,23 @@ export function Composer({
         setQueueDrainTick((current) => current + 1);
       });
   }, [clearChatError, isSendingMessage, queueDrainTick, sendPrompt, queuedSubmissions]);
+
+  // When finishSessionRun reports a coalesced wake, re-tick the queue drain (#29).
+  useEffect(() => {
+    const onSessionRunWake = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId?: string }>).detail;
+      const wakeSessionId = detail?.sessionId;
+      if (wakeSessionId && selectedSessionId && wakeSessionId !== selectedSessionId) {
+        return;
+      }
+      setQueueDrainTick((current) => current + 1);
+    };
+
+    window.addEventListener(SESSION_RUN_WAKE_EVENT, onSessionRunWake);
+    return () => {
+      window.removeEventListener(SESSION_RUN_WAKE_EVENT, onSessionRunWake);
+    };
+  }, [selectedSessionId]);
 
   useEffect(() => {
     if (activeMessageEdit) {

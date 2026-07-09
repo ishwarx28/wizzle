@@ -24,8 +24,13 @@ import {
   updateSessionSelection,
   updateSessionTitle,
   setSessionRuntimeState,
+  wakeSessionRun,
   upsertTurnSummary as persistTurnSummary,
 } from "../lib/local-workspace";
+import {
+  completeSessionRunFinish,
+  isSessionAlreadyRunningError,
+} from "../lib/session-run-wake";
 import {
   appendMessagePart,
   synchronizeMessageFromParts,
@@ -156,7 +161,7 @@ type PendingToolApprovalResolver = {
 
 type SubmitPromptResult =
   | { ok: true; accepted: true; turnId: string }
-  | { ok: false; accepted: false; error: string }
+  | { ok: false; accepted: false; error: string; retryable?: boolean }
   | { ok: false; accepted: true; turnId: string; error: string };
 
 /** Resolvers live for the whole wait; not cleared on session switch (#26). */
@@ -1352,15 +1357,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         error instanceof Error && error.message.trim()
           ? error.message
           : "That session already has an active run.";
+      const retryable = isSessionAlreadyRunningError(error) || isSessionAlreadyRunningError(message);
       set((state) => ({
         ...rollbackState,
-        chatError: message,
+        // Retryable coalesce: do not sticky-error the chat; queue will re-drain on wake (#29).
+        chatError: retryable ? state.chatError : message,
         ...withSendingSessionState(
           rollbackState.selectedSessionId,
           removeSendingSessionId(targetSessionId, state.sendingSessionIds),
         ),
       }));
-      return { accepted: false, error: message, ok: false };
+      return { accepted: false, error: message, ok: false, retryable };
     }
     const runRequestId = crypto.randomUUID();
     activeRunRequestIdsBySession.set(targetSessionId, runRequestId);
@@ -1471,7 +1478,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       });
       if (didBeginRuntimeRun) {
         didBeginRuntimeRun = false;
-        await finishSessionRun(targetSessionId).catch(() => undefined);
+        await completeSessionRunFinish({
+          finish: () => finishSessionRun(targetSessionId),
+          sessionId: targetSessionId,
+          wake: wakeSessionRun,
+        }).catch(() => undefined);
       }
       activeRunRequestIdsBySession.delete(targetSessionId);
       return { accepted: false, error: message, ok: false };
@@ -2515,7 +2526,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       didBeginRuntimeRun = false;
 
       try {
-        await finishSessionRun(targetSessionId);
+        const { shouldWake } = await completeSessionRunFinish({
+          finish: () => finishSessionRun(targetSessionId),
+          sessionId: targetSessionId,
+          wake: wakeSessionRun,
+        });
+        if (shouldWake) {
+          frontendLogger.info("frontend.workspace", "session_run_wake_drained", {
+            sessionIdLength: targetSessionId.length,
+          });
+        }
       } catch (error) {
         frontendLogger.debug("frontend.workspace", "runtime_finish_failed", {
           error,
