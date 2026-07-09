@@ -19,6 +19,13 @@ import {
   type ForcedFinalKind,
   type ForcedFinalOutcome,
 } from "./agent/forced-final";
+import {
+  buildCompactionFailureUserMessage,
+  CompactionFailureError,
+  isCompactionFailureError,
+  resolveCompactionFailureAction,
+  toCompactionFailureError,
+} from "./agent/compaction-failure";
 import { createRejectedToolPayload, createToolApprovalRequest } from "./tool-approval";
 import { resolvePostStreamAssistantAction } from "./agent/assistant-stream-finish";
 import { normalizeStreamedToolCalls, streamAgentTurn } from "./agent/stream-turn";
@@ -441,7 +448,7 @@ export async function runWorkspaceAgent(options: {
           turnIdLength: options.turnId.length,
         });
         await options.onCompactionEnded?.("failed");
-        throw new Error(
+        throw new CompactionFailureError(
           "Could not free enough context by compacting older turns. Try a larger-context model or start a new chat.",
         );
       }
@@ -455,15 +462,12 @@ export async function runWorkspaceAgent(options: {
         await options.onCompactionEnded?.("compacted");
       } else {
         await options.onCompactionEnded?.("skipped");
-        throw new Error(
+        throw new CompactionFailureError(
           "Could not free enough context by compacting older turns. Try a larger-context model or start a new chat.",
         );
       }
     } catch (error) {
-      if (
-        error instanceof Error &&
-        error.message.startsWith("Could not free enough context")
-      ) {
+      if (isCompactionFailureError(error)) {
         throw error;
       }
       frontendLogger.error("frontend.agent", "compaction_failed", {
@@ -471,7 +475,7 @@ export async function runWorkspaceAgent(options: {
         turnIdLength: options.turnId.length,
       });
       await options.onCompactionEnded?.("failed");
-      throw error;
+      throw toCompactionFailureError(error);
     }
 
     return buildConversation({
@@ -482,11 +486,56 @@ export async function runWorkspaceAgent(options: {
       systemPrompt,
     });
   };
-  let conversation = await rebuildConversation();
+
   let usedToolsInTurn = false;
 
+  const settleSoftAfterToolsForCompactionFailure = (error: CompactionFailureError) => {
+    const notice = buildCompactionFailureUserMessage(error.message);
+    frontendLogger.error("frontend.agent", "compaction_failed_after_tools_soft_settle", {
+      errorMessage: error.message,
+      turnIdLength: options.turnId.length,
+    });
+    const noticeMessage = createAssistantMessage(options.turnId);
+    options.onAssistantCreated(noticeMessage);
+    options.onAssistantChunk({
+      kind: "content",
+      messageId: noticeMessage.id,
+      text: notice,
+    });
+    options.onAssistantStreamFinished(noticeMessage.id, "final");
+    options.onTurnFinished({ status: "done", turnId: options.turnId });
+  };
+
+  const rebuildConversationForTurn = async () => {
+    try {
+      return await rebuildConversation();
+    } catch (error) {
+      if (!isCompactionFailureError(error)) {
+        throw error;
+      }
+
+      if (resolveCompactionFailureAction({ usedToolsInTurn }) === "soft_settle_done") {
+        settleSoftAfterToolsForCompactionFailure(error);
+        return null;
+      }
+
+      // Pre-tools: hard fail — never send with unsummarized drops (#33 / #35).
+      options.onTurnFinished({ status: "error", turnId: options.turnId });
+      throw error;
+    }
+  };
+
+  let conversation = await rebuildConversationForTurn();
+  if (!conversation) {
+    return;
+  }
+
   for (let step = 0; step < maxAgentSteps; step += 1) {
-    conversation = await rebuildConversation();
+    const rebuilt = await rebuildConversationForTurn();
+    if (!rebuilt) {
+      return;
+    }
+    conversation = rebuilt;
     frontendLogger.info("frontend.agent", "step_started", {
       conversationCount: conversation.length,
       step,
@@ -622,7 +671,13 @@ export async function runWorkspaceAgent(options: {
         status: "pending",
       })),
     });
-    conversation = await rebuildConversation();
+    {
+      const rebuiltAfterToolsIntent = await rebuildConversationForTurn();
+      if (!rebuiltAfterToolsIntent) {
+        return;
+      }
+      conversation = rebuiltAfterToolsIntent;
+    }
 
     for (const item of toolCallItems) {
       const toolCall = item.toolCall;
@@ -763,7 +818,13 @@ export async function runWorkspaceAgent(options: {
           turnId: options.turnId,
         }),
       );
-      conversation = await rebuildConversation();
+      {
+        const rebuiltAfterTool = await rebuildConversationForTurn();
+        if (!rebuiltAfterTool) {
+          return;
+        }
+        conversation = rebuiltAfterTool;
+      }
 
       if (toolPayload.status === "interrupted") {
         options.onTurnFinished({ status: "interrupted", turnId: options.turnId });
