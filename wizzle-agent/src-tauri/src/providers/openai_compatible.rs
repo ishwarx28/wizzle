@@ -1,0 +1,543 @@
+use futures_util::StreamExt;
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use serde_json::{json, Value};
+use std::time::Duration;
+use tauri::{Emitter, Window};
+
+use crate::logging::log_desktop_event;
+
+use super::types::{ProviderModelRecord, ProviderResolvedModel, ProviderSecretRecord};
+
+const MAX_SSE_BUFFER_BYTES: usize = 10 * 1024 * 1024;
+const MAX_PROVIDER_RETRY_ATTEMPTS: usize = 2;
+const PROVIDER_RETRY_DELAYS_MS: [u64; MAX_PROVIDER_RETRY_ATTEMPTS] = [250, 1000];
+const OPENAI_API_PREFIX: &str = "/v1";
+const OPENAI_CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
+const OPENAI_MODELS_PATH: &str = "/models";
+pub const PROVIDER_CHAT_CHUNK_EVENT: &str = "provider-chat-chunk";
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderChatChunkPayload {
+    pub chunk: String,
+    pub kind: ProviderChatChunkKind,
+    pub request_id: String,
+    pub tool_call_index: Option<usize>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProviderChatChunkKind {
+    Content,
+    Reasoning,
+    ToolArguments,
+    ToolCallId,
+    ToolName,
+}
+
+pub struct ProviderRequestError {
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl ProviderRequestError {
+    fn new(message: String, retryable: bool) -> Self {
+        Self { message, retryable }
+    }
+}
+
+fn extract_text_value(value: &Value) -> String {
+    if let Some(text) = value.as_str() {
+        return text.to_string();
+    }
+
+    let Some(parts) = value.as_array() else {
+        return String::new();
+    };
+
+    parts
+        .iter()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<String>()
+}
+
+fn extract_delta_chunks(payload: &Value) -> Vec<(ProviderChatChunkKind, String, Option<usize>)> {
+    let Some(choices) = payload.get("choices").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    let Some(delta) = choices
+        .first()
+        .and_then(|choice| choice.get("delta"))
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+
+    let mut chunks = Vec::new();
+
+    for (key, kind) in [
+        ("reasoning_content", ProviderChatChunkKind::Reasoning),
+        ("reasoning", ProviderChatChunkKind::Reasoning),
+        ("content", ProviderChatChunkKind::Content),
+    ] {
+        let Some(value) = delta.get(key) else {
+            continue;
+        };
+
+        let text = extract_text_value(value);
+
+        if !text.is_empty() {
+            chunks.push((kind.clone(), text, None));
+        }
+    }
+
+    if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+        for (fallback_index, tool_call) in tool_calls.iter().enumerate() {
+            let Some(tool_call_object) = tool_call.as_object() else {
+                continue;
+            };
+            let index = tool_call_object
+                .get("index")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize)
+                .unwrap_or(fallback_index);
+
+            if let Some(id) = tool_call_object.get("id").and_then(Value::as_str) {
+                if !id.is_empty() {
+                    chunks.push((
+                        ProviderChatChunkKind::ToolCallId,
+                        id.to_string(),
+                        Some(index),
+                    ));
+                }
+            }
+
+            let Some(function_object) = tool_call_object.get("function").and_then(Value::as_object)
+            else {
+                continue;
+            };
+
+            if let Some(name) = function_object.get("name").and_then(Value::as_str) {
+                if !name.is_empty() {
+                    chunks.push((
+                        ProviderChatChunkKind::ToolName,
+                        name.to_string(),
+                        Some(index),
+                    ));
+                }
+            }
+
+            if let Some(arguments) = function_object.get("arguments") {
+                let text = extract_text_value(arguments);
+
+                if !text.is_empty() {
+                    chunks.push((ProviderChatChunkKind::ToolArguments, text, Some(index)));
+                }
+            }
+        }
+    }
+
+    chunks
+}
+
+fn extract_error_fields(body: &str) -> (Option<String>, Option<String>) {
+    let Ok(payload) = serde_json::from_str::<Value>(body) else {
+        return (None, None);
+    };
+    let Some(error) = payload.get("error").and_then(Value::as_object) else {
+        return (None, None);
+    };
+
+    (
+        error
+            .get("code")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        error
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    )
+}
+
+pub fn map_provider_error(
+    status_code: Option<u16>,
+    body: &str,
+    transport_error: Option<&reqwest::Error>,
+) -> ProviderRequestError {
+    if let Some(error) = transport_error {
+        let message = if error.is_timeout() {
+            "Provider request timed out.".to_string()
+        } else if error.is_connect() || error.is_request() {
+            "Provider is unreachable.".to_string()
+        } else if error.is_body() {
+            "Provider response was interrupted.".to_string()
+        } else {
+            "Provider request failed.".to_string()
+        };
+
+        return ProviderRequestError::new(message, true);
+    }
+
+    let (code, message) = extract_error_fields(body);
+    let code_text = code.unwrap_or_default().to_ascii_lowercase();
+    let message_text = message.as_deref().unwrap_or_default().to_ascii_lowercase();
+
+    if code_text.contains("model_not_found")
+        || message_text.contains("model") && message_text.contains("not found")
+    {
+        return ProviderRequestError::new("Selected model is unavailable.".to_string(), false);
+    }
+
+    if code_text.contains("context")
+        || message_text.contains("context") && message_text.contains("length")
+    {
+        return ProviderRequestError::new(
+            "Prompt is too long for the selected model.".to_string(),
+            false,
+        );
+    }
+
+    match status_code.unwrap_or_default() {
+        401 | 403 => ProviderRequestError::new(
+            "Provider authentication failed. Check the configured API key.".to_string(),
+            false,
+        ),
+        408 => ProviderRequestError::new("Provider request timed out.".to_string(), true),
+        429 => ProviderRequestError::new(
+            "Provider rate limit reached. Try again shortly.".to_string(),
+            true,
+        ),
+        500..=599 => {
+            ProviderRequestError::new("Provider is temporarily unavailable.".to_string(), true)
+        }
+        _ => ProviderRequestError::new(
+            message
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "Provider could not complete the request.".to_string()),
+            false,
+        ),
+    }
+}
+
+fn is_transient_reqwest_error(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.is_connect() || error.is_request() || error.is_body()
+}
+
+async fn wait_before_retry(attempt: usize) {
+    if attempt == 0 || attempt > MAX_PROVIDER_RETRY_ATTEMPTS {
+        return;
+    }
+
+    tokio::time::sleep(Duration::from_millis(PROVIDER_RETRY_DELAYS_MS[attempt - 1])).await;
+}
+
+fn endpoint_with_path(endpoint: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        endpoint.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
+}
+
+fn build_request_body(model: &ProviderResolvedModel, mut body: Value, stream: bool) -> Value {
+    if let Some(object) = body.as_object_mut() {
+        object.insert(
+            "model".to_string(),
+            Value::String(model.model.model_id.clone()),
+        );
+        object.insert("stream".to_string(), Value::Bool(stream));
+    }
+
+    body
+}
+
+async fn post_chat_completion(
+    client: &reqwest::Client,
+    resolved_model: &ProviderResolvedModel,
+    body: Value,
+    stream: bool,
+) -> Result<reqwest::Response, ProviderRequestError> {
+    if !matches!(
+        resolved_model.provider.provider_type.as_str(),
+        "openai" | "openai_compatible" | "custom_openai_compatible"
+    ) {
+        return Err(ProviderRequestError::new(
+            "Direct calls are not available for this provider type yet.".to_string(),
+            false,
+        ));
+    }
+
+    let mut request = client
+        .post(endpoint_with_path(
+            &resolved_model.provider.endpoint,
+            &format!("{OPENAI_API_PREFIX}{OPENAI_CHAT_COMPLETIONS_PATH}"),
+        ))
+        .header(CONTENT_TYPE, "application/json")
+        .json(&build_request_body(resolved_model, body, stream));
+
+    if let Some(api_key) = resolved_model.provider.api_key.as_deref() {
+        request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|error| map_provider_error(None, "", Some(&error)))?;
+
+    if !response.status().is_success() {
+        let status_code = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+        return Err(map_provider_error(Some(status_code), &body, None));
+    }
+
+    Ok(response)
+}
+
+fn process_sse_events(
+    request_id: &str,
+    window: &Window,
+    buffer: &mut String,
+    keep_tail: bool,
+) -> Result<usize, String> {
+    let normalized = buffer.replace("\r\n", "\n").replace('\r', "\n");
+    let mut events = normalized.split("\n\n").collect::<Vec<_>>();
+
+    *buffer = if keep_tail && !normalized.ends_with("\n\n") {
+        events.pop().unwrap_or_default().to_string()
+    } else {
+        String::new()
+    };
+
+    let mut emitted_chunk_count = 0;
+
+    for event in events {
+        let data_lines = event
+            .split('\n')
+            .map(str::trim)
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(|line| line.strip_prefix(' ').unwrap_or(line))
+            .collect::<Vec<_>>();
+
+        if data_lines.is_empty() {
+            continue;
+        }
+
+        let data = data_lines.join("\n");
+
+        if data.trim().is_empty() || data.trim() == "[DONE]" {
+            continue;
+        }
+
+        let payload = serde_json::from_str::<Value>(&data)
+            .map_err(|_| "Provider stream returned an invalid response.".to_string())?;
+
+        for (kind, chunk, tool_call_index) in extract_delta_chunks(&payload) {
+            window
+                .emit(
+                    PROVIDER_CHAT_CHUNK_EVENT,
+                    ProviderChatChunkPayload {
+                        chunk,
+                        kind,
+                        request_id: request_id.to_string(),
+                        tool_call_index,
+                    },
+                )
+                .map_err(|_| "Could not deliver the provider stream chunk.".to_string())?;
+            emitted_chunk_count += 1;
+        }
+    }
+
+    Ok(emitted_chunk_count)
+}
+
+pub async fn complete_chat(
+    client: &reqwest::Client,
+    resolved_model: &ProviderResolvedModel,
+    body: Value,
+) -> Result<String, String> {
+    let mut attempt = 0;
+
+    loop {
+        match post_chat_completion(client, resolved_model, body.clone(), false).await {
+            Ok(response) => {
+                return response
+                    .text()
+                    .await
+                    .map_err(|error| map_provider_error(None, "", Some(&error)).message);
+            }
+            Err(error) if error.retryable && attempt < MAX_PROVIDER_RETRY_ATTEMPTS => {
+                attempt += 1;
+                wait_before_retry(attempt).await;
+            }
+            Err(error) => return Err(error.message),
+        }
+    }
+}
+
+pub async fn stream_chat(
+    client: &reqwest::Client,
+    window: Window,
+    request_id: &str,
+    resolved_model: &ProviderResolvedModel,
+    body: Value,
+) -> Result<(), String> {
+    let mut attempt = 0;
+    let mut emitted_any_chunks = false;
+
+    'retry: loop {
+        let response = match post_chat_completion(client, resolved_model, body.clone(), true).await
+        {
+            Ok(response) => response,
+            Err(error)
+                if error.retryable
+                    && attempt < MAX_PROVIDER_RETRY_ATTEMPTS
+                    && !emitted_any_chunks =>
+            {
+                attempt += 1;
+                wait_before_retry(attempt).await;
+                continue 'retry;
+            }
+            Err(error) => return Err(error.message),
+        };
+
+        let mut buffer = String::new();
+        let mut stream = response.bytes_stream();
+
+        while let Some(item) = stream.next().await {
+            let bytes = match item {
+                Ok(bytes) => bytes,
+                Err(error)
+                    if is_transient_reqwest_error(&error)
+                        && attempt < MAX_PROVIDER_RETRY_ATTEMPTS
+                        && !emitted_any_chunks =>
+                {
+                    attempt += 1;
+                    wait_before_retry(attempt).await;
+                    continue 'retry;
+                }
+                Err(error) => return Err(map_provider_error(None, "", Some(&error)).message),
+            };
+
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+            if buffer.len() > MAX_SSE_BUFFER_BYTES {
+                return Err("Provider stream exceeded the 10 MB safety limit.".to_string());
+            }
+
+            emitted_any_chunks |= process_sse_events(request_id, &window, &mut buffer, true)? > 0;
+        }
+
+        if !buffer.trim().is_empty() {
+            let _ = process_sse_events(request_id, &window, &mut buffer, false)?;
+        }
+
+        return Ok(());
+    }
+}
+
+pub async fn fetch_models(
+    provider: &ProviderSecretRecord,
+) -> Result<Vec<ProviderModelRecord>, String> {
+    let client = reqwest::Client::new();
+    let mut request = client.get(endpoint_with_path(
+        &provider.endpoint,
+        &format!("{OPENAI_API_PREFIX}{OPENAI_MODELS_PATH}"),
+    ));
+
+    if let Some(api_key) = provider.api_key.as_deref() {
+        request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|error| map_provider_error(None, "", Some(&error)).message)?;
+
+    if !response.status().is_success() {
+        let status_code = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+        return Err(map_provider_error(Some(status_code), &body, None).message);
+    }
+
+    let payload = response
+        .json::<Value>()
+        .await
+        .map_err(|_| "Provider returned an invalid model list.".to_string())?;
+    let data = payload
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Provider returned an invalid model list.".to_string())?;
+
+    let mut models = Vec::new();
+
+    for entry in data {
+        let Some(model_id) = entry.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+
+        if model_id.trim().is_empty() {
+            continue;
+        }
+
+        models.push(ProviderModelRecord {
+            capabilities: vec!["text".to_string()],
+            display_name: None,
+            max_context: 128_000,
+            max_output_tokens: None,
+            model_id: model_id.to_string(),
+            reasoning_levels: vec![
+                "fast".to_string(),
+                "balanced".to_string(),
+                "max".to_string(),
+            ],
+            tokenizer_kind: Some("heuristic".to_string()),
+        });
+    }
+
+    if models.is_empty() {
+        return Err("Provider returned no usable models.".to_string());
+    }
+
+    log_desktop_event(
+        "info",
+        "desktop.provider",
+        "models_refreshed",
+        json!({
+            "providerIdLength": provider.id.len(),
+            "providerNameLength": provider.name.len(),
+            "modelCount": models.len(),
+        }),
+    );
+
+    Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_provider_error;
+
+    #[test]
+    fn maps_authentication_errors() {
+        let error = map_provider_error(Some(401), r#"{"error":{"message":"bad key"}}"#, None);
+
+        assert_eq!(
+            error.message,
+            "Provider authentication failed. Check the configured API key."
+        );
+        assert!(!error.retryable);
+    }
+
+    #[test]
+    fn maps_context_overflow_errors() {
+        let error = map_provider_error(
+            Some(400),
+            r#"{"error":{"message":"maximum context length exceeded"}}"#,
+            None,
+        );
+
+        assert_eq!(error.message, "Prompt is too long for the selected model.");
+        assert!(!error.retryable);
+    }
+}
