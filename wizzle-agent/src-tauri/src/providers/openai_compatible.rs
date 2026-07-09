@@ -327,12 +327,84 @@ async fn post_chat_completion(
     Ok(response)
 }
 
+#[derive(Clone, Debug, Default)]
+struct SseProcessResult {
+    emitted_chunk_count: usize,
+    error_message: Option<String>,
+    finish_reason: Option<String>,
+    saw_done: bool,
+}
+
+fn extract_finish_reason(payload: &Value) -> Option<String> {
+    payload
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn extract_stream_error_message(payload: &Value) -> Option<String> {
+    let error = payload.get("error")?;
+    if let Some(message) = error.get("message").and_then(Value::as_str) {
+        let trimmed = message.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Some(message) = error.as_str() {
+        let trimmed = message.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    Some("Provider stream returned an error.".to_string())
+}
+
+/// Decide whether a finished SSE stream is a successful terminal close (#18).
+fn resolve_stream_completion(
+    saw_done: bool,
+    finish_reason: Option<&str>,
+    emitted_any_chunks: bool,
+) -> Result<(), String> {
+    if let Some(reason) = finish_reason {
+        match reason {
+            "stop" | "tool_calls" | "function_call" | "end_turn" | "length" => Ok(()),
+            "content_filter" => Err(
+                "The provider blocked the response (content filter).".to_string(),
+            ),
+            other => {
+                if saw_done {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "Provider stream ended abnormally (finish_reason={other})."
+                    ))
+                }
+            }
+        }
+    } else if saw_done {
+        // Some proxies only emit [DONE] without finish_reason.
+        Ok(())
+    } else if !emitted_any_chunks {
+        Err("Provider stream closed without returning any content.".to_string())
+    } else {
+        Err(
+            "Provider stream closed before the response finished. The reply may be incomplete."
+                .to_string(),
+        )
+    }
+}
+
 fn process_sse_events(
     request_id: &str,
     window: &Window,
     buffer: &mut String,
     keep_tail: bool,
-) -> Result<usize, String> {
+) -> Result<SseProcessResult, String> {
     let normalized = buffer.replace("\r\n", "\n").replace('\r', "\n");
     let mut events = normalized.split("\n\n").collect::<Vec<_>>();
 
@@ -342,7 +414,7 @@ fn process_sse_events(
         String::new()
     };
 
-    let mut emitted_chunk_count = 0;
+    let mut result = SseProcessResult::default();
 
     for event in events {
         let data_lines = event
@@ -357,13 +429,28 @@ fn process_sse_events(
         }
 
         let data = data_lines.join("\n");
+        let trimmed = data.trim();
 
-        if data.trim().is_empty() || data.trim() == "[DONE]" {
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed == "[DONE]" {
+            result.saw_done = true;
             continue;
         }
 
         let payload = serde_json::from_str::<Value>(&data)
             .map_err(|_| "Provider stream returned an invalid response.".to_string())?;
+
+        if let Some(error_message) = extract_stream_error_message(&payload) {
+            result.error_message = Some(error_message);
+            continue;
+        }
+
+        if let Some(finish_reason) = extract_finish_reason(&payload) {
+            result.finish_reason = Some(finish_reason);
+        }
 
         for (kind, chunk, tool_call_index) in extract_delta_chunks(&payload) {
             window
@@ -377,11 +464,11 @@ fn process_sse_events(
                     },
                 )
                 .map_err(|_| "Could not deliver the provider stream chunk.".to_string())?;
-            emitted_chunk_count += 1;
+            result.emitted_chunk_count += 1;
         }
     }
 
-    Ok(emitted_chunk_count)
+    Ok(result)
 }
 
 pub async fn complete_chat(
@@ -453,6 +540,8 @@ pub async fn stream_chat(
 
         let mut buffer = String::new();
         let mut stream = response.bytes_stream();
+        let mut saw_done = false;
+        let mut finish_reason: Option<String> = None;
 
         while let Some(item) = stream.next().await {
             let bytes = match item {
@@ -475,13 +564,30 @@ pub async fn stream_chat(
                 return Err("Provider stream exceeded the 10 MB safety limit.".to_string());
             }
 
-            emitted_any_chunks |= process_sse_events(request_id, &window, &mut buffer, true)? > 0;
+            let parsed = process_sse_events(request_id, &window, &mut buffer, true)?;
+            if let Some(error_message) = parsed.error_message {
+                return Err(error_message);
+            }
+            emitted_any_chunks |= parsed.emitted_chunk_count > 0;
+            saw_done |= parsed.saw_done;
+            if parsed.finish_reason.is_some() {
+                finish_reason = parsed.finish_reason;
+            }
         }
 
         if !buffer.trim().is_empty() {
-            let _ = process_sse_events(request_id, &window, &mut buffer, false)?;
+            let parsed = process_sse_events(request_id, &window, &mut buffer, false)?;
+            if let Some(error_message) = parsed.error_message {
+                return Err(error_message);
+            }
+            emitted_any_chunks |= parsed.emitted_chunk_count > 0;
+            saw_done |= parsed.saw_done;
+            if parsed.finish_reason.is_some() {
+                finish_reason = parsed.finish_reason;
+            }
         }
 
+        resolve_stream_completion(saw_done, finish_reason.as_deref(), emitted_any_chunks)?;
         return Ok(());
     }
 }
@@ -567,7 +673,8 @@ pub async fn fetch_models(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_request_body, map_provider_error, resolve_reasoning_effort,
+        build_request_body, extract_finish_reason, map_provider_error, resolve_reasoning_effort,
+        resolve_stream_completion,
     };
     use crate::providers::types::{ProviderModelRecord, ProviderResolvedModel, ProviderSecretRecord};
     use serde_json::{json, Value};
@@ -667,5 +774,39 @@ mod tests {
         );
 
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn stream_completion_accepts_done_or_normal_finish_reason() {
+        assert!(resolve_stream_completion(true, None, true).is_ok());
+        assert!(resolve_stream_completion(false, Some("stop"), true).is_ok());
+        assert!(resolve_stream_completion(false, Some("tool_calls"), true).is_ok());
+        assert!(resolve_stream_completion(false, Some("length"), true).is_ok());
+        assert!(resolve_stream_completion(true, Some("stop"), false).is_ok());
+    }
+
+    #[test]
+    fn stream_completion_rejects_incomplete_close() {
+        let err = resolve_stream_completion(false, None, true).expect_err("incomplete");
+        assert!(err.contains("incomplete") || err.contains("before the response finished"));
+
+        let empty = resolve_stream_completion(false, None, false).expect_err("empty");
+        assert!(empty.contains("without returning any content"));
+
+        let filtered =
+            resolve_stream_completion(false, Some("content_filter"), true).expect_err("filter");
+        assert!(filtered.contains("content filter"));
+    }
+
+    #[test]
+    fn extract_finish_reason_from_choice() {
+        let payload = json!({
+            "choices": [{ "delta": {}, "finish_reason": "tool_calls" }]
+        });
+        assert_eq!(
+            extract_finish_reason(&payload).as_deref(),
+            Some("tool_calls")
+        );
+        assert!(extract_finish_reason(&json!({"choices":[{"delta":{}}]})).is_none());
     }
 }
