@@ -227,7 +227,7 @@ export function AppPage() {
           {isSidebarOpen ? (
             <div
               aria-label="Resize left panel"
-              className="absolute right-0 top-0 z-20 h-full w-3 translate-x-1/2 cursor-col-resize"
+              className="absolute right-0 top-0 z-20 h-full w-3 translate-x-1/2 cursor-col-resize touch-none select-none"
               onPointerDown={startSidebarResize}
             >
               <div className="mx-auto h-full w-px bg-transparent transition hover:bg-[var(--color-border-strong)]" />
@@ -348,7 +348,7 @@ export function AppPage() {
             {isFilePanelOpen ? (
               <div
                 aria-label="Resize right panel"
-                className="absolute left-0 top-0 z-20 h-full w-3 -translate-x-1/2 cursor-col-resize"
+                className="absolute left-0 top-0 z-20 h-full w-3 -translate-x-1/2 cursor-col-resize touch-none select-none"
                 onPointerDown={startFileResize}
               >
                 <div className="mx-auto h-full w-px bg-transparent transition hover:bg-[var(--color-border-strong)]" />
