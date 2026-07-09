@@ -3486,6 +3486,30 @@ fn upsert_session_metadata(
     Ok(())
 }
 
+/// Marks complete turns as compacted when session summary advances.
+/// Used by both full `persist_session` and targeted metadata saves (compaction path).
+fn mark_compacted_turns(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    compacted_turn_ids: &[String],
+) -> Result<(), String> {
+    for turn_id in compacted_turn_ids {
+        tx.execute(
+            "
+            UPDATE turns
+            SET compacted = 1
+            WHERE session_id = ?1
+              AND id = ?2
+              AND status = 'complete'
+            ",
+            params![session_id, turn_id],
+        )
+        .map_err(|error| db_error("Could not mark compacted Wizzle turns", error))?;
+    }
+
+    Ok(())
+}
+
 pub fn create_session_if_needed(input: PersistSessionMetadataInput) -> Result<(), String> {
     validate_storage_id("project", &input.project_id)?;
     validate_storage_id("session", &input.session.id)?;
@@ -3516,6 +3540,9 @@ pub fn create_session_if_needed(input: PersistSessionMetadataInput) -> Result<()
         .transaction()
         .map_err(|error| db_error("Could not start targeted session persistence", error))?;
     upsert_session_metadata(&tx, &metadata)?;
+    if let Some(compacted_context) = &metadata.compacted_context {
+        mark_compacted_turns(&tx, &metadata.id, &compacted_context.compacted_turn_ids)?;
+    }
     tx.execute(
         "UPDATE projects SET updated_at = ?1 WHERE id = ?2",
         params![metadata.updated_at as i64, input.project_id],
@@ -3938,19 +3965,7 @@ pub fn persist_session(input: PersistWorkspaceSessionInput) -> Result<(), String
         let current_turn_ids = turn_indexes.keys().cloned().collect::<HashSet<_>>();
         delete_stale_transcript_rows(&tx, &session_id, &current_turn_ids, &inserted_part_ids)?;
         if let Some(compacted_context) = &metadata.compacted_context {
-            for turn_id in &compacted_context.compacted_turn_ids {
-                tx.execute(
-                    "
-                    UPDATE turns
-                    SET compacted = 1
-                    WHERE session_id = ?1
-                      AND id = ?2
-                      AND status = 'complete'
-                    ",
-                    params![session_id, turn_id],
-                )
-                .map_err(|error| db_error("Could not mark compacted Wizzle turns", error))?;
-            }
+            mark_compacted_turns(&tx, &session_id, &compacted_context.compacted_turn_ids)?;
         }
         update_turn_token_totals(&tx, &session_id)?;
 
@@ -5029,5 +5044,65 @@ mod tests {
         assert_eq!(recovered.status.as_deref(), Some("done"));
         assert_eq!(recovered.content, "finished");
         assert_eq!(recovered.parts[0].status.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn mark_compacted_turns_sets_flags_for_complete_turns_only() {
+        let mut conn = migrated_memory_db();
+        let now = now_unix_ms() as i64;
+        insert_test_session(&conn);
+        conn.execute(
+            "INSERT INTO turns (id, session_id, turn_index, status, compacted, created_at, updated_at)
+             VALUES ('turn-a', 'session-1', 0, 'complete', 0, ?1, ?1)",
+            params![now],
+        )
+        .expect("insert complete turn a");
+        conn.execute(
+            "INSERT INTO turns (id, session_id, turn_index, status, compacted, created_at, updated_at)
+             VALUES ('turn-b', 'session-1', 1, 'complete', 0, ?1, ?1)",
+            params![now],
+        )
+        .expect("insert complete turn b");
+        conn.execute(
+            "INSERT INTO turns (id, session_id, turn_index, status, compacted, created_at, updated_at)
+             VALUES ('turn-running', 'session-1', 2, 'running', 0, ?1, ?1)",
+            params![now],
+        )
+        .expect("insert running turn");
+
+        {
+            let tx = conn.transaction().expect("start mark tx");
+            mark_compacted_turns(
+                &tx,
+                "session-1",
+                &[
+                    "turn-a".to_string(),
+                    "turn-running".to_string(),
+                    "missing-turn".to_string(),
+                ],
+            )
+            .expect("mark compacted turns");
+            tx.commit().expect("commit mark");
+        }
+
+        let compacted_ids = read_compacted_turn_ids(&conn, "session-1").expect("read flags");
+        assert_eq!(compacted_ids, vec!["turn-a".to_string()]);
+
+        let turn_b_flag: i64 = conn
+            .query_row(
+                "SELECT compacted FROM turns WHERE id = 'turn-b'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read turn-b flag");
+        let running_flag: i64 = conn
+            .query_row(
+                "SELECT compacted FROM turns WHERE id = 'turn-running'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read running flag");
+        assert_eq!(turn_b_flag, 0, "unlisted complete turn stays uncompacted");
+        assert_eq!(running_flag, 0, "running turns are not marked compacted");
     }
 }
