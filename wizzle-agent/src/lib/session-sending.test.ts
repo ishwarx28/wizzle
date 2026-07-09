@@ -41,6 +41,18 @@ function main() {
     }),
     "no interrupt on idle selected session",
   );
+  assert(
+    !resolveIsSendingMessage("draft-1", ["session-busy"]),
+    "new draft is idle while another session runs",
+  );
+  assert(
+    !shouldShowSessionInterrupt({
+      hasDraftContent: false,
+      selectedSessionId: "draft-1",
+      sendingSessionIds: ["session-busy"],
+    }),
+    "draft must not show stop for background session",
+  );
 
   assert(shouldRestoreComposerDraft({ accepted: false }), "restore when not accepted");
   assert(!shouldRestoreComposerDraft({ accepted: true }), "do not restore after accept");

@@ -850,6 +850,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         ...applied,
         activeMessageEdit: didChangeWorkspaceContext ? null : state.activeMessageEdit,
         chatError: didChangeWorkspaceContext ? null : state.chatError,
+        // Recompute selected-session busy flag after selection may change.
+        ...withSendingSessionState(nextSelectedSessionId, state.sendingSessionIds),
         ...withPendingApprovalsState(nextSelectedSessionId, {}),
       };
     });
@@ -885,17 +887,22 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       const nextProjects = state.projects.map((project) =>
         project.id === projectId ? { ...project, isExpanded: true } : project,
       );
+      const nextSelectedSessionId = nextDraftSessions[projectId]?.id ?? null;
 
       window.setTimeout(() => {
         void persistWorkspaceSettingsForCurrentState().catch(() => undefined);
       }, 0);
 
+      // Isolate send/stop UI from any other session still running in the background.
       return {
         activeMessageEdit: null,
+        chatError: null,
         draftSessions: nextDraftSessions,
         projects: nextProjects,
         selectedProjectId: projectId,
-        selectedSessionId: nextDraftSessions[projectId]?.id ?? null,
+        selectedSessionId: nextSelectedSessionId,
+        ...withSendingSessionState(nextSelectedSessionId, state.sendingSessionIds),
+        ...withPendingApprovalsState(nextSelectedSessionId, state.pendingToolApprovalsBySessionId),
       };
     }),
   renameDraftSession: (projectId, title) =>
@@ -948,9 +955,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         void persistWorkspaceSettingsForCurrentState().catch(() => undefined);
       }, 0);
 
+      const nextSelectedSessionId = isSelectedDraft ? null : state.selectedSessionId;
+
       return {
         draftSessions: nextDraftSessions,
-        selectedSessionId: isSelectedDraft ? null : state.selectedSessionId,
+        selectedSessionId: nextSelectedSessionId,
+        ...withSendingSessionState(nextSelectedSessionId, state.sendingSessionIds),
+        ...withPendingApprovalsState(nextSelectedSessionId, state.pendingToolApprovalsBySessionId),
       };
     }),
   renameSession: async (projectId, sessionId, title) => {

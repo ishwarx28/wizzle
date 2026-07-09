@@ -29,7 +29,6 @@ function isNearBottom(container: HTMLDivElement, threshold = BOTTOM_SNAP_THRESHO
 
 export function ChatView() {
   const activeMessageEdit = useWorkspaceStore((state) => state.activeMessageEdit);
-  const isSendingMessage = useWorkspaceStore((state) => state.isSendingMessage);
   const sessionContextStatus = useWorkspaceStore((state) => state.sessionContextStatus);
   const sessionStreamErrors = useWorkspaceStore((state) => state.sessionStreamErrors);
   const loadingSessionId = useWorkspaceStore((state) => state.loadingSessionId);
@@ -38,6 +37,11 @@ export function ChatView() {
   const projects = useWorkspaceStore((state) => state.projects);
   const selectedProjectId = useWorkspaceStore((state) => state.selectedProjectId);
   const selectedSessionId = useWorkspaceStore((state) => state.selectedSessionId);
+  const sendingSessionIds = useWorkspaceStore((state) => state.sendingSessionIds);
+  // Per selected session only — background runs on other sessions must not block edit UI.
+  const isSendingMessage = Boolean(
+    selectedSessionId && sendingSessionIds.includes(selectedSessionId),
+  );
   const openFile = useWorkspaceStore((state) => state.openFile);
   const startMessageEdit = useWorkspaceStore((state) => state.startMessageEdit);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);

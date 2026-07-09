@@ -339,7 +339,6 @@ export function Composer({
   const clearChatError = useWorkspaceStore((state) => state.clearChatError);
   const draftSessions = useWorkspaceStore((state) => state.draftSessions);
   const interruptPrompt = useWorkspaceStore((state) => state.interruptPrompt);
-  const isSendingMessage = useWorkspaceStore((state) => state.isSendingMessage);
   const modelId = useWorkspaceStore((state) => state.modelId);
   const pendingToolApproval = useWorkspaceStore((state) => state.pendingToolApproval);
   const permissionMode = useWorkspaceStore((state) => state.permissionMode);
@@ -350,6 +349,11 @@ export function Composer({
   const reasoningLevel = useWorkspaceStore((state) => state.reasoningLevel);
   const selectedProjectId = useWorkspaceStore((state) => state.selectedProjectId);
   const selectedSessionId = useWorkspaceStore((state) => state.selectedSessionId);
+  const sendingSessionIds = useWorkspaceStore((state) => state.sendingSessionIds);
+  // Always derive from selection + per-session run set (never a stale global flag).
+  const isSendingMessage = Boolean(
+    selectedSessionId && sendingSessionIds.includes(selectedSessionId),
+  );
   const sendPrompt = useWorkspaceStore((state) => state.sendPrompt);
   const setModelId = useWorkspaceStore((state) => state.setModelId);
   const setPermissionMode = useWorkspaceStore((state) => state.setPermissionMode);
