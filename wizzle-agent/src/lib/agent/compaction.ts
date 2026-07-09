@@ -5,7 +5,12 @@ import {
   sanitizeToolResultContentForReplay,
   type ChatRequestMessage,
 } from "../chat-stream";
-import { estimateTextTokens, type ReplayBlock } from "../context-budget";
+import {
+  estimateConversationTokens,
+  estimateTextTokens,
+  resolveMaxReplayInput,
+  type ReplayBlock,
+} from "../context-budget";
 import { getAssistantConversationContent, getMessageParts } from "../message-parts";
 import type {
   CompactedContextRecord,
@@ -329,6 +334,112 @@ function isCompletedCandidateBlock(block: ReplayBlock, currentTurnId?: string) {
   }
 
   return block.messages.every((message) => message.status === "done");
+}
+
+/**
+ * Compaction-request budget only: COMPACTION_SYSTEM_PROMPT + user prompt
+ * (history + template + previous summary). Does NOT count the agent system
+ * prompt or tool definitions — those are not sent on the summarizer call.
+ */
+export function estimateCompactionRequestTokens(options: {
+  historyText: string;
+  previousSummary?: string | null;
+  tokenizerKind?: string | null;
+}) {
+  const userPrompt = buildCompactionUserPrompt({
+    historyText: options.historyText,
+    previousSummary: options.previousSummary,
+  });
+
+  return estimateConversationTokens({
+    messages: [
+      {
+        content: COMPACTION_SYSTEM_PROMPT,
+        role: "system",
+      },
+      {
+        content: userPrompt,
+        role: "user",
+      },
+    ],
+    tokenizerKind: options.tokenizerKind,
+    tools: [],
+  });
+}
+
+/**
+ * Pack oldest → newer candidate turns into one summarizer call that fits the
+ * compaction input budget (no agent system/tools). Always includes at least
+ * the oldest candidate so the outer compact loop can make progress.
+ */
+export function selectOldestCompactionBatch(options: {
+  blocks: ReplayBlock[];
+  candidateTurnIds: string[];
+  currentTurnId?: string;
+  maxContext?: number | null;
+  maxOutputTokens?: number | null;
+  previousContext?: CompactedContextRecord | null;
+  previewFileMap: Map<string, PreviewFile>;
+  tokenLimit: number;
+  tokenizerKind?: string | null;
+}): string[] {
+  const candidateOrder = options.candidateTurnIds.filter((turnId, index, all) => all.indexOf(turnId) === index);
+  if (candidateOrder.length === 0) {
+    return [];
+  }
+
+  const blockByTurnId = new Map<string, ReplayBlock>();
+  for (const block of options.blocks) {
+    if (
+      block.turnId &&
+      candidateOrder.includes(block.turnId) &&
+      isCompletedCandidateBlock(block, options.currentTurnId)
+    ) {
+      blockByTurnId.set(block.turnId, block);
+    }
+  }
+
+  const orderedTurnIds = candidateOrder.filter((turnId) => blockByTurnId.has(turnId));
+  if (orderedTurnIds.length === 0) {
+    return [];
+  }
+
+  // Reserve room for the summary output (same cap family as compactReplayBlocks).
+  const reservedOutput = Math.min(
+    options.tokenLimit * 2,
+    typeof options.maxOutputTokens === "number" && Number.isFinite(options.maxOutputTokens) && options.maxOutputTokens > 0
+      ? Math.floor(options.maxOutputTokens)
+      : options.tokenLimit * 2,
+  );
+  const inputBudget = resolveMaxReplayInput(options.maxContext ?? undefined, reservedOutput);
+  const previousSummary = options.previousContext?.summary ?? null;
+  const batchTurnIds: string[] = [];
+
+  for (const turnId of orderedTurnIds) {
+    const nextBatch = [...batchTurnIds, turnId];
+    const historyText = buildCompactionHistoryText(
+      nextBatch.flatMap((id) => blockByTurnId.get(id)?.messages ?? []),
+      options.previewFileMap,
+    );
+    const requestTokens = estimateCompactionRequestTokens({
+      historyText,
+      previousSummary,
+      tokenizerKind: options.tokenizerKind,
+    });
+
+    if (requestTokens > inputBudget && batchTurnIds.length > 0) {
+      break;
+    }
+
+    batchTurnIds.push(turnId);
+    // Single oversized oldest turn: still force one turn so the loop progresses;
+    // compactReplayBlocks / the model may still fail if truly impossible.
+    if (requestTokens > inputBudget) {
+      break;
+    }
+  }
+
+  return batchTurnIds;
 }
 
 export async function compactReplayBlocks(options: {

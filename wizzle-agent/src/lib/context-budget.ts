@@ -418,6 +418,15 @@ function estimateCompactedSummaryTokens(
 
 export const MAX_REPLAY_INPUT = resolveMaxReplayInput(FALLBACK_CONTEXT_LIMIT);
 
+/**
+ * Live agent-turn budget only. Counts agent system prompt + tools + summary +
+ * history. Compaction request sizing lives separately (no agent system/tools).
+ *
+ * When over budget, frees space by dropping the oldest completed non-compacted
+ * turns first (oldest → newer). Newer completed turns and the active turn are
+ * preferred for verbatim keep. Callers must compact `droppedTurnIds` (possibly
+ * in multiple batches under the compaction input budget) before sending.
+ */
 export function selectReplayHistoryWithinBudget(options: {
   cachedEstimateByBlockId?: Map<string, ReplayBlockEstimate>;
   cacheKeyData?: PromptTokenCacheKeyData;
@@ -442,15 +451,13 @@ export function selectReplayHistoryWithinBudget(options: {
   const blocks = buildReplayBlocks(options.history, options.currentTurnId);
   const duplicateReadMessageIds = collectDuplicateReadReplayMessageIds(options.history);
   const compactedTurnIds = new Set(options.compactedContext?.compactedTurnIds ?? []);
-  const includedBlocks: ReplayBlock[] = [];
-  const droppedTurnIds: string[] = [];
   const budget = resolveReplayBudget({
     maxContext: options.maxContext,
     maxContextTokens: options.maxContextTokens,
     maxOutputTokens: options.maxOutputTokens,
   });
   const compactedSummaryTokens = estimateCompactedSummaryTokens(options.compactedContext, tokenizerKind);
-  let estimatedTokens =
+  const fixedLiveTokens =
     REQUEST_OVERHEAD_TOKENS +
     SYSTEM_MESSAGE_OVERHEAD_TOKENS +
     estimateTextTokens(options.systemPrompt, { tokenizerKind }) +
@@ -464,68 +471,102 @@ export function selectReplayHistoryWithinBudget(options: {
     );
   }
 
-  if (estimatedTokens >= budget.inputBudget) {
+  if (fixedLiveTokens >= budget.inputBudget) {
     throw new ReplayBudgetError(
       "system_tool_prompt_too_large",
       "The system prompt and tool definitions are too large for the selected model context. Choose a larger-context model.",
     );
   }
 
-  for (let index = blocks.length - 1; index >= 0; index -= 1) {
-    const block = blocks[index]!;
+  const estimateBlock = (block: ReplayBlock) =>
+    (!block.isActiveTurn && block.isCompleted
+      ? getCachedTurnSummaryEstimate({
+          block,
+          duplicateReadMessageIds,
+          modelCapabilities: options.modelCapabilities,
+          turnSummaryByTurnId,
+        })
+      : null) ??
+    estimateReplayBlock({
+      block,
+      cachedEstimateByBlockId: options.cachedEstimateByBlockId,
+      duplicateReadMessageIds,
+      modelCapabilities: options.modelCapabilities,
+      previewFileMap: options.previewFileMap,
+      tokenizerKind,
+    });
 
+  // Chronological candidates that can still appear verbatim in the live turn.
+  type Candidate = { block: ReplayBlock; tokens: number };
+  const requiredCandidates: Candidate[] = [];
+  const compactableCandidates: Candidate[] = [];
+
+  for (const block of blocks) {
     if (block.turnId && compactedTurnIds.has(block.turnId)) {
       continue;
     }
 
-    const blockEstimate =
-      (!block.isActiveTurn && block.isCompleted
-        ? getCachedTurnSummaryEstimate({
-            block,
-            duplicateReadMessageIds,
-            modelCapabilities: options.modelCapabilities,
-            turnSummaryByTurnId,
-          })
-        : null) ??
-      estimateReplayBlock({
-        block,
-        cachedEstimateByBlockId: options.cachedEstimateByBlockId,
-        duplicateReadMessageIds,
-        modelCapabilities: options.modelCapabilities,
-        previewFileMap: options.previewFileMap,
-        tokenizerKind,
-      });
+    const tokens = estimateBlock(block).tokens;
+    const isCompactable =
+      Boolean(block.turnId) && block.isCompleted && !block.isActiveTurn;
 
-    if (estimatedTokens + blockEstimate.tokens > budget.inputBudget) {
-      if (block.isActiveTurn || includedBlocks.length === 0) {
-        throw buildActiveBlockBudgetError(block);
-      }
-
-      droppedTurnIds.unshift(
-        ...blocks
-          .slice(0, index + 1)
-          .filter(
-            (entry) =>
-              entry.turnId &&
-              entry.isCompleted &&
-              !entry.isActiveTurn &&
-              !compactedTurnIds.has(entry.turnId),
-          )
-          .map((entry) => entry.turnId)
-          .filter((turnId): turnId is string => Boolean(turnId)),
-      );
-      break;
+    if (isCompactable) {
+      compactableCandidates.push({ block, tokens });
+    } else {
+      requiredCandidates.push({ block, tokens });
     }
-
-    estimatedTokens += blockEstimate.tokens;
-    includedBlocks.unshift(block);
   }
+
+  const requiredTokens = requiredCandidates.reduce((total, entry) => total + entry.tokens, 0);
+  if (fixedLiveTokens + requiredTokens > budget.inputBudget) {
+    const activeBlock =
+      requiredCandidates.find((entry) => entry.block.isActiveTurn)?.block ??
+      requiredCandidates[requiredCandidates.length - 1]?.block ??
+      blocks[blocks.length - 1];
+    throw buildActiveBlockBudgetError(activeBlock ?? {
+      blockId: "active",
+      isActiveTurn: true,
+      isCompleted: false,
+      messages: [],
+      turnId: options.currentTurnId ?? null,
+    });
+  }
+
+  // Prefer keeping newer completed turns. Drop oldest compactable first until live fits.
+  let compactableTokens = compactableCandidates.reduce((total, entry) => total + entry.tokens, 0);
+  const droppedTurnIds: string[] = [];
+  let dropCount = 0;
+
+  while (
+    fixedLiveTokens + requiredTokens + compactableTokens > budget.inputBudget &&
+    dropCount < compactableCandidates.length
+  ) {
+    const oldest = compactableCandidates[dropCount]!;
+    droppedTurnIds.push(oldest.block.turnId!);
+    compactableTokens -= oldest.tokens;
+    dropCount += 1;
+  }
+
+  const droppedTurnIdSet = new Set(droppedTurnIds);
+  const includedBlocks = blocks.filter((block) => {
+    if (block.turnId && compactedTurnIds.has(block.turnId)) {
+      return false;
+    }
+    if (block.turnId && droppedTurnIdSet.has(block.turnId)) {
+      return false;
+    }
+    return true;
+  });
+
+  const estimatedTokens =
+    fixedLiveTokens +
+    includedBlocks.reduce((total, block) => total + estimateBlock(block).tokens, 0);
 
   return {
     blocks,
     budget,
     compactedSummaryTokens,
-    droppedTurnIds: Array.from(new Set(droppedTurnIds)),
+    droppedTurnIds,
     estimatedTokens,
     messages: includedBlocks.flatMap((block) => block.messages),
   } satisfies ReplaySelectionResult;

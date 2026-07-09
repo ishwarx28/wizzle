@@ -16,7 +16,11 @@ import {
 } from "./agent/message-factories";
 import { createRejectedToolPayload, createToolApprovalRequest } from "./tool-approval";
 import { normalizeStreamedToolCalls, streamAgentTurn } from "./agent/stream-turn";
-import { buildCompactedContextMessage, compactReplayBlocks } from "./agent/compaction";
+import {
+  buildCompactedContextMessage,
+  compactReplayBlocks,
+  selectOldestCompactionBatch,
+} from "./agent/compaction";
 import {
   buildChatMessages,
   INTERRUPTED_WORKSPACE_CHAT_ERROR,
@@ -42,6 +46,8 @@ import type {
 
 const MAX_ALLOWED_AGENT_STEPS = 100;
 const DEFAULT_AGENT_STEPS = 100;
+/** Max older→newer summarizer passes while freeing live agent context. */
+const MAX_COMPACTION_PASSES = 16;
 
 const FINAL_RESPONSE_SYSTEM_PROMPT =
   "You have finished the tool work for this turn. Reply to the user now with the final answer only. Do not call tools. Do not add progress narration. Do not describe what you are about to do. Give the completed user-facing response.";
@@ -286,38 +292,81 @@ export async function runWorkspaceAgent(options: {
   const replayEstimateCache = new Map<string, { replayMessageCount: number; tokens: number }>();
   const conversationHistory = [...options.history];
   let compactedContext = options.compactedContext ?? null;
+  const selectConversation = () =>
+    selectReplayHistoryWithinBudget({
+      cachedEstimateByBlockId: replayEstimateCache,
+      cacheKeyData: promptCacheKeyData,
+      compactedContext,
+      currentTurnId: options.turnId,
+      history: conversationHistory,
+      maxContext: options.selectedModel.maxContext,
+      maxOutputTokens: options.selectedModel.maxOutputTokens,
+      modelCapabilities: options.modelCapabilities,
+      previewFileMap: options.previewFileMap,
+      systemPrompt,
+      tokenizerKind: options.selectedModel.tokenizerKind ?? options.tokenizerKind,
+      tools,
+      turnSummaries: options.turnSummaries,
+    });
+
   const rebuildConversation = async () => {
-    let selection = selectReplayHistoryWithinBudget({
-        cachedEstimateByBlockId: replayEstimateCache,
-        cacheKeyData: promptCacheKeyData,
+    let selection = selectConversation();
+
+    if (selection.droppedTurnIds.length === 0) {
+      return buildConversation({
         compactedContext,
-        currentTurnId: options.turnId,
-        history: conversationHistory,
-        maxContext: options.selectedModel.maxContext,
-        maxOutputTokens: options.selectedModel.maxOutputTokens,
+        history: selection.messages,
         modelCapabilities: options.modelCapabilities,
         previewFileMap: options.previewFileMap,
         systemPrompt,
-        tokenizerKind: options.selectedModel.tokenizerKind ?? options.tokenizerKind,
-        tools,
-        turnSummaries: options.turnSummaries,
       });
+    }
 
-    if (selection.droppedTurnIds.length > 0) {
-      frontendLogger.info("frontend.agent", "compaction_started", {
-        droppedTurnCount: selection.droppedTurnIds.length,
-        estimatedTokens: selection.estimatedTokens,
-        inputBudget: selection.budget.inputBudget,
-        turnIdLength: options.turnId.length,
-      });
-      await options.onCompactionStarted?.();
+    frontendLogger.info("frontend.agent", "compaction_started", {
+      droppedTurnCount: selection.droppedTurnIds.length,
+      estimatedTokens: selection.estimatedTokens,
+      inputBudget: selection.budget.inputBudget,
+      turnIdLength: options.turnId.length,
+    });
+    await options.onCompactionStarted?.();
 
-      try {
+    try {
+      let compactedThisRebuild = false;
+
+      for (let pass = 0; pass < MAX_COMPACTION_PASSES; pass += 1) {
+        if (selection.droppedTurnIds.length === 0) {
+          break;
+        }
+
+        const blocks = buildReplayBlocks(conversationHistory, options.turnId);
+        const batchTurnIds = selectOldestCompactionBatch({
+          blocks,
+          candidateTurnIds: selection.droppedTurnIds,
+          currentTurnId: options.turnId,
+          maxContext: options.selectedModel.maxContext,
+          maxOutputTokens: options.selectedModel.maxOutputTokens,
+          previousContext: compactedContext,
+          previewFileMap: options.previewFileMap,
+          tokenLimit: selection.budget.compactedContextTokens,
+          tokenizerKind: options.selectedModel.tokenizerKind ?? options.tokenizerKind,
+        });
+
+        if (batchTurnIds.length === 0) {
+          break;
+        }
+
+        frontendLogger.info("frontend.agent", "compaction_pass", {
+          batchTurnCount: batchTurnIds.length,
+          droppedTurnCount: selection.droppedTurnIds.length,
+          pass,
+          turnIdLength: options.turnId.length,
+        });
+
         const nextCompactedContext = await compactReplayBlocks({
-          blocks: buildReplayBlocks(conversationHistory, options.turnId),
+          blocks,
           chatId: options.chatId,
           currentTurnId: options.turnId,
-          droppedTurnIds: selection.droppedTurnIds,
+          droppedTurnIds: batchTurnIds,
           model: options.selectedModel,
           previousContext: compactedContext,
           projectId: options.projectId,
@@ -325,41 +374,60 @@ export async function runWorkspaceAgent(options: {
           tokenLimit: selection.budget.compactedContextTokens,
         });
 
-        if (nextCompactedContext) {
-          compactedContext = nextCompactedContext;
-          await options.onCompactedContext?.(nextCompactedContext);
-          selection = selectReplayHistoryWithinBudget({
-            cachedEstimateByBlockId: replayEstimateCache,
-            cacheKeyData: promptCacheKeyData,
-            compactedContext,
-            currentTurnId: options.turnId,
-            history: conversationHistory,
-            maxContext: options.selectedModel.maxContext,
-            maxOutputTokens: options.selectedModel.maxOutputTokens,
-            modelCapabilities: options.modelCapabilities,
-            previewFileMap: options.previewFileMap,
-            systemPrompt,
-            tokenizerKind: options.selectedModel.tokenizerKind ?? options.tokenizerKind,
-            tools,
-            turnSummaries: options.turnSummaries,
-          });
-          frontendLogger.info("frontend.agent", "compaction_finished", {
-            compactedTurnCount: nextCompactedContext.compactedTurnIds.length,
-            summaryTokens: nextCompactedContext.tokens,
-            turnIdLength: options.turnId.length,
-          });
-          await options.onCompactionEnded?.("compacted");
-        } else {
-          await options.onCompactionEnded?.("skipped");
+        if (!nextCompactedContext) {
+          break;
         }
-      } catch (error) {
-        frontendLogger.error("frontend.agent", "compaction_failed", {
-          error,
+
+        compactedThisRebuild = true;
+        compactedContext = nextCompactedContext;
+        await options.onCompactedContext?.(nextCompactedContext);
+        selection = selectConversation();
+
+        frontendLogger.info("frontend.agent", "compaction_pass_finished", {
+          compactedTurnCount: nextCompactedContext.compactedTurnIds.length,
+          remainingDroppedTurnCount: selection.droppedTurnIds.length,
+          summaryTokens: nextCompactedContext.tokens,
+          turnIdLength: options.turnId.length,
+        });
+      }
+
+      if (selection.droppedTurnIds.length > 0) {
+        frontendLogger.error("frontend.agent", "compaction_incomplete", {
+          remainingDroppedTurnCount: selection.droppedTurnIds.length,
           turnIdLength: options.turnId.length,
         });
         await options.onCompactionEnded?.("failed");
+        throw new Error(
+          "Could not free enough context by compacting older turns. Try a larger-context model or start a new chat.",
+        );
+      }
+
+      if (compactedThisRebuild) {
+        frontendLogger.info("frontend.agent", "compaction_finished", {
+          compactedTurnCount: compactedContext?.compactedTurnIds.length ?? 0,
+          summaryTokens: compactedContext?.tokens ?? 0,
+          turnIdLength: options.turnId.length,
+        });
+        await options.onCompactionEnded?.("compacted");
+      } else {
+        await options.onCompactionEnded?.("skipped");
+        throw new Error(
+          "Could not free enough context by compacting older turns. Try a larger-context model or start a new chat.",
+        );
+      }
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.startsWith("Could not free enough context")
+      ) {
         throw error;
       }
+      frontendLogger.error("frontend.agent", "compaction_failed", {
+        error,
+        turnIdLength: options.turnId.length,
+      });
+      await options.onCompactionEnded?.("failed");
+      throw error;
     }
 
     return buildConversation({
