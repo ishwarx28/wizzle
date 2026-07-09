@@ -92,9 +92,13 @@ function normalizeTitleLine(line: string) {
     .replace(/^[-•]\s+/, "")
     .replace(/^title\s*:\s*/i, "")
     .replace(/^[`"'“”‘’]+|[`"'“”‘’]+$/g, "")
+    .replace(/[.!?]+$/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
+
+const TITLE_FILLER_PREFIX =
+  /^(sure[,!.]?|okay[,!.]?|ok[,!.]?|here(?:'s| is)|here are|the title (?:is|would be)|title\s*:|i (?:think|would|will|am|can)|i'm |let me |looking at |based on |the user |this (?:chat|conversation|message)|my (?:suggested|proposed) title|suggested title|final title|output\s*:)/i;
 
 function isPlausibleTitleLine(
   line: string,
@@ -104,11 +108,15 @@ function isPlausibleTitleLine(
   if (!line || line.length > maxChars) {
     return false;
   }
-  // Reject long prose / reasoning fragments.
+  // Reject long prose / reasoning fragments / multi-sentence answers.
   if (/[.!?]{2,}/.test(line) || line.includes("...")) {
     return false;
   }
-  if (/^(i |i'm |i am |let me |the user |looking at |based on )/i.test(line)) {
+  // A real title is not a full sentence with terminal punctuation mid-string.
+  if (/[.!?].+\S/.test(line) || /[.!?]$/.test(line)) {
+    return false;
+  }
+  if (TITLE_FILLER_PREFIX.test(line)) {
     return false;
   }
   const words = line.split(/\s+/).filter(Boolean);
@@ -172,34 +180,19 @@ export function sanitizeGeneratedSessionTitle(
 
 /**
  * Title-specific extraction:
- * 1) Prefer visible `content` (actual answer).
- * 2) Only if content is empty, try a *short* last line from reasoning —
- *    never return the full reasoning stream as a title.
+ * Use visible completion `content` only.
+ * Never use reasoning / reasoning_content — those are thinking traces, not titles.
  */
 export function extractTitleFromCompletion(payload: ChatCompletionJson) {
   const content = extractCompletionContentText(payload);
-  if (content) {
-    return sanitizeGeneratedSessionTitle(content);
-  }
-
-  const choice = payload.choices?.[0];
-  const message = choice?.message;
-  const reasoning = [
-    extractTextLikeValue(message?.reasoning_content),
-    extractTextLikeValue(message?.reasoning),
-  ]
-    .map((value) => value.trim())
-    .find(Boolean);
-
-  if (!reasoning) {
+  if (!content) {
     return "";
   }
 
-  // Only accept a title-like line from the end of reasoning; ignore long prose.
-  const fromReasoning = sanitizeGeneratedSessionTitle(reasoning);
-  if (fromReasoning && isPlausibleTitleLine(fromReasoning)) {
-    return fromReasoning;
+  const title = sanitizeGeneratedSessionTitle(content);
+  if (!title || !isPlausibleTitleLine(title)) {
+    return "";
   }
 
-  return "";
+  return title;
 }

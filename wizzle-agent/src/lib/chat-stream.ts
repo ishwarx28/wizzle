@@ -972,9 +972,13 @@ export async function generateWorkspaceSessionTitle(options: {
         {
           role: "user" as const,
           content: [
-            "Reply with only the chat title (3 to 6 words). No punctuation wrapping. No explanation.",
+            "Return only ONE chat title.",
+            "Rules: exactly one line, 3–6 words, ≤50 characters.",
+            "No reasoning. No filler. No explanation. No quotes. No labels. No second line.",
+            "Output format: Title words here",
+            "",
             sourceText || "Generate a title for this chat.",
-          ].join("\n\n"),
+          ].join("\n"),
         },
       ],
     };
@@ -985,11 +989,12 @@ export async function generateWorkspaceSessionTitle(options: {
     try {
       payload = JSON.parse(response) as ChatCompletionJson;
     } catch {
-      // Some providers return bare text; treat the body as the title.
-      return sanitizeGeneratedSessionTitle(response);
+      // Some providers return bare text; never treat as a dump of reasoning prose.
+      const bare = sanitizeGeneratedSessionTitle(response);
+      return bare && bare.split(/\s+/).filter(Boolean).length <= 8 ? bare : "";
     }
 
-    // Prefer content; only skim reasoning for a short last-line title if content is empty.
+    // Content only — never reasoning fields.
     return extractTitleFromCompletion(payload);
   }
 

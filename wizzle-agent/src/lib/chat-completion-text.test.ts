@@ -63,8 +63,8 @@ function main() {
           },
         },
       ],
-    }) === "Debugging production 500s",
-    "title can take short last line from reasoning only if content empty",
+    }) === "",
+    "never take title from reasoning when content is empty",
   );
 
   assert(
@@ -73,13 +73,52 @@ function main() {
         {
           message: {
             content: "",
-            reasoning_content:
+            reasoning:
               "I am carefully analyzing the user request and considering many aspects of the problem without a short title line at the end",
           },
         },
       ],
     }) === "",
-    "reject long reasoning prose as title",
+    "never take title from reasoning field",
+  );
+
+  assert(
+    extractTitleFromCompletion({
+      choices: [
+        {
+          message: {
+            content: "Here is a great title for this chat: Fix login",
+          },
+        },
+      ],
+    }) === "",
+    "reject filler preamble as title",
+  );
+
+  assert(
+    extractTitleFromCompletion({
+      choices: [
+        {
+          message: {
+            content: "Sure, I can help with that",
+          },
+        },
+      ],
+    }) === "",
+    "reject conversational filler title",
+  );
+
+  assert(
+    extractTitleFromCompletion({
+      choices: [
+        {
+          message: {
+            content: "Fix OAuth callback errors",
+          },
+        },
+      ],
+    }) === "Fix OAuth callback errors",
+    "accept direct title-only content",
   );
 
   assert(
