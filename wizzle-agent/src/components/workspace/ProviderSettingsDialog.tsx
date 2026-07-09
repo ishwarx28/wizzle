@@ -30,6 +30,8 @@ type ProviderSettingsPageProps = {
   onBack: () => void;
 };
 
+type TokenizerMode = "heuristic" | "custom";
+
 type ProviderModelFormRow = {
   capabilities: string;
   displayName: string;
@@ -38,7 +40,8 @@ type ProviderModelFormRow = {
   modelId: string;
   reasoningLevels: string;
   tokenizerJson: string;
-  tokenizerKind: string;
+  /** UI mode for tokenizer: heuristic (default) or custom path/URL. */
+  tokenizerMode: TokenizerMode;
 };
 
 type DialogState =
@@ -52,6 +55,8 @@ type DialogState =
       removeInvalid: boolean;
     };
 
+const EXPORT_FILE_NAME = "wizzle-providers.yaml";
+
 const emptyModelRow: ProviderModelFormRow = {
   capabilities: "text",
   displayName: "",
@@ -60,7 +65,7 @@ const emptyModelRow: ProviderModelFormRow = {
   modelId: "",
   reasoningLevels: "low, medium, high, max",
   tokenizerJson: "",
-  tokenizerKind: "",
+  tokenizerMode: "heuristic",
 };
 
 const fieldClassName =
@@ -69,8 +74,25 @@ const fieldClassName =
 const modelFieldClassName =
   "h-9 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-3 text-[12px] text-[var(--color-text)] outline-none focus:border-[var(--color-border-strong)]";
 
+/** Match account-tile settings popup label density (`text-[13px] font-normal …`). */
 const headerButtonClassName =
-  "inline-flex h-9 items-center gap-2 rounded-full border border-[var(--color-border)] px-3 text-[12px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)] disabled:cursor-not-allowed disabled:opacity-50";
+  "inline-flex h-9 items-center gap-2 rounded-full border border-[var(--color-border)] px-3 text-[13px] font-normal leading-none tracking-normal text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)] disabled:cursor-not-allowed disabled:opacity-50";
+
+const menuItemLabelClassName = "text-[13px] font-normal leading-none tracking-normal";
+
+function resolveTokenizerMode(
+  tokenizerJson: string | null | undefined,
+  tokenizerKind: string | null | undefined,
+): TokenizerMode {
+  const json = tokenizerJson?.trim() ?? "";
+  const kind = tokenizerKind?.trim().toLowerCase() ?? "";
+
+  if (json || (kind && kind !== "heuristic")) {
+    return "custom";
+  }
+
+  return "heuristic";
+}
 
 function normalizeError(caughtError: unknown, fallback: string) {
   if (caughtError instanceof Error && caughtError.message.trim()) {
@@ -111,6 +133,8 @@ function toModelInput(row: ProviderModelFormRow) {
   }
 
   const capabilities = parseList(row.capabilities);
+  const isCustomTokenizer = row.tokenizerMode === "custom";
+  const tokenizerJson = isCustomTokenizer ? row.tokenizerJson.trim() || undefined : undefined;
 
   return {
     // Prefer explicit list; empty means "use server default (text)" without crashing.
@@ -120,8 +144,12 @@ function toModelInput(row: ProviderModelFormRow) {
     maxOutputTokens: parseOptionalInteger(row.maxOutputTokens),
     modelId,
     reasoningLevels: parseList(row.reasoningLevels),
-    tokenizerJson: row.tokenizerJson.trim() || undefined,
-    tokenizerKind: row.tokenizerKind.trim() || undefined,
+    tokenizerJson,
+    tokenizerKind: isCustomTokenizer
+      ? tokenizerJson
+        ? "hf-json"
+        : "custom"
+      : "heuristic",
   };
 }
 
@@ -132,7 +160,7 @@ function isEmptyDraftRow(row: ProviderModelFormRow) {
     !row.maxContext.trim() &&
     !row.maxOutputTokens.trim() &&
     !row.tokenizerJson.trim() &&
-    !row.tokenizerKind.trim() &&
+    row.tokenizerMode === "heuristic" &&
     (row.capabilities.trim() === "" || row.capabilities.trim() === "text") &&
     (row.reasoningLevels.trim() === "" ||
       row.reasoningLevels.trim() === "low, medium, high, max")
@@ -225,6 +253,7 @@ function downloadTextFile(fileName: string, content: string) {
   anchor.download = fileName;
   anchor.click();
   URL.revokeObjectURL(url);
+  return fileName;
 }
 
 function FieldLabel({ children }: { children: string }) {
@@ -248,6 +277,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
   const [modelRows, setModelRows] = useState<ProviderModelFormRow[]>([{ ...emptyModelRow }]);
   const [name, setName] = useState("OpenAI");
   const [onlySpecifiedModels, setOnlySpecifiedModels] = useState(false);
+  const [providerTokenizerMode, setProviderTokenizerMode] = useState<TokenizerMode>("heuristic");
   const [providerType, setProviderType] = useState("openai_compatible");
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [tokenizerJson, setTokenizerJson] = useState("");
@@ -327,6 +357,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
     setModelRows([{ ...emptyModelRow }]);
     setName("OpenAI");
     setOnlySpecifiedModels(false);
+    setProviderTokenizerMode("heuristic");
     setProviderType("openai_compatible");
     setTokenizerJson("");
   }
@@ -354,12 +385,13 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
             modelId: model.modelId,
             reasoningLevels: (model.reasoningLevels ?? []).join(", "),
             tokenizerJson: model.tokenizerJson ?? "",
-            tokenizerKind: model.tokenizerKind ?? "",
+            tokenizerMode: resolveTokenizerMode(model.tokenizerJson, model.tokenizerKind),
           }))
         : [{ ...emptyModelRow }],
     );
     setName(provider.name);
     setOnlySpecifiedModels(false);
+    setProviderTokenizerMode(resolveTokenizerMode(provider.tokenizerJson, null));
     setProviderType(provider.providerType);
     setTokenizerJson(provider.tokenizerJson ?? "");
     setDialog({ type: "provider-form", mode: "edit", providerId: provider.id });
@@ -393,7 +425,8 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
         name,
         onlySpecifiedModels,
         providerType,
-        tokenizerJson: tokenizerJson.trim() || undefined,
+        tokenizerJson:
+          providerTokenizerMode === "custom" ? tokenizerJson.trim() || undefined : undefined,
       });
 
       if (!onlySpecifiedModels) {
@@ -513,8 +546,12 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
   }
 
   function handleExport() {
-    downloadTextFile("wizzle-providers.yaml", buildProvidersYaml(providers, providerModels));
-    showToast("Providers exported.");
+    const fileName = downloadTextFile(
+      EXPORT_FILE_NAME,
+      buildProvidersYaml(providers, providerModels),
+    );
+    // Browser downloads use the filename (not a full disk path); surface it in the toast.
+    showToast(`Providers exported to ${fileName}`);
   }
 
   function openImportMenu() {
@@ -673,26 +710,26 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
               }}
             >
               <button
-                className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-[13px] text-[var(--color-text)] transition hover:bg-[var(--color-panel-hover)]"
+                className="flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-[var(--color-text)] transition hover:bg-[var(--color-panel-hover)]"
                 onClick={() => {
                   setImportMenuOpen(false);
                   yamlFileInputRef.current?.click();
                 }}
                 type="button"
               >
-                <Upload className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]" />
-                Import file
+                <Upload className="h-4 w-4 shrink-0 text-[var(--color-text-tertiary)]" />
+                <span className={menuItemLabelClassName}>Import file</span>
               </button>
               <button
-                className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-[13px] text-[var(--color-text)] transition hover:bg-[var(--color-panel-hover)]"
+                className="flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-[var(--color-text)] transition hover:bg-[var(--color-panel-hover)]"
                 onClick={() => {
                   setImportMenuOpen(false);
                   setDialog({ type: "import-url", value: "" });
                 }}
                 type="button"
               >
-                <Link2 className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]" />
-                Import from URL
+                <Link2 className="h-4 w-4 shrink-0 text-[var(--color-text-tertiary)]" />
+                <span className={menuItemLabelClassName}>Import from URL</span>
               </button>
             </div>,
             document.body,
@@ -905,18 +942,40 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                 </button>
               </div>
             </div>
-            <div className="md:col-span-2">
-              <FieldLabel>Provider tokenizer.json (optional)</FieldLabel>
-              <input
+            <div>
+              <FieldLabel>Tokenizer kind</FieldLabel>
+              <select
                 className={fieldClassName}
-                onChange={(event) => setTokenizerJson(event.currentTarget.value)}
-                placeholder="Local path or HTTPS URL"
-                value={tokenizerJson}
-              />
-              <p className="mt-1.5 text-[11px] text-[var(--color-text-tertiary)]">
-                Fallback order: model tokenizer.json → provider tokenizer.json → character heuristic.
-              </p>
+                onChange={(event) => {
+                  const mode = event.currentTarget.value as TokenizerMode;
+                  setProviderTokenizerMode(mode);
+                  if (mode === "heuristic") {
+                    setTokenizerJson("");
+                  }
+                }}
+                value={providerTokenizerMode}
+              >
+                <option value="heuristic">Heuristic</option>
+                <option value="custom">Custom</option>
+              </select>
             </div>
+            {providerTokenizerMode === "custom" ? (
+              <div>
+                <FieldLabel>tokenizer.json path or URL</FieldLabel>
+                <input
+                  className={fieldClassName}
+                  onChange={(event) => setTokenizerJson(event.currentTarget.value)}
+                  placeholder="Local path or HTTPS URL"
+                  value={tokenizerJson}
+                />
+              </div>
+            ) : (
+              <div className="flex items-end">
+                <p className="pb-2 text-[11px] leading-4 text-[var(--color-text-tertiary)]">
+                  Character heuristic. Model custom tokenizers override this.
+                </p>
+              </div>
+            )}
           </div>
 
           <label className="mt-4 flex items-center gap-2 text-[13px] text-[var(--color-text-secondary)]">
@@ -1044,41 +1103,50 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                     value={row.reasoningLevels}
                   />
                 </div>
-                <div className="md:col-span-2">
-                  <FieldLabel>Model tokenizer.json (optional)</FieldLabel>
-                  <input
-                    className={modelFieldClassName}
-                    onChange={(event) =>
-                      setModelRows((rows) =>
-                        rows.map((entry, rowIndex) =>
-                          rowIndex === index
-                            ? { ...entry, tokenizerJson: event.currentTarget.value }
-                            : entry,
-                        ),
-                      )
-                    }
-                    placeholder="Overrides provider tokenizer"
-                    value={row.tokenizerJson}
-                  />
-                </div>
                 <div>
-                  <FieldLabel>Tokenizer kind (optional)</FieldLabel>
-                  <input
+                  <FieldLabel>Tokenizer kind</FieldLabel>
+                  <select
                     className={modelFieldClassName}
-                    onChange={(event) =>
+                    onChange={(event) => {
+                      const mode = event.currentTarget.value as TokenizerMode;
                       setModelRows((rows) =>
                         rows.map((entry, rowIndex) =>
                           rowIndex === index
-                            ? { ...entry, tokenizerKind: event.currentTarget.value }
+                            ? {
+                                ...entry,
+                                tokenizerMode: mode,
+                                tokenizerJson: mode === "heuristic" ? "" : entry.tokenizerJson,
+                              }
                             : entry,
                         ),
-                      )
-                    }
-                    placeholder="hf-json"
-                    value={row.tokenizerKind}
-                  />
+                      );
+                    }}
+                    value={row.tokenizerMode}
+                  >
+                    <option value="heuristic">Heuristic</option>
+                    <option value="custom">Custom</option>
+                  </select>
                 </div>
-                <div className="flex items-end">
+                {row.tokenizerMode === "custom" ? (
+                  <div>
+                    <FieldLabel>tokenizer.json path or URL</FieldLabel>
+                    <input
+                      className={modelFieldClassName}
+                      onChange={(event) =>
+                        setModelRows((rows) =>
+                          rows.map((entry, rowIndex) =>
+                            rowIndex === index
+                              ? { ...entry, tokenizerJson: event.currentTarget.value }
+                              : entry,
+                          ),
+                        )
+                      }
+                      placeholder="Local path or HTTPS URL"
+                      value={row.tokenizerJson}
+                    />
+                  </div>
+                ) : null}
+                <div className="flex items-end md:col-span-2">
                   <button
                     className="h-9 rounded-xl px-3 text-[12px] text-[var(--color-danger)] transition hover:bg-[var(--color-panel-hover)] disabled:cursor-not-allowed disabled:opacity-40"
                     disabled={isSoleEmptyDraft}

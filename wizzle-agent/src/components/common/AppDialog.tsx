@@ -32,19 +32,23 @@ export function AppDialog({
       role="dialog"
     >
       <div
-        className={`relative w-full ${maxWidthClass} max-h-[min(90vh,880px)] overflow-y-auto rounded-[26px] border border-[var(--color-border)] bg-[var(--color-panel)] p-5 shadow-[0_22px_60px_rgba(0,0,0,0.34)]`}
+        className={`relative flex w-full ${maxWidthClass} max-h-[min(90vh,880px)] flex-col overflow-hidden rounded-[26px] border border-[var(--color-border)] bg-[var(--color-panel)] shadow-[0_22px_60px_rgba(0,0,0,0.34)]`}
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <div className="space-y-1">
+        <div className="shrink-0 space-y-1 px-5 pt-5">
           <h2 className="text-[16px] font-medium text-[var(--color-text)]">{title}</h2>
           {description ? (
             <p className="text-[13px] leading-5 text-[var(--color-text-secondary)]">{description}</p>
           ) : null}
         </div>
 
-        {children ? <div className="mt-4">{children}</div> : null}
+        {children ? (
+          <div className="min-h-0 flex-1 overflow-y-auto px-5 pt-4">{children}</div>
+        ) : null}
 
-        <div className="mt-5 flex justify-end gap-2.5">{actions}</div>
+        <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-panel)] px-5 py-4">
+          <div className="flex justify-end gap-2.5">{actions}</div>
+        </div>
       </div>
     </div>,
     document.body,
