@@ -8,6 +8,7 @@ import {
 import {
   estimateConversationTokens,
   estimateTextTokens,
+  isCompactableReplayBlock,
   resolveMaxReplayInput,
   type ReplayBlock,
 } from "../context-budget";
@@ -109,11 +110,23 @@ function serializeAttachmentReferences(message: Message, previewFileMap: Map<str
     .map((file) => `[Attached ${file.kind}: ${file.name}]`);
 }
 
+function formatCompactionStatusSuffix(status: Message["status"] | undefined) {
+  if (status === "error") {
+    return " [status=error]";
+  }
+  if (status === "interrupted") {
+    return " [status=interrupted]";
+  }
+  return "";
+}
+
 function serializeMessageForCompaction(message: Message, previewFileMap: Map<string, PreviewFile>) {
+  const statusSuffix = formatCompactionStatusSuffix(message.status);
+
   if (message.role === "user") {
     const attachments = serializeAttachmentReferences(message, previewFileMap);
     return [
-      "USER:",
+      `USER${statusSuffix}:`,
       message.content.trim(),
       ...attachments,
     ].filter(Boolean).join("\n");
@@ -130,7 +143,7 @@ function serializeMessageForCompaction(message: Message, previewFileMap: Map<str
     const content = getAssistantConversationContent(message).trim();
 
     return [
-      "ASSISTANT:",
+      `ASSISTANT${statusSuffix}:`,
       content,
       ...toolCalls,
     ].filter(Boolean).join("\n");
@@ -141,7 +154,7 @@ function serializeMessageForCompaction(message: Message, previewFileMap: Map<str
   });
 
   return [
-    `TOOL ${message.toolName ?? "unknown"} (${message.toolCallId ?? message.id}):`,
+    `TOOL ${message.toolName ?? "unknown"} (${message.toolCallId ?? message.id})${statusSuffix}:`,
     truncateMiddle(replayContent, MAX_COMPACTION_TOOL_OUTPUT_CHARS),
   ].join("\n");
 }
@@ -328,12 +341,9 @@ async function requestSummary(options: {
   return parseCompletionText(response);
 }
 
+/** Same eligibility as live drop set — terminal history, not done-only (#34). */
 function isCompletedCandidateBlock(block: ReplayBlock, currentTurnId?: string) {
-  if (!block.turnId || block.turnId === currentTurnId || block.isActiveTurn || !block.isCompleted) {
-    return false;
-  }
-
-  return block.messages.every((message) => message.status === "done");
+  return isCompactableReplayBlock(block, currentTurnId);
 }
 
 /**

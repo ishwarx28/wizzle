@@ -225,6 +225,24 @@ function isMessageCompleted(message: Message) {
   return message.status !== "streaming";
 }
 
+/**
+ * Historical turn eligible to leave live replay and enter the anchored summary.
+ * Terminal turns only: done, error, interrupted (and legacy missing status).
+ * Active / streaming turns must stay verbatim (#33 / #34).
+ */
+export function isCompactableReplayBlock(block: ReplayBlock, currentTurnId?: string) {
+  if (!block.turnId || block.isActiveTurn || !block.isCompleted) {
+    return false;
+  }
+
+  if (currentTurnId && block.turnId === currentTurnId) {
+    return false;
+  }
+
+  // Refuse mid-stream leftovers; allow done | error | interrupted | undefined.
+  return block.messages.every((message) => message.status !== "streaming");
+}
+
 function canReuseTurnSummary(block: ReplayBlock, summary: PersistedTurnSummaryRecord | null) {
   if (!summary || !block.turnId) {
     return false;
@@ -507,10 +525,8 @@ export function selectReplayHistoryWithinBudget(options: {
     }
 
     const tokens = estimateBlock(block).tokens;
-    const isCompactable =
-      Boolean(block.turnId) && block.isCompleted && !block.isActiveTurn;
 
-    if (isCompactable) {
+    if (isCompactableReplayBlock(block, options.currentTurnId)) {
       compactableCandidates.push({ block, tokens });
     } else {
       requiredCandidates.push({ block, tokens });

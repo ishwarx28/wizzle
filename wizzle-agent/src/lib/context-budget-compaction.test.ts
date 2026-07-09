@@ -9,10 +9,12 @@ import type { Message } from "../types/workspace.ts";
 const {
   buildReplayBlocks,
   estimateConversationTokens,
+  isCompactableReplayBlock,
   selectReplayHistoryWithinBudget,
 } = await import("./context-budget.ts");
 const {
   COMPACTION_SYSTEM_PROMPT,
+  buildCompactionHistoryText,
   estimateCompactionRequestTokens,
   selectOldestCompactionBatch,
 } = await import("./agent/compaction.ts");
@@ -188,6 +190,115 @@ function main() {
     afterPartial.droppedTurnIds.length === 0 || afterPartial.droppedTurnIds[0] === turnB,
     "next oldest non-compacted is first to drop",
   );
+
+  // --- #34: interrupted / error historical turns are compactable and batchable ---
+  const turnInterrupted = "turn-interrupted";
+  const turnError = "turn-error";
+  const interruptedHistory: Message[] = [
+    {
+      ...makeUserMessage({
+        id: "u-int",
+        turnId: turnInterrupted,
+        content: pad("INT", 500),
+      }),
+      status: "done",
+    },
+    {
+      ...makeAssistantMessage({
+        id: "a-int",
+        turnId: turnInterrupted,
+        content: pad("INTA", 500),
+      }),
+      status: "interrupted",
+    },
+    {
+      ...makeUserMessage({
+        id: "u-err",
+        turnId: turnError,
+        content: pad("ERR", 500),
+      }),
+      status: "done",
+    },
+    {
+      ...makeAssistantMessage({
+        id: "a-err",
+        turnId: turnError,
+        content: pad("ERRA", 500),
+      }),
+      status: "error",
+    },
+    makeUserMessage({ id: "u-act2", turnId: turnActive, content: pad("ACT", 200) }),
+  ];
+
+  const interruptedBlocks = buildReplayBlocks(interruptedHistory, turnActive);
+  const interruptedBlock = interruptedBlocks.find((block) => block.turnId === turnInterrupted);
+  const errorBlock = interruptedBlocks.find((block) => block.turnId === turnError);
+  assert(interruptedBlock, "interrupted block exists");
+  assert(errorBlock, "error block exists");
+  assert(
+    isCompactableReplayBlock(interruptedBlock, turnActive),
+    "interrupted turn is compactable for live drop",
+  );
+  assert(isCompactableReplayBlock(errorBlock, turnActive), "error turn is compactable for live drop");
+
+  const interruptedSelection = selectReplayHistoryWithinBudget({
+    currentTurnId: turnActive,
+    history: interruptedHistory,
+    maxContext: 3_500,
+    maxOutputTokens: 500,
+    modelCapabilities: ["text"],
+    previewFileMap: new Map(),
+    systemPrompt: pad("SYS", 200),
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "bash",
+          description: pad("tool-desc", 300),
+          parameters: { type: "object", properties: {} },
+        },
+      },
+    ],
+  });
+  assert(
+    interruptedSelection.droppedTurnIds.includes(turnInterrupted),
+    "interrupted turn can be dropped for live budget",
+  );
+  assert(
+    interruptedSelection.droppedTurnIds.includes(turnError) ||
+      interruptedSelection.droppedTurnIds[0] === turnInterrupted,
+    "error/interrupted turns participate in drop order",
+  );
+
+  const interruptedBatch = selectOldestCompactionBatch({
+    blocks: interruptedBlocks,
+    candidateTurnIds: interruptedSelection.droppedTurnIds,
+    currentTurnId: turnActive,
+    maxContext: 128_000,
+    maxOutputTokens: 8_192,
+    previousContext: null,
+    previewFileMap: new Map(),
+    tokenLimit: 5_120,
+  });
+  assert(interruptedBatch.length > 0, "batch includes terminal non-done history (#34)");
+  assert(
+    interruptedBatch.every((turnId) => interruptedSelection.droppedTurnIds.includes(turnId)),
+    "batch only uses live-dropped candidates (no silent omit)",
+  );
+  // Every live-dropped id must be batchable (same eligibility) so agent-runner can compact them.
+  for (const turnId of interruptedSelection.droppedTurnIds) {
+    const block = interruptedBlocks.find((entry) => entry.turnId === turnId);
+    assert(block && isCompactableReplayBlock(block, turnActive), `dropped ${turnId} must be batchable`);
+  }
+
+  const historyText = buildCompactionHistoryText(
+    interruptedBlocks
+      .filter((block) => block.turnId === turnInterrupted || block.turnId === turnError)
+      .flatMap((block) => block.messages),
+    new Map(),
+  );
+  assert(historyText.includes("[status=interrupted]"), "summary text marks interrupted");
+  assert(historyText.includes("[status=error]"), "summary text marks error");
 
   console.log("context-budget-compaction tests passed");
 }
