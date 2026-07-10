@@ -7,6 +7,10 @@ import {
   type ProxyToolDefinition,
 } from "./chat-stream";
 import {
+  extractUserAndFinalMessages,
+  MAX_REINFLATED_COMPACTED_TURNS,
+} from "./agent/context-pressure";
+import {
   resolveCompactedContextTokens,
   resolveHealthyContextPercent,
   resolveOutputReservedPercent,
@@ -66,6 +70,8 @@ export type ReplaySelectionResult = {
   droppedTurnIds: string[];
   estimatedTokens: number;
   messages: Message[];
+  /** Compacted turns reinflated as user+final only (newest-fit residual budget). */
+  reinflatedTurnIds: string[];
 };
 
 export type TurnSummaryBuildResult = PersistedTurnSummaryRecord | null;
@@ -84,6 +90,10 @@ export class ReplayBudgetError extends Error {
     this.name = "ReplayBudgetError";
     this.code = code;
   }
+}
+
+export function isReplayBudgetError(error: unknown): error is ReplayBudgetError {
+  return error instanceof ReplayBudgetError;
 }
 
 export function estimateTextTokens(
@@ -570,9 +580,26 @@ export function selectReplayHistoryWithinBudget(options: {
     return true;
   });
 
-  const estimatedTokens =
+  let estimatedTokens =
     fixedLiveTokens +
     includedBlocks.reduce((total, block) => total + estimateBlock(block).tokens, 0);
+
+  // Residual budget: reinflate up to last N compacted turns as user + final only.
+  // Summary stays unchanged (intentional shallow overlap). See compacting-current-turn.md.
+  const reinflate = selectReinflatedCompactedTurns({
+    blocks,
+    compactedTurnIds,
+    estimateMessages: (messages) =>
+      estimateChatMessagesTokens(
+        buildChatMessages(messages, options.previewFileMap, options.modelCapabilities, {
+          duplicateReadMessageIds,
+        }),
+        tokenizerKind,
+      ),
+    residualTokens: budget.inputBudget - estimatedTokens,
+  });
+
+  estimatedTokens += reinflate.tokens;
 
   return {
     blocks,
@@ -580,8 +607,64 @@ export function selectReplayHistoryWithinBudget(options: {
     compactedSummaryTokens,
     droppedTurnIds,
     estimatedTokens,
-    messages: includedBlocks.flatMap((block) => block.messages),
+    messages: [...reinflate.messages, ...includedBlocks.flatMap((block) => block.messages)],
+    reinflatedTurnIds: reinflate.turnIds,
   } satisfies ReplaySelectionResult;
+}
+
+/**
+ * Newest compacted turns first for fitting; emit chronological user+final pairs.
+ * Skip turns without a usable final; stop when the next candidate does not fit.
+ */
+export function selectReinflatedCompactedTurns(options: {
+  blocks: ReplayBlock[];
+  compactedTurnIds: ReadonlySet<string>;
+  estimateMessages: (messages: Message[]) => number;
+  maxTurns?: number;
+  residualTokens: number;
+}): { messages: Message[]; tokens: number; turnIds: string[] } {
+  const maxTurns = options.maxTurns ?? MAX_REINFLATED_COMPACTED_TURNS;
+  if (options.residualTokens <= 0 || maxTurns < 1 || options.compactedTurnIds.size === 0) {
+    return { messages: [], tokens: 0, turnIds: [] };
+  }
+
+  const compactedBlocks = options.blocks.filter(
+    (block) => block.turnId && options.compactedTurnIds.has(block.turnId),
+  );
+  // Newest first among last maxTurns candidates in history order.
+  const newestFirst = compactedBlocks.slice(-maxTurns).reverse();
+
+  const selectedPairs: Message[][] = [];
+  const selectedTurnIds: string[] = [];
+  let remaining = options.residualTokens;
+  let usedTokens = 0;
+
+  for (const block of newestFirst) {
+    const pair = extractUserAndFinalMessages(block.messages);
+    if (pair.length === 0) {
+      continue;
+    }
+
+    const tokens = options.estimateMessages(pair);
+    if (tokens > remaining) {
+      break;
+    }
+
+    selectedPairs.push(pair);
+    selectedTurnIds.push(block.turnId!);
+    remaining -= tokens;
+    usedTokens += tokens;
+  }
+
+  // Restore chronological order (oldest reinflated first).
+  selectedPairs.reverse();
+  selectedTurnIds.reverse();
+
+  return {
+    messages: selectedPairs.flat(),
+    tokens: usedTokens,
+    turnIds: selectedTurnIds,
+  };
 }
 
 function buildTurnSummaryEstimate(

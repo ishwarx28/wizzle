@@ -4,7 +4,7 @@
  * mark the whole turn as a hard error.
  */
 
-export type ForcedFinalKind = "after_tools" | "max_steps";
+export type ForcedFinalKind = "after_tools" | "max_steps" | "context_pressure";
 
 export type ForcedFinalOutcome =
   | { kind: "ok"; content: string }
@@ -26,6 +26,23 @@ export function buildForcedFinalFallbackText(options: {
   kind: ForcedFinalKind;
   reason: "empty" | "failed";
 }): string {
+  if (options.kind === "context_pressure") {
+    if (options.reason === "failed") {
+      return [
+        "Context filled up during this turn.",
+        "Tool work from this turn is kept.",
+        `Generating a brief status failed: ${options.errorMessage ?? "unknown error"}.`,
+        "Continuing after compaction if possible.",
+      ].join(" ");
+    }
+
+    return [
+      "Context filled up during this turn.",
+      "Tool work from this turn is kept, but the model returned an empty brief status.",
+      "Continuing after compaction if possible.",
+    ].join(" ");
+  }
+
   if (options.kind === "max_steps") {
     if (options.reason === "failed") {
       return [

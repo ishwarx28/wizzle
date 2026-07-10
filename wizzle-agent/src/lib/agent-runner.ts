@@ -23,6 +23,13 @@ import {
   type ForcedFinalOutcome,
 } from "./agent/forced-final";
 import {
+  CONTEXT_PRESSURE_FINAL_NUDGE,
+  CONTEXT_PRESSURE_SYSTEM_PROMPT,
+  shouldEnterContextPressure,
+  stripToolRoleMessages,
+  type WorkspaceAgentRunResult,
+} from "./agent/context-pressure";
+import {
   buildCompactionFailureUserMessage,
   CompactionFailureError,
   isCompactionFailureError,
@@ -45,6 +52,7 @@ import {
 import {
   buildReplayBlocks,
   buildPromptTokenCacheKeyData,
+  isReplayBudgetError,
   selectReplayHistoryWithinBudget,
 } from "./context-budget";
 import type {
@@ -295,7 +303,11 @@ export async function runWorkspaceAgent(options: {
     toolDefTokens: number;
     toolDefsHash: string;
   }) => Promise<void> | void;
-  onTurnFinished: (payload: { status: "done" | "error" | "interrupted"; turnId: string }) => void;
+  onTurnFinished: (payload: {
+    finishReason?: WorkspaceAgentRunResult["finishReason"];
+    status: "done" | "error" | "interrupted";
+    turnId: string;
+  }) => void;
   compactedContext?: CompactedContextRecord | null;
   maxContextTokens?: number;
   modelCapabilities: ModelCapability[];
@@ -320,7 +332,7 @@ export async function runWorkspaceAgent(options: {
   turnSummaries?: PersistedTurnSummaryRecord[];
   turnId: string;
   tokenizerKind?: string | null;
-}) {
+}): Promise<WorkspaceAgentRunResult> {
   const maxAgentSteps = resolveMaxAgentSteps();
 
   frontendLogger.info("frontend.agent", "run_started", {
@@ -365,34 +377,40 @@ export async function runWorkspaceAgent(options: {
   const replayEstimateCache = new Map<string, { replayMessageCount: number; tokens: number }>();
   const conversationHistory = [...options.history];
   let compactedContext = options.compactedContext ?? null;
-  const selectConversation = () =>
+  const tokenizerKind = options.selectedModel.tokenizerKind ?? options.tokenizerKind;
+
+  const selectConversation = (selectOptions?: {
+    history?: Message[];
+    systemPrompt?: string;
+    tools?: typeof tools;
+  }) =>
     selectReplayHistoryWithinBudget({
       cachedEstimateByBlockId: replayEstimateCache,
       cacheKeyData: promptCacheKeyData,
       compactedContext,
       currentTurnId: options.turnId,
-      history: conversationHistory,
+      history: selectOptions?.history ?? conversationHistory,
       maxContext: options.selectedModel.maxContext,
       maxOutputTokens: options.selectedModel.maxOutputTokens,
       modelCapabilities: options.modelCapabilities,
       previewFileMap: options.previewFileMap,
-      systemPrompt,
-      tokenizerKind: options.selectedModel.tokenizerKind ?? options.tokenizerKind,
-      tools,
+      systemPrompt: selectOptions?.systemPrompt ?? systemPrompt,
+      tokenizerKind,
+      tools: selectOptions?.tools ?? tools,
       turnSummaries: options.turnSummaries,
     });
 
-  const rebuildConversation = async () => {
-    let selection = selectConversation();
-
+  const compactDroppedTurns = async (
+    selection: ReturnType<typeof selectConversation>,
+    historyForBlocks: Message[],
+    selectOptions?: {
+      history?: Message[];
+      systemPrompt?: string;
+      tools?: typeof tools;
+    },
+  ) => {
     if (selection.droppedTurnIds.length === 0) {
-      return buildConversation({
-        compactedContext,
-        history: selection.messages,
-        modelCapabilities: options.modelCapabilities,
-        previewFileMap: options.previewFileMap,
-        systemPrompt,
-      });
+      return selection;
     }
 
     frontendLogger.info("frontend.agent", "compaction_started", {
@@ -405,23 +423,29 @@ export async function runWorkspaceAgent(options: {
 
     try {
       let compactedThisRebuild = false;
+      let nextSelection = selection;
+      const reselect = () =>
+        selectConversation({
+          ...selectOptions,
+          history: historyForBlocks,
+        });
 
       for (let pass = 0; pass < MAX_COMPACTION_PASSES; pass += 1) {
-        if (selection.droppedTurnIds.length === 0) {
+        if (nextSelection.droppedTurnIds.length === 0) {
           break;
         }
 
-        const blocks = buildReplayBlocks(conversationHistory, options.turnId);
+        const blocks = buildReplayBlocks(historyForBlocks, options.turnId);
         const batchTurnIds = selectOldestCompactionBatch({
           blocks,
-          candidateTurnIds: selection.droppedTurnIds,
+          candidateTurnIds: nextSelection.droppedTurnIds,
           currentTurnId: options.turnId,
           maxContext: options.selectedModel.maxContext,
           maxOutputTokens: options.selectedModel.maxOutputTokens,
           previousContext: compactedContext,
           previewFileMap: options.previewFileMap,
-          tokenLimit: selection.budget.compactedContextTokens,
-          tokenizerKind: options.selectedModel.tokenizerKind ?? options.tokenizerKind,
+          tokenLimit: nextSelection.budget.compactedContextTokens,
+          tokenizerKind,
         });
 
         if (batchTurnIds.length === 0) {
@@ -430,7 +454,7 @@ export async function runWorkspaceAgent(options: {
 
         frontendLogger.info("frontend.agent", "compaction_pass", {
           batchTurnCount: batchTurnIds.length,
-          droppedTurnCount: selection.droppedTurnIds.length,
+          droppedTurnCount: nextSelection.droppedTurnIds.length,
           pass,
           turnIdLength: options.turnId.length,
         });
@@ -444,7 +468,7 @@ export async function runWorkspaceAgent(options: {
           previousContext: compactedContext,
           projectId: options.projectId,
           previewFileMap: options.previewFileMap,
-          tokenLimit: selection.budget.compactedContextTokens,
+          tokenLimit: nextSelection.budget.compactedContextTokens,
         });
 
         if (!nextCompactedContext) {
@@ -454,19 +478,19 @@ export async function runWorkspaceAgent(options: {
         compactedThisRebuild = true;
         compactedContext = nextCompactedContext;
         await options.onCompactedContext?.(nextCompactedContext);
-        selection = selectConversation();
+        nextSelection = reselect();
 
         frontendLogger.info("frontend.agent", "compaction_pass_finished", {
           compactedTurnCount: nextCompactedContext.compactedTurnIds.length,
-          remainingDroppedTurnCount: selection.droppedTurnIds.length,
+          remainingDroppedTurnCount: nextSelection.droppedTurnIds.length,
           summaryTokens: nextCompactedContext.tokens,
           turnIdLength: options.turnId.length,
         });
       }
 
-      if (selection.droppedTurnIds.length > 0) {
+      if (nextSelection.droppedTurnIds.length > 0) {
         frontendLogger.error("frontend.agent", "compaction_incomplete", {
-          remainingDroppedTurnCount: selection.droppedTurnIds.length,
+          remainingDroppedTurnCount: nextSelection.droppedTurnIds.length,
           turnIdLength: options.turnId.length,
         });
         await options.onCompactionEnded?.("failed");
@@ -488,6 +512,8 @@ export async function runWorkspaceAgent(options: {
           "Could not free enough context by compacting older turns. Try a larger-context model or start a new chat.",
         );
       }
+
+      return nextSelection;
     } catch (error) {
       if (isCompactionFailureError(error)) {
         throw error;
@@ -498,6 +524,16 @@ export async function runWorkspaceAgent(options: {
       });
       await options.onCompactionEnded?.("failed");
       throw toCompactionFailureError(error);
+    }
+  };
+
+  const rebuildConversation = async () => {
+    let selection = selectConversation();
+
+    if (selection.droppedTurnIds.length > 0) {
+      selection = await compactDroppedTurns(selection, conversationHistory, {
+        history: conversationHistory,
+      });
     }
 
     return buildConversation({
@@ -525,39 +561,187 @@ export async function runWorkspaceAgent(options: {
       text: notice,
     });
     options.onAssistantStreamFinished(noticeMessage.id, "final");
-    options.onTurnFinished({ status: "done", turnId: options.turnId });
+    options.onTurnFinished({ finishReason: "done", status: "done", turnId: options.turnId });
   };
 
-  const rebuildConversationForTurn = async () => {
+  const buildContextPressureConversation = async (): Promise<ChatRequestMessage[]> => {
+    const shortSystem = CONTEXT_PRESSURE_SYSTEM_PROMPT;
+
+    const tryBuild = async (history: Message[]) => {
+      const selectOptions = {
+        history,
+        systemPrompt: shortSystem,
+        tools: [] as typeof tools,
+      };
+      let selection = selectConversation(selectOptions);
+      if (selection.droppedTurnIds.length > 0) {
+        selection = await compactDroppedTurns(selection, history, selectOptions);
+      }
+      return buildConversation({
+        compactedContext,
+        history: selection.messages,
+        modelCapabilities: options.modelCapabilities,
+        previewFileMap: options.previewFileMap,
+        systemPrompt: shortSystem,
+      });
+    };
+
     try {
-      return await rebuildConversation();
+      return await tryBuild(conversationHistory);
     } catch (error) {
+      if (!isReplayBudgetError(error) && !isCompactionFailureError(error)) {
+        throw error;
+      }
+      frontendLogger.info("frontend.agent", "context_pressure_retry_without_tools", {
+        turnIdLength: options.turnId.length,
+      });
+    }
+
+    const slimHistory = stripToolRoleMessages(conversationHistory);
+    try {
+      return await tryBuild(slimHistory);
+    } catch (error) {
+      if (!isReplayBudgetError(error) && !isCompactionFailureError(error)) {
+        throw error;
+      }
+      frontendLogger.info("frontend.agent", "context_pressure_retry_active_only", {
+        turnIdLength: options.turnId.length,
+      });
+    }
+
+    const activeOnly = slimHistory.filter((message) => message.turnId === options.turnId);
+    return buildConversation({
+      compactedContext,
+      history: activeOnly.length > 0 ? activeOnly : slimHistory.slice(-6),
+      modelCapabilities: options.modelCapabilities,
+      previewFileMap: options.previewFileMap,
+      systemPrompt: shortSystem,
+    });
+  };
+
+  const runContextPressureFinal = async (): Promise<WorkspaceAgentRunResult> => {
+    frontendLogger.info("frontend.agent", "context_pressure_started", {
+      historyCount: conversationHistory.length,
+      turnIdLength: options.turnId.length,
+    });
+
+    let pressureConversation: ChatRequestMessage[];
+    try {
+      pressureConversation = await buildContextPressureConversation();
+    } catch (error) {
+      frontendLogger.error("frontend.agent", "context_pressure_build_failed", {
+        error,
+        turnIdLength: options.turnId.length,
+      });
+      // Soft settle with fallback text so tools are not lost as a hard error.
+      const noticeMessage = createAssistantMessage(options.turnId);
+      options.onAssistantCreated(noticeMessage);
+      options.onAssistantChunk({
+        kind: "content",
+        messageId: noticeMessage.id,
+        text: resolveForcedFinalDisplayContent({
+          error,
+          kind: "context_pressure",
+          streamedContent: "",
+        }).content,
+      });
+      options.onAssistantStreamFinished(noticeMessage.id, "final");
+      options.onTurnFinished({
+        finishReason: "context_pressure",
+        status: "done",
+        turnId: options.turnId,
+      });
+      return { finishReason: "context_pressure" };
+    }
+
+    const finalOutcome = await requestForcedFinalResponse({
+      chatId: options.chatId,
+      conversation: pressureConversation,
+      forcedFinalKind: "context_pressure",
+      modelId: options.modelId,
+      onAssistantChunk: options.onAssistantChunk,
+      onAssistantCreated: options.onAssistantCreated,
+      onReasoningFinished: options.onReasoningFinished,
+      onAssistantStreamFinished: options.onAssistantStreamFinished,
+      projectId: options.projectId,
+      prompt: CONTEXT_PRESSURE_FINAL_NUDGE,
+      reasoningLevel: options.reasoningLevel,
+      step: 0,
+      turnId: options.turnId,
+    });
+
+    frontendLogger.info("frontend.agent", "context_pressure_finished", {
+      contentLength: finalOutcome.content.length,
+      outcomeKind: finalOutcome.kind,
+      turnIdLength: options.turnId.length,
+      usedFallback: finalOutcome.kind !== "ok",
+    });
+
+    options.onTurnFinished({
+      finishReason: "context_pressure",
+      status: "done",
+      turnId: options.turnId,
+    });
+    return { finishReason: "context_pressure" };
+  };
+
+  type RebuildOutcome =
+    | { kind: "conversation"; conversation: ChatRequestMessage[] }
+    | { kind: "context_pressure" }
+    | { kind: "settled" };
+
+  const rebuildConversationForTurn = async (): Promise<RebuildOutcome> => {
+    try {
+      const conversation = await rebuildConversation();
+      return { kind: "conversation", conversation };
+    } catch (error) {
+      if (
+        isReplayBudgetError(error) &&
+        shouldEnterContextPressure({ code: error.code, usedToolsInTurn })
+      ) {
+        frontendLogger.info("frontend.agent", "context_pressure_triggered", {
+          code: error.code,
+          turnIdLength: options.turnId.length,
+        });
+        return { kind: "context_pressure" };
+      }
+
       if (!isCompactionFailureError(error)) {
         throw error;
       }
 
       if (resolveCompactionFailureAction({ usedToolsInTurn }) === "soft_settle_done") {
         settleSoftAfterToolsForCompactionFailure(error);
-        return null;
+        return { kind: "settled" };
       }
 
       // Pre-tools: hard fail — never send with unsummarized drops (#33 / #35).
-      options.onTurnFinished({ status: "error", turnId: options.turnId });
+      options.onTurnFinished({ finishReason: "error", status: "error", turnId: options.turnId });
       throw error;
     }
   };
 
-  let conversation = await rebuildConversationForTurn();
-  if (!conversation) {
-    return;
+  let conversation: ChatRequestMessage[];
+  {
+    const initial = await rebuildConversationForTurn();
+    if (initial.kind === "context_pressure") {
+      return runContextPressureFinal();
+    }
+    if (initial.kind === "settled") {
+      return { finishReason: "done" };
+    }
+    conversation = initial.conversation;
   }
 
   for (let step = 0; step < maxAgentSteps; step += 1) {
     const rebuilt = await rebuildConversationForTurn();
-    if (!rebuilt) {
-      return;
+    if (rebuilt.kind === "context_pressure") {
+      return runContextPressureFinal();
     }
-    conversation = rebuilt;
+    if (rebuilt.kind === "settled") {
+      return { finishReason: "done" };
+    }
+    conversation = rebuilt.conversation;
     frontendLogger.info("frontend.agent", "step_started", {
       conversationCount: conversation.length,
       step,
@@ -594,7 +778,7 @@ export async function runWorkspaceAgent(options: {
         step,
         turnIdLength: options.turnId.length,
       });
-      options.onTurnFinished({ status: "error", turnId: options.turnId });
+      options.onTurnFinished({ finishReason: "error", status: "error", turnId: options.turnId });
       throw error;
     }
 
@@ -623,7 +807,7 @@ export async function runWorkspaceAgent(options: {
         step,
         turnIdLength: options.turnId.length,
       });
-      options.onTurnFinished({ status: "error", turnId: options.turnId });
+      options.onTurnFinished({ finishReason: "error", status: "error", turnId: options.turnId });
       throw new Error(
         "The model returned tool calls that could not be executed (missing or invalid tool names).",
       );
@@ -669,8 +853,8 @@ export async function runWorkspaceAgent(options: {
         turnIdLength: options.turnId.length,
       });
       // Tools already ran: forced-final failure/empty still settles done (#24/#25).
-      options.onTurnFinished({ status: "done", turnId: options.turnId });
-      return;
+      options.onTurnFinished({ finishReason: "done", status: "done", turnId: options.turnId });
+      return { finishReason: "done" };
     }
 
     // #15: attach tool_call parts before finishing the assistant stream as working.
@@ -695,10 +879,13 @@ export async function runWorkspaceAgent(options: {
     });
     {
       const rebuiltAfterToolsIntent = await rebuildConversationForTurn();
-      if (!rebuiltAfterToolsIntent) {
-        return;
+      if (rebuiltAfterToolsIntent.kind === "context_pressure") {
+        return runContextPressureFinal();
       }
-      conversation = rebuiltAfterToolsIntent;
+      if (rebuiltAfterToolsIntent.kind === "settled") {
+        return { finishReason: "done" };
+      }
+      conversation = rebuiltAfterToolsIntent.conversation;
     }
 
     for (const item of toolCallItems) {
@@ -846,14 +1033,21 @@ export async function runWorkspaceAgent(options: {
       );
       {
         const rebuiltAfterTool = await rebuildConversationForTurn();
-        if (!rebuiltAfterTool) {
-          return;
+        if (rebuiltAfterTool.kind === "context_pressure") {
+          return runContextPressureFinal();
         }
-        conversation = rebuiltAfterTool;
+        if (rebuiltAfterTool.kind === "settled") {
+          return { finishReason: "done" };
+        }
+        conversation = rebuiltAfterTool.conversation;
       }
 
       if (toolPayload.status === "interrupted") {
-        options.onTurnFinished({ status: "interrupted", turnId: options.turnId });
+        options.onTurnFinished({
+          finishReason: "interrupted",
+          status: "interrupted",
+          turnId: options.turnId,
+        });
         throw new Error(INTERRUPTED_WORKSPACE_CHAT_ERROR);
       }
     }
@@ -889,11 +1083,11 @@ export async function runWorkspaceAgent(options: {
     });
 
     // Max steps after tools: always done. Empty/failed final uses fallback text (#25/#60).
-    options.onTurnFinished({ status: "done", turnId: options.turnId });
-    return;
+    options.onTurnFinished({ finishReason: "done", status: "done", turnId: options.turnId });
+    return { finishReason: "done" };
   }
 
-  options.onTurnFinished({ status: "error", turnId: options.turnId });
+  options.onTurnFinished({ finishReason: "error", status: "error", turnId: options.turnId });
   throw new Error(
     "The agent reached the maximum number of tool steps for this turn before producing a final response.",
   );

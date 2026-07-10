@@ -33,10 +33,15 @@ import {
   filterCompactedTurnIds,
 } from "../lib/session-edit-truncate";
 import {
+  cancelQueuedContextContinues,
   drainComposerSessionQueue,
+  enqueueContextContinue,
   migrateComposerSessionQueue,
   rekeyComposerSessionQueue,
 } from "../lib/composer-session-queue";
+import {
+  CONTEXT_CONTINUE_PROMPT,
+} from "../lib/agent/context-pressure";
 import { createDurablePersistFailureReporter } from "../lib/durable-persist-failure";
 import { getErrorMessage } from "../lib/settle-turn-persist";
 import {
@@ -1288,6 +1293,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     }
 
     rejectPendingToolApprovalForSession(sessionId, true);
+    // Do not auto-continue after the user stops a pressure-settled run.
+    cancelQueuedContextContinues(sessionId);
     set((current) => {
       const pendingToolApprovalsBySessionId = { ...current.pendingToolApprovalsBySessionId };
       delete pendingToolApprovalsBySessionId[sessionId];
@@ -3033,7 +3040,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       );
       await activateTokenizer(effectiveTokenizer.localPath);
 
-      await runWorkspaceAgent({
+      const agentRunResult = await runWorkspaceAgent({
         chatId: targetSessionId,
         // Exclude pre-send Working… placeholders from model context (I-15).
         history: session.messages.filter((message) => !isPendingAssistantPlaceholder(message)),
@@ -3183,9 +3190,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           removeSendingSessionId(targetSessionId, state.sendingSessionIds),
         ),
       }));
+      // After context pressure: one internal continue ahead of any user queue.
+      // Standard compaction for the oversized turn runs on the continue send.
+      if (agentRunResult.finishReason === "context_pressure") {
+        enqueueContextContinue(targetSessionId, CONTEXT_CONTINUE_PROMPT);
+        frontendLogger.info("frontend.workspace", "context_continue_enqueued", {
+          sessionIdLength: targetSessionId.length,
+          turnIdLength: turnId.length,
+        });
+      }
       requestComposerQueueDrain(targetSessionId);
       frontendLogger.info("frontend.workspace", "agent_run_completed", {
         finalizeError: persistResult?.finalizeError ?? null,
+        finishReason: agentRunResult.finishReason,
         messageErrorCount: persistResult?.messageErrors.length ?? 0,
         sessionIdLength: targetSessionId.length,
         turnIdLength: turnId.length,

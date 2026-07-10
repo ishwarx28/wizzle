@@ -1,4 +1,3 @@
-import { loadComposerState, saveComposerState } from "./local-workspace";
 import type { PreviewFile } from "../types/workspace";
 
 /**
@@ -8,9 +7,14 @@ import type { PreviewFile } from "../types/workspace";
 
 export type ComposerQueueItemStatus = "queued" | "sending" | "failed";
 
+/** Internal auto-continue after context pressure; user items are default. */
+export type ComposerQueueItemKind = "user" | "context_continue";
+
 export type ComposerQueueItem = {
   attachments: PreviewFile[];
   id: string;
+  /** Defaults to "user" when omitted (persisted / legacy items). */
+  kind?: ComposerQueueItemKind;
   prompt: string;
   status: ComposerQueueItemStatus;
 };
@@ -75,6 +79,15 @@ export function subscribeComposerSessionQueue(sessionId: string, onStoreChange: 
 }
 
 export function selectNextQueuedComposerItem(items: readonly ComposerQueueItem[]) {
+  // Prefer an internal context-continue so it runs ahead of user-queued prompts.
+  const continueItem = items.find(
+    (item) =>
+      (item.status ?? "queued") === "queued" && item.kind === "context_continue",
+  );
+  if (continueItem) {
+    return continueItem;
+  }
+
   return items.find((item) => (item.status ?? "queued") === "queued") ?? null;
 }
 
@@ -118,6 +131,7 @@ export function applyComposerQueueSendResult(
 
 export function createComposerQueueItem(options: {
   attachments: PreviewFile[];
+  kind?: ComposerQueueItemKind;
   prompt: string;
 }): ComposerQueueItem {
   const id =
@@ -128,13 +142,47 @@ export function createComposerQueueItem(options: {
   return {
     attachments: options.attachments,
     id,
+    kind: options.kind ?? "user",
     prompt: options.prompt,
     status: "queued",
   };
 }
 
+/**
+ * Enqueue at most one context-continue at the front. Replaces any other queued
+ * context_continue items so pressure does not stack duplicate continues.
+ */
+export function enqueueContextContinue(
+  sessionId: string,
+  prompt: string,
+): ComposerQueueItem {
+  const item = createComposerQueueItem({
+    attachments: [],
+    kind: "context_continue",
+    prompt,
+  });
+  const existing = getComposerSessionQueue(sessionId).filter(
+    (entry) => entry.kind !== "context_continue" || entry.status === "sending",
+  );
+  setComposerSessionQueue(sessionId, [item, ...existing]);
+  void persistQueueOnly(sessionId, getComposerSessionQueue(sessionId));
+  return item;
+}
+
+/** Drop queued (not in-flight) context_continue items — e.g. user stop. */
+export function cancelQueuedContextContinues(sessionId: string): ComposerQueueItem[] {
+  const next = getComposerSessionQueue(sessionId).filter(
+    (item) => item.kind !== "context_continue" || item.status === "sending",
+  );
+  setComposerSessionQueue(sessionId, next);
+  void persistQueueOnly(sessionId, next);
+  return next;
+}
+
 async function persistQueueOnly(sessionId: string, items: ComposerQueueItem[]) {
   try {
+    // Dynamic import keeps pure queue unit tests free of Tauri workspace deps.
+    const { loadComposerState, saveComposerState } = await import("./local-workspace");
     const existing = await loadComposerState(sessionId);
     await saveComposerState({
       draftText: existing.draftText ?? "",

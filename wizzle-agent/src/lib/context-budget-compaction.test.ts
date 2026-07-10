@@ -10,6 +10,7 @@ const {
   buildReplayBlocks,
   estimateConversationTokens,
   isCompactableReplayBlock,
+  selectReinflatedCompactedTurns,
   selectReplayHistoryWithinBudget,
 } = await import("./context-budget.ts");
 const {
@@ -190,6 +191,70 @@ function main() {
     afterPartial.droppedTurnIds.length === 0 || afterPartial.droppedTurnIds[0] === turnB,
     "next oldest non-compacted is first to drop",
   );
+
+  // --- Residual reinflate: last compacted turns as user+final only ---
+  const reinflateHistory: Message[] = [
+    makeUserMessage({ id: "ru-a", turnId: turnA, content: "issue list please" }),
+    makeAssistantMessage({ id: "ra-a", turnId: turnA, content: "Issues: 1, 2, 3" }),
+    makeUserMessage({ id: "ru-b", turnId: turnB, content: "more" }),
+    makeAssistantMessage({ id: "ra-b", turnId: turnB, content: "Issues: 4, 5" }),
+    makeUserMessage({ id: "ru-c", turnId: turnC, content: "and more" }),
+    makeAssistantMessage({ id: "ra-c", turnId: turnC, content: "Issues: 6" }),
+    makeUserMessage({ id: "ru-d", turnId: turnActive, content: "continue work" }),
+  ];
+  // Insert tool noise into turn A — reinflate must ignore it.
+  reinflateHistory.splice(2, 0, {
+    content: "huge tool dump " + "x".repeat(200),
+    createdAtLabel: "now",
+    id: "tool-a",
+    role: "tool",
+    status: "done",
+    turnId: turnA,
+  });
+
+  const reinflateSelection = selectReplayHistoryWithinBudget({
+    compactedContext: {
+      compactedTurnIds: [turnA, turnB, turnC],
+      summary: "Identified several issues. Goal: keep fixing.",
+      tokens: 40,
+      updatedAtMs: 1,
+    },
+    currentTurnId: turnActive,
+    history: reinflateHistory,
+    maxContext: 128_000,
+    maxOutputTokens: 1_000,
+    modelCapabilities: ["text"],
+    previewFileMap: new Map(),
+    systemPrompt: "sys",
+  });
+  assert(
+    reinflateSelection.reinflatedTurnIds.length >= 1,
+    "reinflates at least one compacted turn when residual room",
+  );
+  assert(
+    reinflateSelection.reinflatedTurnIds.length <= 5,
+    "cap reinflate at 5",
+  );
+  assert(
+    !reinflateSelection.messages.some((message) => message.role === "tool"),
+    "reinflate excludes tool activity",
+  );
+  assert(
+    reinflateSelection.messages.some((message) => message.content === "Issues: 1, 2, 3"),
+    "reinflated final keeps concrete findings",
+  );
+  assert(
+    reinflateSelection.messages.some((message) => message.turnId === turnActive),
+    "live active turn still present",
+  );
+
+  const reinflateEmpty = selectReinflatedCompactedTurns({
+    blocks: buildReplayBlocks(reinflateHistory, turnActive),
+    compactedTurnIds: new Set([turnA, turnB, turnC]),
+    estimateMessages: () => 10_000,
+    residualTokens: 5,
+  });
+  assert(reinflateEmpty.turnIds.length === 0, "no reinflate when residual too small");
 
   // --- #34: interrupted / error historical turns are compactable and batchable ---
   const turnInterrupted = "turn-interrupted";

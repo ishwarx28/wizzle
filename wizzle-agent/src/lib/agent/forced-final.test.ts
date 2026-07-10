@@ -74,6 +74,21 @@ function main() {
   assert(maxFailed.includes("timeout"), "max steps failed includes error");
   assert(maxFailed.includes("Tool work from this turn is kept"), "max steps keeps tools");
 
+  const pressureEmpty = resolveForcedFinalDisplayContent({
+    kind: "context_pressure",
+    streamedContent: "",
+  });
+  assert(pressureEmpty.kind === "empty", "context pressure empty");
+  assert(pressureEmpty.content.includes("Context filled up"), "pressure empty copy");
+
+  const pressureFailed = buildForcedFinalFallbackText({
+    errorMessage: "timeout",
+    kind: "context_pressure",
+    reason: "failed",
+  });
+  assert(pressureFailed.includes("timeout"), "pressure failed includes error");
+  assert(pressureFailed.includes("Context filled up"), "pressure failed framing");
+
   console.log("forced-final tests passed");
 }
 

@@ -6,7 +6,9 @@ export {};
 
 const {
   applyComposerQueueSendResult,
+  cancelQueuedContextContinues,
   createComposerQueueItem,
+  enqueueContextContinue,
   markComposerQueueItemStatus,
   rekeyComposerSessionQueue,
   removeComposerQueueItem,
@@ -79,6 +81,32 @@ function main() {
   assert(
     getComposerSessionQueue("session-real").every((item) => item.status === "queued"),
     "sending becomes queued after promote rekey",
+  );
+
+  resetComposerSessionQueuesForTests();
+  const userFirst = createComposerQueueItem({ attachments: [], prompt: "user later" });
+  setComposerSessionQueue("s-continue", [userFirst]);
+  const cont = enqueueContextContinue("s-continue", "Continue previous task");
+  assert(cont.kind === "context_continue", "continue kind");
+  const next = selectNextQueuedComposerItem(getComposerSessionQueue("s-continue"));
+  assert(next?.id === cont.id, "continue selected ahead of user queue");
+  assert(getComposerSessionQueue("s-continue")[0]?.id === cont.id, "continue at front");
+
+  enqueueContextContinue("s-continue", "Continue previous task again");
+  assert(
+    getComposerSessionQueue("s-continue").filter((item) => item.kind === "context_continue")
+      .length === 1,
+    "only one queued continue",
+  );
+
+  cancelQueuedContextContinues("s-continue");
+  assert(
+    getComposerSessionQueue("s-continue").every((item) => item.kind !== "context_continue"),
+    "cancel removes queued continues",
+  );
+  assert(
+    getComposerSessionQueue("s-continue").some((item) => item.prompt === "user later"),
+    "user queue kept after cancel continue",
   );
 
   console.log("composer-session-queue tests passed");
