@@ -21,6 +21,10 @@ pub use types::{
 
 const INTERRUPTED_ERROR: &str = "__WIZZLE_PROVIDER_CHAT_INTERRUPTED__";
 
+pub fn migrate_provider_api_key_encryption() -> Result<usize, String> {
+    repository::migrate_provider_api_key_encryption()
+}
+
 #[derive(Default)]
 pub struct ProviderChatRequestStore {
     active: Mutex<HashMap<String, AbortHandle>>,
@@ -105,7 +109,7 @@ pub async fn complete_provider_chat(
         .clone()
         .unwrap_or_else(|| format!("completion-{}", Uuid::new_v4()));
     let resolved_model = repository::resolve_model(&input.model_uuid)?;
-    let client = reqwest::Client::new();
+    let client = openai_compatible::completion_client()?;
     let (abort_handle, abort_registration) = AbortHandle::new_pair();
 
     request_store.insert(request_id.clone(), abort_handle.clone())?;
@@ -173,7 +177,7 @@ pub async fn stream_provider_chat(
     );
     let request_id = input.request_id.clone();
     let resolved_model = repository::resolve_model(&input.model_uuid)?;
-    let client = reqwest::Client::new();
+    let client = openai_compatible::stream_client()?;
     let (abort_handle, abort_registration) = AbortHandle::new_pair();
 
     request_store.insert(request_id.clone(), abort_handle.clone())?;

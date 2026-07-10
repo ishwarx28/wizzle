@@ -37,7 +37,10 @@ fn model_file_name(model_id: &str) -> String {
     format!("model-{}.json", &digest[..16])
 }
 
-pub fn local_tokenizer_path(provider_id: &str, scope: TokenizerScope<'_>) -> Result<PathBuf, String> {
+pub fn local_tokenizer_path(
+    provider_id: &str,
+    scope: TokenizerScope<'_>,
+) -> Result<PathBuf, String> {
     let dir = provider_tokenizer_dir(provider_id)?;
     Ok(match scope {
         TokenizerScope::Provider => dir.join("provider.json"),
@@ -139,16 +142,13 @@ fn read_local_tokenizer_source(raw_path: &str) -> Result<Vec<u8>, String> {
 }
 
 fn download_tokenizer_url(url: &str) -> Result<Vec<u8>, String> {
-    let parsed =
-        Url::parse(url).map_err(|_| "Tokenizer URL must be a valid URL.".to_string())?;
+    let parsed = Url::parse(url).map_err(|_| "Tokenizer URL must be a valid URL.".to_string())?;
 
     if parsed.scheme() != "https"
         && parsed.host_str() != Some("127.0.0.1")
         && parsed.host_str() != Some("localhost")
     {
-        return Err(
-            "Tokenizer URL must use HTTPS, except localhost development URLs.".to_string(),
-        );
+        return Err("Tokenizer URL must use HTTPS, except localhost development URLs.".to_string());
     }
 
     let client = reqwest::blocking::Client::builder()
@@ -221,7 +221,8 @@ pub fn materialize_tokenizer(
 pub fn clear_tokenizer(provider_id: &str, scope: TokenizerScope<'_>) -> Result<(), String> {
     let path = local_tokenizer_path(provider_id, scope)?;
     if path.exists() {
-        fs::remove_file(&path).map_err(|_| "Could not remove cached tokenizer.json.".to_string())?;
+        fs::remove_file(&path)
+            .map_err(|_| "Could not remove cached tokenizer.json.".to_string())?;
     }
     Ok(())
 }
@@ -287,7 +288,7 @@ pub fn read_tokenizer_asset(path: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_tokenizer_bytes, TokenizerScope, local_tokenizer_path};
+    use super::{local_tokenizer_path, validate_tokenizer_bytes, TokenizerScope};
 
     #[test]
     fn validates_minimal_hf_tokenizer_json() {
@@ -303,10 +304,20 @@ mod tests {
 
     #[test]
     fn model_scope_path_is_stable() {
-        let first = local_tokenizer_path("prov-1", TokenizerScope::Model { model_id: "qwen2.5" })
-            .expect("path");
-        let second = local_tokenizer_path("prov-1", TokenizerScope::Model { model_id: "qwen2.5" })
-            .expect("path");
+        let first = local_tokenizer_path(
+            "prov-1",
+            TokenizerScope::Model {
+                model_id: "qwen2.5",
+            },
+        )
+        .expect("path");
+        let second = local_tokenizer_path(
+            "prov-1",
+            TokenizerScope::Model {
+                model_id: "qwen2.5",
+            },
+        )
+        .expect("path");
         assert_eq!(first, second);
         assert!(first.to_string_lossy().contains("model-"));
     }

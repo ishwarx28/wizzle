@@ -14,7 +14,26 @@ const PROVIDER_RETRY_DELAYS_MS: [u64; MAX_PROVIDER_RETRY_ATTEMPTS] = [250, 1000]
 const OPENAI_API_PREFIX: &str = "/v1";
 const OPENAI_CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
 const OPENAI_MODELS_PATH: &str = "/models";
+const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const PROVIDER_COMPLETION_TIMEOUT: Duration = Duration::from_secs(300);
+const PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const PROVIDER_CATALOG_TIMEOUT: Duration = Duration::from_secs(30);
 pub const PROVIDER_CHAT_CHUNK_EVENT: &str = "provider-chat-chunk";
+
+pub fn completion_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(PROVIDER_CONNECT_TIMEOUT)
+        .timeout(PROVIDER_COMPLETION_TIMEOUT)
+        .build()
+        .map_err(|_| "Could not initialize the provider connection.".to_string())
+}
+
+pub fn stream_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(PROVIDER_CONNECT_TIMEOUT)
+        .build()
+        .map_err(|_| "Could not initialize the provider connection.".to_string())
+}
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -241,6 +260,19 @@ fn endpoint_with_path(endpoint: &str, path: &str) -> String {
     )
 }
 
+fn discovered_model(model_id: &str) -> ProviderModelRecord {
+    ProviderModelRecord {
+        capabilities: Vec::new(),
+        display_name: None,
+        max_context: None,
+        max_output_tokens: None,
+        model_id: model_id.to_string(),
+        reasoning_levels: Vec::new(),
+        tokenizer_json: None,
+        tokenizer_kind: None,
+    }
+}
+
 /// Normalize reasoning level labels into OpenAI-compatible `reasoning_effort` values.
 /// Accepted levels: low, medium, high, xhigh, max (and case/whitespace variants).
 pub fn resolve_reasoning_effort(level: &str) -> Option<String> {
@@ -373,9 +405,9 @@ fn resolve_stream_completion(
     if let Some(reason) = finish_reason {
         match reason {
             "stop" | "tool_calls" | "function_call" | "end_turn" | "length" => Ok(()),
-            "content_filter" => Err(
-                "The provider blocked the response (content filter).".to_string(),
-            ),
+            "content_filter" => {
+                Err("The provider blocked the response (content filter).".to_string())
+            }
             other => {
                 if saw_done {
                     Ok(())
@@ -480,14 +512,8 @@ pub async fn complete_chat(
     let mut attempt = 0;
 
     loop {
-        match post_chat_completion(
-            client,
-            resolved_model,
-            body.clone(),
-            false,
-            reasoning_level,
-        )
-        .await
+        match post_chat_completion(client, resolved_model, body.clone(), false, reasoning_level)
+            .await
         {
             Ok(response) => {
                 return response
@@ -516,34 +542,35 @@ pub async fn stream_chat(
     let mut emitted_any_chunks = false;
 
     'retry: loop {
-        let response = match post_chat_completion(
-            client,
-            resolved_model,
-            body.clone(),
-            true,
-            reasoning_level,
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(error)
-                if error.retryable
-                    && attempt < MAX_PROVIDER_RETRY_ATTEMPTS
-                    && !emitted_any_chunks =>
+        let response =
+            match post_chat_completion(client, resolved_model, body.clone(), true, reasoning_level)
+                .await
             {
-                attempt += 1;
-                wait_before_retry(attempt).await;
-                continue 'retry;
-            }
-            Err(error) => return Err(error.message),
-        };
+                Ok(response) => response,
+                Err(error)
+                    if error.retryable
+                        && attempt < MAX_PROVIDER_RETRY_ATTEMPTS
+                        && !emitted_any_chunks =>
+                {
+                    attempt += 1;
+                    wait_before_retry(attempt).await;
+                    continue 'retry;
+                }
+                Err(error) => return Err(error.message),
+            };
 
         let mut buffer = String::new();
         let mut stream = response.bytes_stream();
         let mut saw_done = false;
         let mut finish_reason: Option<String> = None;
 
-        while let Some(item) = stream.next().await {
+        loop {
+            let item = tokio::time::timeout(PROVIDER_STREAM_IDLE_TIMEOUT, stream.next())
+                .await
+                .map_err(|_| "Provider stream timed out while waiting for data.".to_string())?;
+            let Some(item) = item else {
+                break;
+            };
             let bytes = match item {
                 Ok(bytes) => bytes,
                 Err(error)
@@ -595,7 +622,11 @@ pub async fn stream_chat(
 pub async fn fetch_models(
     provider: &ProviderSecretRecord,
 ) -> Result<Vec<ProviderModelRecord>, String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .connect_timeout(PROVIDER_CONNECT_TIMEOUT)
+        .timeout(PROVIDER_CATALOG_TIMEOUT)
+        .build()
+        .map_err(|_| "Could not initialize the provider connection.".to_string())?;
     let mut request = client.get(endpoint_with_path(
         &provider.endpoint,
         &format!("{OPENAI_API_PREFIX}{OPENAI_MODELS_PATH}"),
@@ -636,21 +667,7 @@ pub async fn fetch_models(
             continue;
         }
 
-        models.push(ProviderModelRecord {
-            capabilities: vec!["text".to_string()],
-            display_name: None,
-            max_context: 128_000,
-            max_output_tokens: None,
-            model_id: model_id.to_string(),
-            reasoning_levels: vec![
-                "low".to_string(),
-                "medium".to_string(),
-                "high".to_string(),
-                "max".to_string(),
-            ],
-            tokenizer_json: None,
-            tokenizer_kind: Some("heuristic".to_string()),
-        });
+        models.push(discovered_model(model_id));
     }
 
     if models.is_empty() {
@@ -674,10 +691,12 @@ pub async fn fetch_models(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_request_body, extract_finish_reason, map_provider_error, resolve_reasoning_effort,
-        resolve_stream_completion,
+        build_request_body, discovered_model, extract_finish_reason, map_provider_error,
+        resolve_reasoning_effort, resolve_stream_completion,
     };
-    use crate::providers::types::{ProviderModelRecord, ProviderResolvedModel, ProviderSecretRecord};
+    use crate::providers::types::{
+        ProviderModelRecord, ProviderResolvedModel, ProviderSecretRecord,
+    };
     use serde_json::{json, Value};
 
     fn sample_model(reasoning_levels: Vec<String>) -> ProviderResolvedModel {
@@ -685,7 +704,7 @@ mod tests {
             model: ProviderModelRecord {
                 capabilities: vec!["text".to_string()],
                 display_name: None,
-                max_context: 128_000,
+                max_context: Some(128_000),
                 max_output_tokens: None,
                 model_id: "test-model".to_string(),
                 reasoning_levels,
@@ -715,6 +734,17 @@ mod tests {
     }
 
     #[test]
+    fn catalog_model_keeps_unpublished_metadata_unknown() {
+        let model = discovered_model("catalog-id");
+
+        assert!(model.capabilities.is_empty());
+        assert!(model.reasoning_levels.is_empty());
+        assert_eq!(model.max_context, None);
+        assert_eq!(model.max_output_tokens, None);
+        assert_eq!(model.tokenizer_kind, None);
+    }
+
+    #[test]
     fn maps_context_overflow_errors() {
         let error = map_provider_error(
             Some(400),
@@ -729,7 +759,10 @@ mod tests {
     #[test]
     fn resolves_standard_reasoning_levels() {
         assert_eq!(resolve_reasoning_effort("low").as_deref(), Some("low"));
-        assert_eq!(resolve_reasoning_effort("medium").as_deref(), Some("medium"));
+        assert_eq!(
+            resolve_reasoning_effort("medium").as_deref(),
+            Some("medium")
+        );
         assert_eq!(resolve_reasoning_effort("high").as_deref(), Some("high"));
         assert_eq!(resolve_reasoning_effort("xhigh").as_deref(), Some("xhigh"));
         assert_eq!(resolve_reasoning_effort("max").as_deref(), Some("max"));
@@ -761,19 +794,17 @@ mod tests {
             body.get("reasoning_effort").and_then(Value::as_str),
             Some("medium")
         );
-        assert_eq!(body.get("model").and_then(Value::as_str), Some("test-model"));
+        assert_eq!(
+            body.get("model").and_then(Value::as_str),
+            Some("test-model")
+        );
         assert_eq!(body.get("stream").and_then(Value::as_bool), Some(true));
     }
 
     #[test]
     fn skips_reasoning_effort_when_model_has_no_levels() {
         let model = sample_model(vec![]);
-        let body = build_request_body(
-            &model,
-            json!({ "messages": [] }),
-            false,
-            Some("max"),
-        );
+        let body = build_request_body(&model, json!({ "messages": [] }), false, Some("max"));
 
         assert!(body.get("reasoning_effort").is_none());
     }

@@ -79,7 +79,7 @@ pub struct ProviderModelPayload {
     pub id: String,
     pub is_pinned: bool,
     pub last_used_at_ms: Option<u64>,
-    pub max_context: u64,
+    pub max_context: Option<u64>,
     pub max_output_tokens: Option<u64>,
     pub model_id: String,
     pub provider_id: String,
@@ -140,7 +140,7 @@ pub struct ProviderSecretRecord {
 pub struct ProviderModelRecord {
     pub capabilities: Vec<String>,
     pub display_name: Option<String>,
-    pub max_context: u64,
+    pub max_context: Option<u64>,
     pub max_output_tokens: Option<u64>,
     pub model_id: String,
     pub reasoning_levels: Vec<String>,
