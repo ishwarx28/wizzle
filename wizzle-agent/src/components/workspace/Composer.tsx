@@ -454,7 +454,7 @@ export function Composer({
   const isMacPlatform =
     typeof document !== "undefined" && document.documentElement.dataset.platform === "macos";
   const permissionModeLabel =
-    permissionMode === "full-access" ? "Full access" : "Manual approve";
+    permissionMode === "full-access" ? "Auto approve · host access" : "Manual approve";
   const modelIdLabel =
     selectedProviderModel?.displayName ??
     selectedProviderModel?.modelId ??
@@ -1715,6 +1715,11 @@ export function Composer({
                       ? "text-[#ff9b6b]"
                       : "text-[var(--color-text-secondary)]",
                   ].join(" ")}
+                  title={
+                    permissionMode === "full-access"
+                      ? "Automatically approves tools. Shell commands run with your OS user permissions and can access files and networks outside this project."
+                      : "Requires approval before each tool runs."
+                  }
                 >
                   {permissionModeLabel}
                 </span>
@@ -1725,7 +1730,7 @@ export function Composer({
                   onChange={(event) => setPermissionMode(event.currentTarget.value as PermissionMode)}
                   value={permissionMode}
                 >
-                  <option value="full-access">Full access</option>
+                  <option value="full-access">Auto approve (host shell access)</option>
                   <option value="manual-approve">Manual approve</option>
                 </select>
                 <ChevronDown

@@ -10,6 +10,7 @@ pub struct AgentInstructionFilePayload {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentGlobalSkillFilePayload {
+    pub description: Option<String>,
     pub name: String,
     pub path: String,
 }
@@ -29,6 +30,7 @@ pub struct AgentProjectContextPayload {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunAgentToolInput {
+    pub approval_token: Option<String>,
     pub arguments: String,
     /// When false, image file reads return an error instead of inline image data.
     #[serde(default = "default_image_capable")]
@@ -40,6 +42,23 @@ pub struct RunAgentToolInput {
     /// Conversation turn that owns this tool call (background process linkage, #75).
     #[serde(default)]
     pub turn_id: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestAgentToolApprovalInput {
+    pub arguments: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub tool_call_id: String,
+    pub tool_name: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentToolApprovalPayload {
+    pub approved: bool,
+    pub token: Option<String>,
 }
 
 fn default_image_capable() -> bool {

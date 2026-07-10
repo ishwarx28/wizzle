@@ -40,7 +40,8 @@ export interface ProviderModelInfo {
   id: ModelId;
   isPinned: boolean;
   lastUsedAtMs?: number | null;
-  maxContext: number;
+  /** Null when a remote catalog did not publish a trustworthy context limit. */
+  maxContext: number | null;
   maxOutputTokens?: number | null;
   modelId: string;
   providerId: string;

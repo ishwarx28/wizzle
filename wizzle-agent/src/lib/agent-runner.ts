@@ -3,6 +3,7 @@ import { buildWorkspaceSystemPrompt } from "./agent-prompt";
 import { clientEnv } from "./env";
 import {
   loadAgentProjectContext,
+  requestAgentToolApproval,
   runAgentTool,
   type AgentToolOutputChunk,
 } from "./agent-runtime";
@@ -942,12 +943,32 @@ export async function runWorkspaceAgent(options: {
             toolCallId: toolCall.id,
             toolName: toolCall.function.name,
           });
-          const isApproved =
+          const isApprovedByWorkspace =
             !approvalRequest ||
             (await options.requestToolApproval(approvalRequest));
 
-          toolPayload = isApproved
-            ? await runAgentTool({
+          if (!isApprovedByWorkspace && approvalRequest) {
+            toolPayload = createRejectedToolPayload(approvalRequest);
+          } else {
+            const nativeApproval = approvalRequest
+              ? await requestAgentToolApproval({
+                  arguments: toolCall.function.arguments,
+                  projectId: options.projectId,
+                  sessionId: options.chatId,
+                  toolCallId: toolCall.id,
+                  toolName: toolCall.function.name,
+                })
+              : null;
+
+            if (
+              approvalRequest &&
+              nativeApproval &&
+              (!nativeApproval.approved || !nativeApproval.token)
+            ) {
+              toolPayload = createRejectedToolPayload(approvalRequest);
+            } else {
+              toolPayload = await runAgentTool({
+                approvalToken: nativeApproval?.token ?? undefined,
                 arguments: toolCall.function.arguments,
                 imageCapable,
                 onChunk: (chunk) => options.onToolChunk?.(chunk),
@@ -956,8 +977,9 @@ export async function runWorkspaceAgent(options: {
                 toolCallId: toolCall.id,
                 turnId: options.turnId,
                 toolName: toolCall.function.name,
-              })
-            : createRejectedToolPayload(approvalRequest);
+              });
+            }
+          }
         } catch (error) {
           if (error instanceof Error && error.message === INTERRUPTED_WORKSPACE_CHAT_ERROR) {
             frontendLogger.info("frontend.agent", "tool_execution_interrupted", {
