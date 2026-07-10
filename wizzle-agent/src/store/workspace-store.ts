@@ -1152,7 +1152,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       const modelId =
         state.modelId && models.some((model) => model.id === state.modelId)
           ? state.modelId
-          : models[0]?.id ?? state.modelId;
+          : models[0]?.id ?? "";
       const selectedModel = models.find((model) => model.id === modelId);
 
       return {

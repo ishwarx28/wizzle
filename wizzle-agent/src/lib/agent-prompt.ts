@@ -9,10 +9,6 @@ const MISSING_GLOBAL_SKILLS_INVENTORY = "No global skill files are currently ava
 const MISSING_SESSION_CACHE_DIR =
   "No session cache directory is available for this run.";
 
-function resolveAgentsInstructionFile(instructionFiles: AgentInstructionFile[]) {
-  return instructionFiles.find((file) => file.name === "AGENTS.md") ?? null;
-}
-
 function buildPathList(paths: string[], emptyMessage: string) {
   if (paths.length === 0) {
     return emptyMessage;
@@ -44,14 +40,15 @@ function buildEnvironmentBlock(options: {
 }
 
 function buildAgentsBlock(instructionFiles: AgentInstructionFile[]) {
-  const agentsInstructionFile = resolveAgentsInstructionFile(instructionFiles);
+  const instructionPaths = instructionFiles.map((file) => file.path);
 
   return [
     "# Project Instruction Files",
-    agentsInstructionFile
+    instructionPaths.length > 0
       ? [
-          `AGENTS.md path: ${agentsInstructionFile.path}`,
-          "Read this file with the `read` tool before relying on project-specific instructions, then follow it.",
+          "Applicable AGENTS.md paths are ordered from broadest to most specific:",
+          buildPathList(instructionPaths, MISSING_AGENTS_FILE),
+          "Read the applicable files with the `read` tool before relying on project-specific instructions. For a file you change, the closest instruction file in its directory ancestry takes precedence.",
         ].join("\n")
       : MISSING_AGENTS_FILE,
   ].join("\n");
@@ -62,14 +59,18 @@ function buildGlobalSkillsBlock(options: {
   globalSkillsDir: string | null;
 }) {
   const globalSkillsDir = options.globalSkillsDir ?? MISSING_GLOBAL_SKILLS_DIR;
-  const skillPaths = options.globalSkillFiles.map((file) => file.path);
+  const skillEntries = options.globalSkillFiles.map((file) =>
+    file.description
+      ? `${file.name}: ${file.description} (${file.path})`
+      : `${file.name}: ${file.path}`,
+  );
 
   return [
     "# Global Skill Files",
     `Global skills directory: ${globalSkillsDir}`,
     "",
-    "Available skill paths:",
-    buildPathList(skillPaths, MISSING_GLOBAL_SKILLS_INVENTORY),
+    "Available skills:",
+    buildPathList(skillEntries, MISSING_GLOBAL_SKILLS_INVENTORY),
   ].join("\n");
 }
 

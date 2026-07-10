@@ -65,7 +65,6 @@ export function buildReadToolDefinition(imageCapable: boolean): WizzleToolDefini
           minimum: 1,
           type: "integer",
         },
-        timeout: createTimeoutProperty(),
       },
       required: ["path"],
       type: "object",
@@ -88,10 +87,9 @@ export const WRITE_TOOL: WizzleToolDefinition = {
         type: "string",
       },
       path: {
-        description: "Path to write, relative to the selected project root unless absolute.",
+        description: "Path to write inside the selected project root.",
         type: "string",
       },
-      timeout: createTimeoutProperty(),
     },
     required: ["path", "content"],
     type: "object",
@@ -113,13 +111,12 @@ export const EDIT_TOOL: WizzleToolDefinition = {
         type: "string",
       },
       path: {
-        description: "Path to edit, relative to the selected project root unless absolute.",
+        description: "Path to edit inside the selected project root.",
         type: "string",
       },
       replaceAll: {
         type: "boolean",
       },
-      timeout: createTimeoutProperty(),
     },
     required: ["path", "oldText", "newText"],
     type: "object",
@@ -129,7 +126,7 @@ export const EDIT_TOOL: WizzleToolDefinition = {
 
 export const BASH_TOOL: WizzleToolDefinition = {
   description:
-    "Run or manage shell commands inside the selected project root. Use action \"run\" for git inspection, rg searches, tests, formatting, and other terminal tasks. Use background: true only for long-running dev servers or watchers, then inspect with list_processes/read_process and stop with stop_process.",
+    "Run or manage host shell commands with the selected project as the working directory. Shell commands are not filesystem- or network-sandboxed and can access anything permitted to the Wizzle OS user. Use action \"run\" for git inspection, rg searches, tests, formatting, and other terminal tasks. Use background: true only for long-running dev servers or watchers, then inspect with list_processes/read_process and stop with stop_process.",
   name: "bash",
   parameters: {
     additionalProperties: false,

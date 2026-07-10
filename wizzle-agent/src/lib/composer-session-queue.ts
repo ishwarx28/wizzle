@@ -1,4 +1,5 @@
 import type { PreviewFile } from "../types/workspace";
+import { loadComposerState, saveComposerState } from "./local-workspace";
 
 /**
  * Session-scoped composer queue that survives Composer unmount (#43).
@@ -181,8 +182,6 @@ export function cancelQueuedContextContinues(sessionId: string): ComposerQueueIt
 
 async function persistQueueOnly(sessionId: string, items: ComposerQueueItem[]) {
   try {
-    // Dynamic import keeps pure queue unit tests free of Tauri workspace deps.
-    const { loadComposerState, saveComposerState } = await import("./local-workspace");
     const existing = await loadComposerState(sessionId);
     await saveComposerState({
       draftText: existing.draftText ?? "",

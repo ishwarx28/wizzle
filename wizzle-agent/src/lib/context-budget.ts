@@ -25,7 +25,8 @@ import type {
   ReplayCapabilityMode,
 } from "../types/workspace";
 
-export const FALLBACK_CONTEXT_LIMIT = 128_000;
+// Unknown catalog metadata must use a conservative budget instead of claiming 128k.
+export const FALLBACK_CONTEXT_LIMIT = 16_384;
 export const TOTAL_CONTEXT_LIMIT = FALLBACK_CONTEXT_LIMIT;
 export const REPLAY_ESTIMATOR_VERSION = 4;
 
