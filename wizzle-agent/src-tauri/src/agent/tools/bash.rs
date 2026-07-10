@@ -708,11 +708,32 @@ fn _serialize_process_for_tests(process: WorkspaceProcessPayload) -> Value {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::{process::Stdio, time::Duration};
+    use std::{
+        process::{Command, Stdio},
+        time::Duration,
+    };
 
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     use super::{build_shell_command, terminate_pid};
+
+    fn process_is_alive(pid: u32) -> bool {
+        let output = Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+        let Ok(output) = output else {
+            return false;
+        };
+        if !output.status.success() {
+            return false;
+        }
+
+        let state = String::from_utf8_lossy(&output.stdout);
+        let state = state.trim();
+        !state.is_empty() && !state.starts_with('Z')
+    }
 
     #[tokio::test]
     async fn process_group_termination_stops_shell_descendants() {
@@ -743,14 +764,9 @@ mod tests {
             .expect("reap shell");
 
         let mut descendant_alive = true;
-        for _ in 0..20 {
-            descendant_alive = std::process::Command::new("kill")
-                .args(["-0", &descendant_pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|status| status.success())
-                .unwrap_or(false);
+        // Linux runners may report a killed child as a zombie briefly after the shell exits.
+        for _ in 0..100 {
+            descendant_alive = process_is_alive(descendant_pid);
             if !descendant_alive {
                 break;
             }
