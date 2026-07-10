@@ -1,9 +1,9 @@
 import { PanelLeftOpen, PanelRightOpen } from "lucide-react";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { ChatView } from "../components/workspace/ChatView";
 import { FilePanel } from "../components/workspace/FilePanel";
-import { ProviderSettingsPage } from "../components/workspace/ProviderSettingsDialog";
 import { SessionProcessMenu } from "../components/workspace/SessionProcessMenu";
 import { Sidebar } from "../components/workspace/Sidebar";
 import { usePanelResize } from "../hooks/use-panel-resize";
@@ -14,6 +14,12 @@ import {
   interruptAllWorkspaceRunsForShutdown,
   useWorkspaceStore,
 } from "../store/workspace-store";
+
+const ProviderSettingsPage = lazy(() =>
+  import("../components/workspace/ProviderSettingsDialog").then((module) => ({
+    default: module.ProviderSettingsPage,
+  })),
+);
 
 function shouldAllowNativeContextMenu(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) {
@@ -146,10 +152,10 @@ export function AppPage() {
     window.addEventListener("beforeunload", handlePageHide);
 
     let unlistenClose: (() => void) | undefined;
-    void import("@tauri-apps/api/window")
-      .then(({ getCurrentWindow }) => getCurrentWindow().onCloseRequested(async () => {
+    void getCurrentWindow()
+      .onCloseRequested(async () => {
         await interruptAllWorkspaceRunsForShutdown();
-      }))
+      })
       .then((unlisten) => {
         unlistenClose = unlisten;
       })
@@ -307,7 +313,15 @@ export function AppPage() {
             ) : null}
 
             {hasHydratedWorkspace && activePage === "providers" ? (
-              <ProviderSettingsPage onBack={() => setActivePage("chat")} />
+              <Suspense
+                fallback={
+                  <div className="flex min-h-0 flex-1 items-center justify-center text-[13px] text-[var(--color-text-secondary)]">
+                    Loading providers…
+                  </div>
+                }
+              >
+                <ProviderSettingsPage onBack={() => setActivePage("chat")} />
+              </Suspense>
             ) : hasHydratedWorkspace ? (
               <ChatView />
             ) : startupError ? (

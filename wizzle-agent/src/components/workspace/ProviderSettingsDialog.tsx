@@ -54,6 +54,12 @@ type DialogState =
   | { type: "provider-form"; mode: "add" | "edit"; providerId?: string }
   | { type: "import-url"; value: string }
   | {
+      type: "delete-provider";
+      providerId: string;
+      providerName: string;
+      modelCount: number;
+    }
+  | {
       type: "refresh-models";
       providerId: string;
       providerName: string;
@@ -423,7 +429,9 @@ function buildProvidersYaml(providers: ProviderInfo[], models: ProviderModelInfo
           lines.push(`        displayName: ${yamlString(model.displayName)}`);
         }
 
-        lines.push(`        maxContext: ${model.maxContext}`);
+        if (model.maxContext) {
+          lines.push(`        maxContext: ${model.maxContext}`);
+        }
 
         if (model.maxOutputTokens) {
           lines.push(`        maxOutputTokens: ${model.maxOutputTokens}`);
@@ -479,6 +487,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
   const [importMenuOpen, setImportMenuOpen] = useState(false);
   const [importMenuPosition, setImportMenuPosition] = useState<{ x: number; y: number } | null>(null);
   const [isBusy, setIsBusy] = useState(false);
+  const [deletingProviderId, setDeletingProviderId] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [modelRows, setModelRows] = useState<ProviderModelFormRow[]>([{ ...emptyModelRow }]);
   const [name, setName] = useState("OpenAI");
@@ -623,8 +632,9 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
     setError(null);
     setIsBusy(true);
 
+    let providerId: string;
     try {
-      const providerId = await upsertProvider({
+      providerId = await upsertProvider({
         apiKey: apiKey.trim() || undefined,
         defaultModelId: defaultModelId.trim() || undefined,
         endpoint,
@@ -637,20 +647,31 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
           providerTokenizerMode === "custom" ? tokenizerJson.trim() || undefined : undefined,
       });
 
-      if (!onlySpecifiedModels) {
-        // Default post-save refresh: fetch remote catalog without pruning customs.
-        await refreshProviderModels(providerId, { fetchAll: true, removeInvalid: false });
-      }
-
       await reloadProviderConfig();
       resetProviderForm();
       closeDialog();
       showToast(editingProviderId ? "Provider saved." : "Provider added.");
     } catch (caughtError) {
       setError(normalizeError(caughtError, "Provider could not be saved."));
-    } finally {
       setIsBusy(false);
+      return;
     }
+
+    if (!onlySpecifiedModels) {
+      try {
+        await refreshProviderModels(providerId, { fetchAll: true, removeInvalid: false });
+        await reloadProviderConfig();
+      } catch (caughtError) {
+        setError(
+          `Provider saved, but its model catalog could not be refreshed: ${normalizeError(
+            caughtError,
+            "Unknown refresh error.",
+          )}`,
+        );
+      }
+    }
+
+    setIsBusy(false);
   }
 
   async function handleConfirmRefresh() {
@@ -682,14 +703,22 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
   }
 
   async function handleDelete(providerId: string) {
+    if (deletingProviderId) {
+      return;
+    }
+
     setError(null);
+    setDeletingProviderId(providerId);
 
     try {
       await deleteProvider(providerId);
       await reloadProviderConfig();
+      closeDialog();
       showToast("Provider deleted.");
     } catch (caughtError) {
       setError(normalizeError(caughtError, "Provider could not be deleted."));
+    } finally {
+      setDeletingProviderId(null);
     }
   }
 
@@ -900,9 +929,15 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                   </button>
                   <button
                     className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[color-mix(in_srgb,var(--color-danger)_45%,transparent)] px-3 text-[13px] font-normal leading-none tracking-normal text-[var(--color-danger)] transition hover:bg-[var(--color-panel-hover)] disabled:opacity-50"
-                    onClick={() => {
-                      void handleDelete(provider.id);
-                    }}
+                    disabled={deletingProviderId !== null}
+                    onClick={() =>
+                      setDialog({
+                        type: "delete-provider",
+                        providerId: provider.id,
+                        providerName: provider.name,
+                        modelCount: providerModelCounts.get(provider.id) ?? provider.modelCount,
+                      })
+                    }
                     type="button"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
@@ -954,11 +989,13 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
 
       {dialog?.type === "import-url" ? (
         <AppDialog
+          busy={isBusy}
           actions={
             <>
               <button
                 className="h-10 rounded-full px-4 text-[14px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                 onClick={closeDialog}
+                disabled={isBusy}
                 type="button"
               >
                 Cancel
@@ -996,11 +1033,13 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
 
       {dialog?.type === "refresh-models" ? (
         <AppDialog
+          busy={isRefreshing}
           actions={
             <>
               <button
                 className="h-10 rounded-full px-4 text-[14px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                 onClick={closeDialog}
+                disabled={isRefreshing}
                 type="button"
               >
                 Cancel
@@ -1058,8 +1097,40 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
         </AppDialog>
       ) : null}
 
+      {dialog?.type === "delete-provider" ? (
+        <AppDialog
+          busy={deletingProviderId !== null}
+          actions={
+            <>
+              <button
+                className="h-10 rounded-full px-4 text-[14px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                disabled={deletingProviderId !== null}
+                onClick={closeDialog}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="h-10 rounded-full bg-[var(--color-danger)] px-4 text-[14px] font-medium text-white transition disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={deletingProviderId !== null}
+                onClick={() => void handleDelete(dialog.providerId)}
+                type="button"
+              >
+                {deletingProviderId ? "Deleting..." : "Delete provider"}
+              </button>
+            </>
+          }
+          description={`This permanently removes ${dialog.providerName} and ${dialog.modelCount} configured ${dialog.modelCount === 1 ? "model" : "models"}. Sessions using them will switch to another available model.`}
+          onClose={() => {
+            if (!deletingProviderId) closeDialog();
+          }}
+          title="Delete provider?"
+        />
+      ) : null}
+
       {dialog?.type === "provider-form" ? (
         <AppDialog
+          busy={isBusy}
           actions={
             <>
               <button
@@ -1068,6 +1139,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                   resetProviderForm();
                   closeDialog();
                 }}
+                disabled={isBusy}
                 type="button"
               >
                 Cancel
@@ -1087,7 +1159,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
           description={
             dialog.mode === "edit"
               ? "Update endpoint, models, and optional tokenizer settings."
-              : "Add an OpenAI-compatible or other local provider."
+              : "Add an OpenAI-compatible provider."
           }
           onClose={() => {
             resetProviderForm();
@@ -1115,8 +1187,8 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                 value={providerType}
               >
                 <option value="openai_compatible">OpenAI compatible</option>
-                <option value="anthropic">Anthropic</option>
-                <option value="google">Google</option>
+                <option disabled value="anthropic">Anthropic (not yet supported)</option>
+                <option disabled value="google">Google (not yet supported)</option>
               </select>
             </div>
             <div className="md:col-span-2">

@@ -2,7 +2,6 @@ import morphdom from "morphdom";
 import { useEffect, useRef, useState } from "react";
 import "katex/dist/katex.min.css";
 
-import { renderMarkdownToHtml } from "../../lib/markdown";
 import { copyText } from "../../utils/clipboard";
 import {
   getStoredThemePreference,
@@ -46,11 +45,14 @@ export function MarkdownRenderer({ className, content, streaming = false }: Mark
     const renderVersion = renderVersionRef.current + 1;
     renderVersionRef.current = renderVersion;
 
-    void renderMarkdownToHtml({
-      content,
-      isStreaming: streaming,
-      theme: effectiveTheme,
-    })
+    void import("../../lib/markdown")
+      .then(({ renderMarkdownToHtml }) =>
+        renderMarkdownToHtml({
+          content,
+          isStreaming: streaming,
+          theme: effectiveTheme,
+        }),
+      )
       .then((html) => {
         if (
           isCancelled ||
