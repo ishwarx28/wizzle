@@ -7,7 +7,7 @@ mod workspace;
 use agent::{
     begin_session_run, finish_session_run, get_session_runtime_state, interrupt_session_run,
     list_agent_processes, list_session_runtime_states, load_agent_project_context,
-    read_agent_process, request_agent_tool_approval, run_agent_tool, set_session_runtime_state,
+    read_agent_process, run_agent_tool, set_session_runtime_state,
     stop_agent_process, wake_session_run, AgentRuntimeState,
 };
 use logging::{log_desktop_event, write_frontend_logs};
@@ -89,7 +89,6 @@ pub fn run() {
             read_attachment_previews,
             build_attachment_preview_from_bytes,
             load_agent_project_context,
-            request_agent_tool_approval,
             run_agent_tool,
             get_session_runtime_state,
             set_session_runtime_state,

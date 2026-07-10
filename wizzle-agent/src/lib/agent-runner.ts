@@ -3,7 +3,6 @@ import { buildWorkspaceSystemPrompt } from "./agent-prompt";
 import { clientEnv } from "./env";
 import {
   loadAgentProjectContext,
-  requestAgentToolApproval,
   runAgentTool,
   type AgentToolOutputChunk,
 } from "./agent-runtime";
@@ -943,42 +942,19 @@ export async function runWorkspaceAgent(options: {
             toolCallId: toolCall.id,
             toolName: toolCall.function.name,
           });
-          const isApprovedByWorkspace =
-            !approvalRequest ||
-            (await options.requestToolApproval(approvalRequest));
-
-          if (!isApprovedByWorkspace && approvalRequest) {
+          if (approvalRequest && !(await options.requestToolApproval(approvalRequest))) {
             toolPayload = createRejectedToolPayload(approvalRequest);
           } else {
-            const nativeApproval = approvalRequest
-              ? await requestAgentToolApproval({
-                  arguments: toolCall.function.arguments,
-                  projectId: options.projectId,
-                  sessionId: options.chatId,
-                  toolCallId: toolCall.id,
-                  toolName: toolCall.function.name,
-                })
-              : null;
-
-            if (
-              approvalRequest &&
-              nativeApproval &&
-              (!nativeApproval.approved || !nativeApproval.token)
-            ) {
-              toolPayload = createRejectedToolPayload(approvalRequest);
-            } else {
-              toolPayload = await runAgentTool({
-                approvalToken: nativeApproval?.token ?? undefined,
-                arguments: toolCall.function.arguments,
-                imageCapable,
-                onChunk: (chunk) => options.onToolChunk?.(chunk),
-                projectId: options.projectId,
-                sessionId: options.chatId,
-                toolCallId: toolCall.id,
-                turnId: options.turnId,
-                toolName: toolCall.function.name,
-              });
-            }
+            toolPayload = await runAgentTool({
+              arguments: toolCall.function.arguments,
+              imageCapable,
+              onChunk: (chunk) => options.onToolChunk?.(chunk),
+              projectId: options.projectId,
+              sessionId: options.chatId,
+              toolCallId: toolCall.id,
+              turnId: options.turnId,
+              toolName: toolCall.function.name,
+            });
           }
         } catch (error) {
           if (error instanceof Error && error.message === INTERRUPTED_WORKSPACE_CHAT_ERROR) {

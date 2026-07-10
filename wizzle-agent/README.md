@@ -8,7 +8,8 @@
 - Store local projects, sessions, composer state, provider metadata, settings, and permission mode in SQLite
 - Discover ancestor, project, and nested `AGENTS.md` instruction scopes
 - Discover flat global skills and `<skill>/SKILL.md` manifests for the agent prompt
-- Handle local file access and shell execution inside the selected project root
+- Handle local file access inside the selected project root
+- Run host shell commands with the project as the working directory (not OS-sandboxed)
 - Call configured AI providers directly from the Tauri backend
 
 ## Stack
@@ -135,7 +136,8 @@ CI is configured in `../.github/workflows/build-desktop-packages.yml`. It runs t
 - The desktop app owns local state and local tool execution.
 - The app launches directly into the workspace without sign-in.
 - MVP permission modes are `manual-approve` and `full-access`.
-- `full-access` must stay limited to the selected project root.
+- File write/edit tools stay limited to the selected project root.
+- Shell commands are host-capable (not filesystem-sandboxed); `full-access` auto-approves tools while `manual-approve` uses the in-app prompt.
 
 ## License
 

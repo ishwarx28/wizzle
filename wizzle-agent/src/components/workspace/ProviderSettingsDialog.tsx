@@ -662,12 +662,9 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
         await refreshProviderModels(providerId, { fetchAll: true, removeInvalid: false });
         await reloadProviderConfig();
       } catch (caughtError) {
-        setError(
-          `Provider saved, but its model catalog could not be refreshed: ${normalizeError(
-            caughtError,
-            "Unknown refresh error.",
-          )}`,
-        );
+        const refreshError = normalizeError(caughtError, "Unknown refresh error.");
+        setError(`Provider saved, but its model catalog could not be refreshed: ${refreshError}`);
+        showToast(`Provider saved, but catalog refresh failed: ${refreshError}`);
       }
     }
 

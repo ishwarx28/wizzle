@@ -3,7 +3,7 @@ use std::{
     path::Path,
     process::Stdio,
     sync::{Arc, Mutex},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(test)]
@@ -161,15 +161,6 @@ struct ProcessHandle {
     session_id: String,
 }
 
-struct ToolApprovalGrant {
-    arguments: String,
-    expires_at: Instant,
-    project_id: String,
-    session_id: String,
-    tool_call_id: String,
-    tool_name: String,
-}
-
 #[derive(Default)]
 struct AgentRuntimeInner {
     active_background_processes: Mutex<HashMap<String, ProcessHandle>>,
@@ -181,7 +172,6 @@ struct AgentRuntimeInner {
     provider_request_sessions: Mutex<HashMap<String, String>>,
     runtime_states: Mutex<HashMap<String, RuntimeEntry>>,
     session_write_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
-    tool_approval_grants: Mutex<HashMap<String, ToolApprovalGrant>>,
     write_path_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
 }
 
@@ -280,67 +270,6 @@ pub(crate) async fn terminate_pid(pid: u32) -> Result<(), String> {
 }
 
 impl AgentRuntimeState {
-    pub fn grant_tool_approval(
-        &self,
-        arguments: &str,
-        project_id: &str,
-        session_id: &str,
-        tool_call_id: &str,
-        tool_name: &str,
-    ) -> Result<String, String> {
-        let token = uuid::Uuid::new_v4().to_string();
-        let mut grants = self
-            .inner
-            .tool_approval_grants
-            .lock()
-            .map_err(|_| "Could not store the tool approval.".to_string())?;
-        grants.retain(|_, grant| grant.expires_at > Instant::now());
-        grants.insert(
-            token.clone(),
-            ToolApprovalGrant {
-                arguments: arguments.to_string(),
-                expires_at: Instant::now() + Duration::from_secs(5 * 60),
-                project_id: project_id.to_string(),
-                session_id: session_id.to_string(),
-                tool_call_id: tool_call_id.to_string(),
-                tool_name: tool_name.to_string(),
-            },
-        );
-        Ok(token)
-    }
-
-    pub fn consume_tool_approval(
-        &self,
-        token: &str,
-        arguments: &str,
-        project_id: &str,
-        session_id: &str,
-        tool_call_id: &str,
-        tool_name: &str,
-    ) -> Result<(), String> {
-        let grant = self
-            .inner
-            .tool_approval_grants
-            .lock()
-            .map_err(|_| "Could not verify the tool approval.".to_string())?
-            .remove(token)
-            .ok_or_else(|| {
-                "This tool approval is missing, expired, or already used.".to_string()
-            })?;
-
-        if grant.expires_at <= Instant::now()
-            || grant.arguments != arguments
-            || grant.project_id != project_id
-            || grant.session_id != session_id
-            || grant.tool_call_id != tool_call_id
-            || grant.tool_name != tool_name
-        {
-            return Err("This tool approval does not match the requested operation.".to_string());
-        }
-
-        Ok(())
-    }
-
     pub fn background_process_lock(&self, session_id: &str) -> Result<Arc<AsyncMutex<()>>, String> {
         lock_for_key(
             &self.inner.background_process_locks,
@@ -967,68 +896,4 @@ mod tests {
         assert!(coordinator.finish("session-1"));
     }
 
-    #[test]
-    fn tool_approval_is_bound_to_one_exact_operation() {
-        let runtime = AgentRuntimeState::default();
-        let token = runtime
-            .grant_tool_approval(
-                r#"{"path":"src/main.ts"}"#,
-                "project-1",
-                "session-1",
-                "call-1",
-                "write",
-            )
-            .expect("grant approval");
-
-        assert!(runtime
-            .consume_tool_approval(
-                &token,
-                r#"{"path":"other.ts"}"#,
-                "project-1",
-                "session-1",
-                "call-1",
-                "write",
-            )
-            .is_err());
-        assert!(runtime
-            .consume_tool_approval(
-                &token,
-                r#"{"path":"src/main.ts"}"#,
-                "project-1",
-                "session-1",
-                "call-1",
-                "write",
-            )
-            .is_err());
-
-        let valid_token = runtime
-            .grant_tool_approval(
-                r#"{"path":"src/main.ts"}"#,
-                "project-1",
-                "session-1",
-                "call-1",
-                "write",
-            )
-            .expect("grant second approval");
-        runtime
-            .consume_tool_approval(
-                &valid_token,
-                r#"{"path":"src/main.ts"}"#,
-                "project-1",
-                "session-1",
-                "call-1",
-                "write",
-            )
-            .expect("consume matching approval");
-        assert!(runtime
-            .consume_tool_approval(
-                &valid_token,
-                r#"{"path":"src/main.ts"}"#,
-                "project-1",
-                "session-1",
-                "call-1",
-                "write",
-            )
-            .is_err());
-    }
 }

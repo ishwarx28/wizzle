@@ -23,34 +23,29 @@ pub async fn run_agent_tool(
         .session_id
         .as_deref()
         .ok_or_else(|| "A stored session is required to run agent tools.".to_string())?;
-    let tool_call_id = input
+    if input
         .tool_call_id
         .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "A tool call identifier is required to run agent tools.".to_string())?;
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err("A tool call identifier is required to run agent tools.".to_string());
+    }
 
     if !runtime.is_session_run_active(session_id) {
         return Err("Agent tools can only run during an active session turn.".to_string());
     }
 
+    // In-app approval is enforced in the agent runner UI. Backend still verifies the
+    // session exists, the run is active, and the permission mode is known.
     let permission_mode = crate::workspace::sqlite_repository::resolve_session_tool_permission(
         session_id,
         &input.project_id,
     )?;
-    match (permission_mode.as_str(), input.approval_token.as_deref()) {
-        (_, Some(token)) => runtime.consume_tool_approval(
-            token,
-            &input.arguments,
-            &input.project_id,
-            session_id,
-            tool_call_id,
-            &input.tool_name,
-        )?,
-        ("full-access", None) => {}
-        ("manual-approve", None) => {
-            return Err("This tool request requires a native user approval.".to_string())
-        }
-        _ => return Err("The session has an unsupported tool permission mode.".to_string()),
+    if !matches!(
+        permission_mode.as_str(),
+        "full-access" | "manual-approve"
+    ) {
+        return Err("The session has an unsupported tool permission mode.".to_string());
     }
 
     let arguments = serde_json::from_str::<Value>(&input.arguments)

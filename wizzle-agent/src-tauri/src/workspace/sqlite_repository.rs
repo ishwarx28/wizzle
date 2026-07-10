@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
+    ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -42,6 +43,48 @@ use super::{
 const MIGRATION_VERSION: i64 = 1;
 const PROCESS_TAIL_BYTES: usize = 60_000;
 static MIGRATED_DATABASES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+static CONNECTION_POOL: OnceLock<Mutex<Option<(PathBuf, Connection)>>> = OnceLock::new();
+
+/// Borrowed SQLite connection that returns to a small process-local pool on drop.
+pub(crate) struct ManagedConnection {
+    connection: Option<Connection>,
+    path: PathBuf,
+}
+
+impl Deref for ManagedConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.connection
+            .as_ref()
+            .expect("managed SQLite connection is available")
+    }
+}
+
+impl DerefMut for ManagedConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.connection
+            .as_mut()
+            .expect("managed SQLite connection is available")
+    }
+}
+
+impl Drop for ManagedConnection {
+    fn drop(&mut self) {
+        let Some(connection) = self.connection.take() else {
+            return;
+        };
+        let Ok(pool) = CONNECTION_POOL
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+        else {
+            return;
+        };
+        let mut pool = pool;
+        // Keep one warm connection for the current database path.
+        *pool = Some((self.path.clone(), connection));
+    }
+}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -265,9 +308,30 @@ fn decode_data_url(data_url: &str) -> Result<(Vec<u8>, Option<String>), String> 
     Ok((bytes, mime_type))
 }
 
-pub(crate) fn open_database() -> Result<Connection, String> {
+pub(crate) fn open_database() -> Result<ManagedConnection, String> {
     let root = ensure_workspace_storage()?;
     let db_path = database_path(&root);
+    let pool = CONNECTION_POOL.get_or_init(|| Mutex::new(None));
+    let mut pool = pool
+        .lock()
+        .map_err(|_| "Could not access the Wizzle SQLite connection pool.".to_string())?;
+
+    if let Some((pooled_path, conn)) = pool.take() {
+        if pooled_path == db_path {
+            // Re-assert session-critical pragmas on reuse.
+            conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")
+                .map_err(|error| {
+                    db_error("Could not configure the Wizzle SQLite database", error)
+                })?;
+            return Ok(ManagedConnection {
+                connection: Some(conn),
+                path: db_path,
+            });
+        }
+        // Different path: drop the stale pooled connection.
+        drop(conn);
+    }
+
     let mut conn = Connection::open(&db_path)
         .map_err(|error| db_error("Could not open the Wizzle SQLite database", error))?;
 
@@ -281,7 +345,10 @@ pub(crate) fn open_database() -> Result<Connection, String> {
     .map_err(|error| db_error("Could not configure the Wizzle SQLite database", error))?;
     ensure_database_migrated(&mut conn, &db_path)?;
 
-    Ok(conn)
+    Ok(ManagedConnection {
+        connection: Some(conn),
+        path: db_path,
+    })
 }
 
 fn ensure_database_migrated(conn: &mut Connection, db_path: &Path) -> Result<(), String> {

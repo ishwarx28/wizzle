@@ -34,17 +34,11 @@ export type AgentToolOutputChunk = {
   toolCallId: string;
 };
 
-export type AgentToolApprovalResult = {
-  approved: boolean;
-  token?: string | null;
-};
-
 export async function loadAgentProjectContext(projectId: string, sessionId?: string) {
   return invoke<AgentProjectContext>("load_agent_project_context", { projectId, sessionId });
 }
 
 export async function runAgentTool(input: {
-  approvalToken?: string;
   arguments: string;
   /** When false, read on image files returns an error instead of image data. */
   imageCapable?: boolean;
@@ -76,14 +70,4 @@ export async function runAgentTool(input: {
   } finally {
     unlisten();
   }
-}
-
-export async function requestAgentToolApproval(input: {
-  arguments: string;
-  projectId: string;
-  sessionId: string;
-  toolCallId: string;
-  toolName: string;
-}) {
-  return invoke<AgentToolApprovalResult>("request_agent_tool_approval", { input });
 }
