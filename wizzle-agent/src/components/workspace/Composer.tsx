@@ -15,7 +15,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { useScrollActivity } from "../../hooks/use-scroll-activity";
 import {
@@ -28,10 +28,28 @@ import {
   enhanceWorkspacePrompt,
   interruptWorkspacePromptEnhancement,
   isInterruptedWorkspaceChatError,
-  resolvePromptInputLimit,
 } from "../../lib/chat-stream";
+import {
+  createComposerQueueItem,
+  drainComposerSessionQueue,
+  getComposerSessionQueue,
+  hydrateComposerSessionQueue,
+  setComposerSessionQueue,
+  subscribeComposerSessionQueue,
+  type ComposerQueueItem,
+} from "../../lib/composer-session-queue";
 import { MAX_REPLAY_INPUT, selectReplayHistoryWithinBudget } from "../../lib/context-budget";
 import { loadComposerState, saveComposerState } from "../../lib/local-workspace";
+import { isImageAttachment, modelSupportsImages } from "../../lib/image-capability";
+import {
+  applyPromptLimit,
+  formatPromptTooLargeError,
+  isPromptOverLimit,
+  resolvePromptMaxChars,
+} from "../../lib/prompt-size";
+import { SESSION_RUN_WAKE_EVENT } from "../../lib/session-run-wake";
+import { resolveEffectiveTokenizer } from "../../lib/tokenizer-resolve";
+import { activateTokenizer } from "../../lib/tokenizer-runtime";
 import { useWorkspaceStore } from "../../store/workspace-store";
 import type {
   MessageEditState,
@@ -46,12 +64,7 @@ interface ComposerProps {
   showFloatingEnhanceAction?: boolean;
 }
 
-interface QueuedSubmission {
-  attachments: PreviewFile[];
-  id: string;
-  prompt: string;
-  status?: "queued" | "sending" | "sent" | "failed";
-}
+type QueuedSubmission = ComposerQueueItem;
 
 interface SessionComposerMemory {
   attachments: PreviewFile[];
@@ -61,6 +74,7 @@ interface SessionComposerMemory {
 
 const MAX_ATTACHMENTS = 5;
 const MAX_QUEUED_SUBMISSIONS = 6;
+const EMPTY_QUEUE: ComposerQueueItem[] = [];
 const TEXT_ENTRY_SELECTOR = [
   "input",
   "textarea",
@@ -122,7 +136,7 @@ const textExtensions = new Set([
   "xml",
 ]);
 const ENHANCE_SHORTCUT_KEY = "e";
-const MAX_PROMPT_SIZE = resolvePromptInputLimit();
+const MAX_PROMPT_SIZE = resolvePromptMaxChars();
 
 function getExtension(fileName: string) {
   const extension = fileName.split(".").pop()?.toLowerCase();
@@ -139,6 +153,20 @@ function fileIcon(kind: PreviewFile["kind"]) {
       return <FileCode2 className="h-3.5 w-3.5" />;
   }
 }
+
+/** First letter capital, rest lower — not ALL CAPS (e.g. xhigh → Xhigh). */
+function formatReasoningLevelLabel(level: string) {
+  const trimmed = level.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
+}
+
+/** Same density as model id under model name in the selector list. */
+const MODEL_META_TEXT_CLASS =
+  "text-[11px] font-normal leading-none text-[var(--color-text-tertiary)]";
 
 function inferPreviewKind(file: File, capabilities: ModelCapability[]): PreviewFile["kind"] | null {
   if (file.type.startsWith("image/")) {
@@ -311,30 +339,78 @@ export function Composer({
   const clearChatError = useWorkspaceStore((state) => state.clearChatError);
   const draftSessions = useWorkspaceStore((state) => state.draftSessions);
   const interruptPrompt = useWorkspaceStore((state) => state.interruptPrompt);
-  const isSendingMessage = useWorkspaceStore((state) => state.isSendingMessage);
   const modelId = useWorkspaceStore((state) => state.modelId);
   const pendingToolApproval = useWorkspaceStore((state) => state.pendingToolApproval);
   const permissionMode = useWorkspaceStore((state) => state.permissionMode);
   const previewFiles = useWorkspaceStore((state) => state.previewFiles);
   const projects = useWorkspaceStore((state) => state.projects);
+  const providers = useWorkspaceStore((state) => state.providers);
   const providerModels = useWorkspaceStore((state) => state.providerModels);
   const reasoningLevel = useWorkspaceStore((state) => state.reasoningLevel);
   const selectedProjectId = useWorkspaceStore((state) => state.selectedProjectId);
   const selectedSessionId = useWorkspaceStore((state) => state.selectedSessionId);
+  const sendingSessionIds = useWorkspaceStore((state) => state.sendingSessionIds);
+  // Always derive from selection + per-session run set (never a stale global flag).
+  const isSendingMessage = Boolean(
+    selectedSessionId && sendingSessionIds.includes(selectedSessionId),
+  );
   const sendPrompt = useWorkspaceStore((state) => state.sendPrompt);
   const setModelId = useWorkspaceStore((state) => state.setModelId);
   const setPermissionMode = useWorkspaceStore((state) => state.setPermissionMode);
   const setReasoningLevel = useWorkspaceStore((state) => state.setReasoningLevel);
   const resolveToolApproval = useWorkspaceStore((state) => state.resolveToolApproval);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraftRaw] = useState("");
   const [attachments, setAttachments] = useState<PreviewFile[]>([]);
   const [isEnhancingPrompt, setIsEnhancingPrompt] = useState(false);
-  const [queuedSubmissions, setQueuedSubmissions] = useState<QueuedSubmission[]>([]);
   const [isModelSelectorOpen, setIsModelSelectorOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
   const [renderFloatingEnhanceAction, setRenderFloatingEnhanceAction] = useState(false);
   const [showFloatingEnhanceActionState, setShowFloatingEnhanceActionState] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  /** All draft writes are clamped to MAX_PROMPT_SIZE (#42). */
+  const setDraft = useCallback(
+    (
+      value: string | ((previous: string) => string),
+      options?: { notifyIfTruncated?: boolean },
+    ) => {
+      setDraftRaw((current) => {
+        const next = typeof value === "function" ? value(current) : value;
+        const { text, truncated } = applyPromptLimit(next, MAX_PROMPT_SIZE);
+
+        if (truncated && options?.notifyIfTruncated) {
+          queueMicrotask(() => {
+            setToastMessage(formatPromptTooLargeError(MAX_PROMPT_SIZE));
+          });
+        }
+
+        return text;
+      });
+    },
+    [],
+  );
+
+  // Session-scoped queue survives Composer unmount; drain is store-driven (#43).
+  const queueSessionId = selectedSessionId ?? "";
+  const queuedSubmissions = useSyncExternalStore(
+    (onStoreChange) =>
+      queueSessionId ? subscribeComposerSessionQueue(queueSessionId, onStoreChange) : () => undefined,
+    () => (queueSessionId ? getComposerSessionQueue(queueSessionId) : EMPTY_QUEUE),
+    () => EMPTY_QUEUE,
+  );
+
+  const setQueuedSubmissions = useCallback(
+    (value: QueuedSubmission[] | ((previous: QueuedSubmission[]) => QueuedSubmission[])) => {
+      if (!queueSessionId) {
+        return;
+      }
+      const current = getComposerSessionQueue(queueSessionId);
+      const next = typeof value === "function" ? value(current) : value;
+      setComposerSessionQueue(queueSessionId, next);
+    },
+    [queueSessionId],
+  );
+
   const shimmerOverlayRef = useRef<HTMLDivElement | null>(null);
   const modelSelectorRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -347,8 +423,6 @@ export function Composer({
   const persistedComposerSessionIdRef = useRef<string | null>(null);
   const enhanceOriginalDraftRef = useRef<string | null>(null);
   const enhanceRequestIdRef = useRef(0);
-  const isDispatchingQueuedPromptRef = useRef(false);
-  const [queueDrainTick, setQueueDrainTick] = useState(0);
   const [isComposerStateReady, setIsComposerStateReady] = useState(false);
   const floatingEnhanceHideTimeoutRef = useRef<number | null>(null);
   const composerDraftBeforeEditRef = useRef<{
@@ -364,14 +438,23 @@ export function Composer({
   const hasEnhanceableDraft = draft.trim().length > 0;
   const shouldShowInterrupt = isSendingMessage && !hasDraftContent;
   const selectedProviderModel = providerModels.find((model) => model.id === modelId) ?? null;
+  const selectedProvider = providers.find((provider) => provider.id === selectedProviderModel?.providerId) ?? null;
+  const effectiveTokenizer = useMemo(
+    () => resolveEffectiveTokenizer(selectedProviderModel, selectedProvider),
+    [selectedProvider, selectedProviderModel],
+  );
   const isModelMissing = !selectedProviderModel;
+
+  useEffect(() => {
+    void activateTokenizer(effectiveTokenizer.localPath);
+  }, [effectiveTokenizer.localPath]);
   const isDisabled = isEnhancingPrompt || isModelMissing || (!isSendingMessage && !hasDraftContent);
   const shouldShowFloatingEnhanceAction =
     showFloatingEnhanceAction && hasEnhanceableDraft && !isEnhancingPrompt && !isSendingMessage;
   const isMacPlatform =
     typeof document !== "undefined" && document.documentElement.dataset.platform === "macos";
   const permissionModeLabel =
-    permissionMode === "full-access" ? "Full access" : "Manual approve";
+    permissionMode === "full-access" ? "Auto approve · host access" : "Manual approve";
   const modelIdLabel =
     selectedProviderModel?.displayName ??
     selectedProviderModel?.modelId ??
@@ -382,10 +465,23 @@ export function Composer({
       ? reasoningLevel
       : selectedReasoningLevels[0] ?? "";
   const reasoningLevelLabel = selectedReasoningLevel
-    ? selectedReasoningLevel.charAt(0).toUpperCase() + selectedReasoningLevel.slice(1)
+    ? formatReasoningLevelLabel(selectedReasoningLevel)
     : "Default";
   const modelCapabilities = selectedProviderModel?.capabilities ?? ["text"];
+  const modelSupportsImageAttachments = modelSupportsImages(modelCapabilities);
   const modelContextLimit = selectedProviderModel?.maxContext ?? MAX_REPLAY_INPUT;
+
+  // Drop image drafts if the user switches to a text-only model (#40).
+  useEffect(() => {
+    if (modelSupportsImageAttachments) {
+      return;
+    }
+
+    setAttachments((current) => {
+      const next = current.filter((attachment) => !isImageAttachment(attachment));
+      return next.length === current.length ? current : next;
+    });
+  }, [modelSupportsImageAttachments]);
   const modelsByProvider = useMemo(() => {
     const grouped = new Map<string, typeof providerModels>();
 
@@ -477,7 +573,7 @@ export function Composer({
         previewFileMap,
         selectedModelUuid: modelId,
         systemPrompt: "",
-        tokenizerKind: selectedProviderModel?.tokenizerKind,
+        tokenizerKind: effectiveTokenizer.kind,
         turnSummaries: currentSession.replayTurnSummaries ?? [],
       });
       const used = selection.estimatedTokens;
@@ -499,13 +595,14 @@ export function Composer({
     }
   }, [
     currentSession,
+    effectiveTokenizer.kind,
+    effectiveTokenizer.localPath,
     modelCapabilities,
     modelContextLimit,
     modelId,
     previewFileMap,
     selectedProviderModel?.maxContext,
     selectedProviderModel?.maxOutputTokens,
-    selectedProviderModel?.tokenizerKind,
   ]);
   const budgetColor = budgetUsage.ratio === 0 ? "var(--color-text-tertiary)" : resolveBudgetColor(budgetUsage.ratio);
   const budgetRingSize = 30;
@@ -549,7 +646,7 @@ export function Composer({
             return;
           }
 
-          setDraft(partialDraft);
+          setDraft(partialDraft, { notifyIfTruncated: true });
         },
         projectId: selectedProjectId,
         reasoningLevel: selectedReasoningLevel,
@@ -558,7 +655,7 @@ export function Composer({
       if (enhanceRequestIdRef.current !== requestId) {
         return;
       }
-      setDraft(enhancedDraft);
+      setDraft(enhancedDraft, { notifyIfTruncated: true });
       enhanceOriginalDraftRef.current = null;
       focusComposer();
     } catch (error) {
@@ -606,20 +703,6 @@ export function Composer({
     focusComposer();
     return true;
   }, [isEnhancingPrompt]);
-
-  function buildQueuedSubmission(prompt: string, nextAttachments: PreviewFile[]): QueuedSubmission {
-    const id =
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? `queue-${crypto.randomUUID()}`
-        : `queue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-    return {
-      attachments: nextAttachments,
-      id,
-      prompt,
-      status: "queued",
-    };
-  }
 
   function queueLabel(submission: QueuedSubmission) {
     const prompt = submission.prompt.trim();
@@ -703,9 +786,9 @@ export function Composer({
 
     if (unsupportedCount > 0) {
       showToast(
-        modelCapabilities.includes("image")
+        modelSupportsImages(modelCapabilities)
           ? "Only supported text, markdown, code files, and images can be attached."
-          : "The selected model supports text attachments only.",
+          : "This model does not support images. Only text, markdown, and code files can be attached.",
       );
       return;
     }
@@ -726,6 +809,17 @@ export function Composer({
     }
 
     clearChatError();
+
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    if (imageFiles.length > 0 && !modelSupportsImages(modelCapabilities)) {
+      showToast("This model does not support images. Image files were not attached.");
+      // Still allow any non-image files in the same batch.
+      files = files.filter((file) => !file.type.startsWith("image/"));
+      if (files.length === 0) {
+        return;
+      }
+    }
+
     const oversizedFiles = files.filter((file) => file.size > attachmentSourceLimit(file));
     const supportedFiles = files.filter((file) => file.size <= attachmentSourceLimit(file));
     const previewResults = await Promise.allSettled(
@@ -800,7 +894,16 @@ export function Composer({
         return;
       }
 
-      setQueuedSubmissions((current) => [...current, buildQueuedSubmission(nextPrompt, attachments)]);
+      // Size-check at enqueue so the draft is not cleared then failed later (#42).
+      if (isPromptOverLimit(nextPrompt, MAX_PROMPT_SIZE)) {
+        showToast(formatPromptTooLargeError(MAX_PROMPT_SIZE));
+        return;
+      }
+
+      setQueuedSubmissions((current) => [
+        ...current,
+        createComposerQueueItem({ attachments, prompt: nextPrompt }),
+      ]);
       setDraft("");
       setAttachments([]);
       showToast("Queued for after the current response.");
@@ -816,16 +919,25 @@ export function Composer({
       shouldRestoreComposerAfterEditRef.current = false;
     }
 
-    window.dispatchEvent(new CustomEvent("wizzle:composer-send"));
-    const result = await sendPrompt(nextPrompt, attachments);
+    // Clear as soon as send starts; restore only if the message was never accepted (#79).
+    const draftSnapshot = nextPrompt;
+    const attachmentSnapshot = attachments;
+    setDraft("");
+    setAttachments([]);
 
-    if (result.ok) {
-      setDraft("");
-      setAttachments([]);
+    window.dispatchEvent(new CustomEvent("wizzle:composer-send"));
+    const result = await sendPrompt(nextPrompt, attachmentSnapshot);
+
+    if (!result.accepted) {
+      setDraft(draftSnapshot);
+      setAttachments(attachmentSnapshot);
+      showToast(result.error);
       return;
     }
 
-    showToast(result.error);
+    if (!result.ok && "error" in result && result.error) {
+      showToast(result.error);
+    }
   }
 
   function handleCancelEdit() {
@@ -898,26 +1010,37 @@ export function Composer({
     if (!nextComposerKey) {
       setDraft("");
       setAttachments([]);
-      setQueuedSubmissions([]);
       setIsComposerStateReady(false);
       return;
     }
 
     const cachedState = composerMemoryRef.current.get(nextComposerKey);
+    // Queue may already be rekeyed here (draft → real session promote, #45).
+    const existingQueue = getComposerSessionQueue(nextComposerKey);
 
     if (cachedState) {
       setDraft(cachedState.draft);
       setAttachments(cachedState.attachments);
-      setQueuedSubmissions(cachedState.queuedSubmissions);
+      hydrateComposerSessionQueue(nextComposerKey, cachedState.queuedSubmissions, {
+        overwrite: existingQueue.length === 0,
+      });
+      setIsComposerStateReady(Boolean(persistedComposerSessionId));
+      return;
+    }
+
+    if (existingQueue.length > 0) {
+      // Promoted/migrated queue already lives under this session id (#45).
+      setDraft("");
+      setAttachments([]);
       setIsComposerStateReady(Boolean(persistedComposerSessionId));
       return;
     }
 
     setDraft("");
     setAttachments([]);
-    setQueuedSubmissions([]);
 
     if (!persistedComposerSessionId) {
+      // Keep any in-memory queue for this session (e.g. remount after unmount).
       setIsComposerStateReady(false);
       return;
     }
@@ -933,13 +1056,19 @@ export function Composer({
 
         setDraft(composerState.draftText);
         setAttachments([]);
-        setQueuedSubmissions(
+        // Do not wipe a queue that arrived via draft promote while SQL was loading (#45).
+        hydrateComposerSessionQueue(
+          nextComposerKey,
           composerState.queuedMessages.map((message) => ({
             attachments: message.attachments,
             id: message.id,
             prompt: message.content,
-            status: message.status,
+            status:
+              message.status === "sending" || message.status === "failed"
+                ? message.status
+                : "queued",
           })),
+          { overwrite: getComposerSessionQueue(nextComposerKey).length === 0 },
         );
         setIsComposerStateReady(true);
       })
@@ -988,60 +1117,72 @@ export function Composer({
     [],
   );
 
+  // Drain when idle with queue items (remount / hydrate). Primary drain is store-driven (#43).
   useEffect(() => {
-    if (
-      isSendingMessage ||
-      isDispatchingQueuedPromptRef.current ||
-      !queuedSubmissionsRef.current.some((submission) => (submission.status ?? "queued") === "queued")
-    ) {
+    if (!selectedSessionId || isSendingMessage) {
+      return;
+    }
+    if (!queuedSubmissions.some((item) => (item.status ?? "queued") === "queued")) {
       return;
     }
 
-    const nextSubmission = queuedSubmissionsRef.current.find(
-      (submission) => (submission.status ?? "queued") === "queued",
-    );
-
-    if (!nextSubmission) {
-      return;
-    }
-
-    isDispatchingQueuedPromptRef.current = true;
-    clearChatError();
-    setQueuedSubmissions((current) =>
-      current.map((submission) =>
-        submission.id === nextSubmission.id ? { ...submission, status: "sending" } : submission,
-      ),
-    );
-    window.dispatchEvent(new CustomEvent("wizzle:composer-send"));
-    void sendPrompt(nextSubmission.prompt, nextSubmission.attachments)
-      .then((result) => {
-        setQueuedSubmissions((current) => {
-          if (!result.ok) {
-            return current.map((submission) =>
-              submission.id === nextSubmission.id ? { ...submission, status: "failed" } : submission,
-            );
+    void drainComposerSessionQueue(selectedSessionId, {
+      isSessionSending: (sessionId) =>
+        useWorkspaceStore.getState().sendingSessionIds.includes(sessionId),
+      resolveProjectIdForSession: (sessionId) => {
+        const state = useWorkspaceStore.getState();
+        for (const project of state.projects) {
+          if (project.sessions.some((session) => session.id === sessionId)) {
+            return project.id;
           }
-
-          return current.filter((submission) => submission.id !== nextSubmission.id);
-        });
-
-        if (!result.ok) {
-          showToast(result.error || "Queued prompt failed. Retry or delete it.");
         }
-      })
-      .catch(() => {
-        setQueuedSubmissions((current) =>
-          current.map((submission) =>
-            submission.id === nextSubmission.id ? { ...submission, status: "failed" } : submission,
-          ),
-        );
+        return state.selectedProjectId;
+      },
+      sendPrompt: (prompt, attachments, options) =>
+        useWorkspaceStore.getState().sendPrompt(prompt, attachments, options),
+    }).then(() => {
+      const failed = getComposerSessionQueue(selectedSessionId).find(
+        (item) => item.status === "failed",
+      );
+      if (failed) {
         showToast("Queued prompt failed. Retry or delete it.");
-      })
-      .finally(() => {
-        isDispatchingQueuedPromptRef.current = false;
-        setQueueDrainTick((current) => current + 1);
+      }
+    });
+  }, [isSendingMessage, queuedSubmissions, selectedSessionId]);
+
+  // Coalesced wake: drain even if Composer was unmounted earlier (#29 / #43).
+  useEffect(() => {
+    const onSessionRunWake = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId?: string }>).detail;
+      const wakeSessionId = detail?.sessionId ?? selectedSessionId;
+      if (!wakeSessionId) {
+        return;
+      }
+      if (selectedSessionId && wakeSessionId !== selectedSessionId) {
+        // Still drain the woken session in the background.
+      }
+      void drainComposerSessionQueue(wakeSessionId, {
+        isSessionSending: (sessionId) =>
+          useWorkspaceStore.getState().sendingSessionIds.includes(sessionId),
+        resolveProjectIdForSession: (sessionId) => {
+          const state = useWorkspaceStore.getState();
+          for (const project of state.projects) {
+            if (project.sessions.some((session) => session.id === sessionId)) {
+              return project.id;
+            }
+          }
+          return null;
+        },
+        sendPrompt: (prompt, attachments, options) =>
+          useWorkspaceStore.getState().sendPrompt(prompt, attachments, options),
       });
-  }, [clearChatError, isSendingMessage, queueDrainTick, sendPrompt, queuedSubmissions]);
+    };
+
+    window.addEventListener(SESSION_RUN_WAKE_EVENT, onSessionRunWake);
+    return () => {
+      window.removeEventListener(SESSION_RUN_WAKE_EVENT, onSessionRunWake);
+    };
+  }, [selectedSessionId]);
 
   useEffect(() => {
     if (activeMessageEdit) {
@@ -1217,7 +1358,7 @@ export function Composer({
 
       event.preventDefault();
       clearChatError();
-      setDraft((currentDraft) => `${currentDraft}${event.key}`);
+      setDraft((currentDraft) => `${currentDraft}${event.key}`, { notifyIfTruncated: true });
       focusComposer();
     }
 
@@ -1243,7 +1384,7 @@ export function Composer({
       clearChatError();
 
       if (text) {
-        setDraft((currentDraft) => `${currentDraft}${text}`);
+        setDraft((currentDraft) => `${currentDraft}${text}`, { notifyIfTruncated: true });
         focusComposer();
       }
 
@@ -1269,6 +1410,7 @@ export function Composer({
     interruptPrompt,
     pendingToolApproval,
     resolveToolApproval,
+    setDraft,
   ]);
 
   useEffect(() => {
@@ -1442,7 +1584,8 @@ export function Composer({
               maxLength={MAX_PROMPT_SIZE}
               onChange={(event) => {
                 clearChatError();
-                setDraft(event.currentTarget.value);
+                // maxLength blocks most typing; still clamp for IME / programmatic edges.
+                setDraft(event.currentTarget.value, { notifyIfTruncated: true });
               }}
               onContextMenu={(event) => {
                 event.stopPropagation();
@@ -1554,7 +1697,11 @@ export function Composer({
                 onClick={() => {
                   void handleAttachmentSelection();
                 }}
-                title="Attach file or image"
+                title={
+                  modelSupportsImageAttachments
+                    ? "Attach file or image"
+                    : "Attach file (images require an image-capable model)"
+                }
                 type="button"
               >
                 <Paperclip className="h-4 w-4" />
@@ -1568,6 +1715,11 @@ export function Composer({
                       ? "text-[#ff9b6b]"
                       : "text-[var(--color-text-secondary)]",
                   ].join(" ")}
+                  title={
+                    permissionMode === "full-access"
+                      ? "Automatically approves tools. Shell commands run with your OS user permissions and can access files and networks outside this project."
+                      : "Requires approval before each tool runs."
+                  }
                 >
                   {permissionModeLabel}
                 </span>
@@ -1578,7 +1730,7 @@ export function Composer({
                   onChange={(event) => setPermissionMode(event.currentTarget.value as PermissionMode)}
                   value={permissionMode}
                 >
-                  <option value="full-access">Full access</option>
+                  <option value="full-access">Auto approve (host shell access)</option>
                   <option value="manual-approve">Manual approve</option>
                 </select>
                 <ChevronDown
@@ -1676,7 +1828,9 @@ export function Composer({
                 >
                   <span className="min-w-0 truncate">{modelIdLabel}</span>
                   {selectedReasoningLevel ? (
-                    <span className="hidden shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] leading-none text-[var(--color-text-tertiary)] sm:inline">
+                    <span
+                      className={`hidden shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 sm:inline ${MODEL_META_TEXT_CLASS}`}
+                    >
                       {reasoningLevelLabel}
                     </span>
                   ) : null}
@@ -1700,18 +1854,17 @@ export function Composer({
 
                     {selectedReasoningLevels.length > 0 ? (
                       <div className="border-b border-[var(--color-border)] px-3 py-2">
-                        <div className="mb-1.5 text-[11px] font-medium text-[var(--color-text-tertiary)]">
+                        <div className="mb-1.5 text-[10px] font-medium text-[var(--color-text-tertiary)]">
                           Reasoning
                         </div>
-                        <div className="flex flex-wrap gap-1.5">
+                        <div className="flex flex-wrap gap-1">
                           {selectedReasoningLevels.map((level) => {
                             const isSelectedLevel = level === selectedReasoningLevel;
-                            const label = level.charAt(0).toUpperCase() + level.slice(1);
 
                             return (
                               <button
                                 className={[
-                                  "rounded-full border px-2.5 py-1 text-[12px] transition",
+                                  "rounded-full border px-2 py-0.5 transition",
                                   isSelectedLevel
                                     ? "border-[var(--color-border-strong)] bg-[var(--color-accent)] text-[var(--color-accent-foreground)]"
                                     : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]",
@@ -1720,7 +1873,9 @@ export function Composer({
                                 onClick={() => setReasoningLevel(level)}
                                 type="button"
                               >
-                                {label}
+                                <span className="text-[11px] font-normal leading-none">
+                                  {formatReasoningLevelLabel(level)}
+                                </span>
                               </button>
                             );
                           })}
@@ -1764,13 +1919,17 @@ export function Composer({
                                       <div className="truncate text-[13px]">
                                         {model.displayName ?? model.modelId}
                                       </div>
-                                      <div className="mt-0.5 truncate text-[11px] text-[var(--color-text-tertiary)]">
+                                      <div className={`mt-0.5 truncate ${MODEL_META_TEXT_CLASS}`}>
                                         {model.modelId}
                                       </div>
                                     </div>
                                     {model.reasoningLevels.length > 0 ? (
-                                      <span className="shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-tertiary)]">
-                                        {model.reasoningLevels.join(", ")}
+                                      <span
+                                        className={`shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 ${MODEL_META_TEXT_CLASS}`}
+                                      >
+                                        {model.reasoningLevels
+                                          .map(formatReasoningLevelLabel)
+                                          .join(", ")}
                                       </span>
                                     ) : null}
                                     {isSelectedModel ? (

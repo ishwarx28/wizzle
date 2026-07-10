@@ -3,12 +3,14 @@ use std::io::Cursor;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use image::{
     codecs::jpeg::JpegEncoder, imageops::FilterType, ColorType, DynamicImage, GenericImageView,
-    ImageFormat, Rgb, RgbImage,
+    ImageDecoder, ImageFormat, ImageReader, Limits, Rgb, RgbImage,
 };
 
 pub const MAX_INLINE_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_SOURCE_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION: u32 = 1600;
+const MAX_SOURCE_IMAGE_DIMENSION: u32 = 16_384;
+const MAX_DECODED_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
 const MIN_IMAGE_DIMENSION: u32 = 512;
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif"];
 
@@ -71,7 +73,20 @@ fn should_keep_original_image(extension: &str, byte_len: usize) -> bool {
 }
 
 fn process_raster_image(bytes: &[u8], extension: &str) -> Result<(String, Vec<u8>), String> {
-    let decoded = image::load_from_memory(bytes)
+    let reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|error| format!("Could not identify image preview: {error}"))?;
+    let mut decoder = reader
+        .into_decoder()
+        .map_err(|error| format!("Could not create image preview decoder: {error}"))?;
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_SOURCE_IMAGE_DIMENSION);
+    limits.max_image_height = Some(MAX_SOURCE_IMAGE_DIMENSION);
+    limits.max_alloc = Some(MAX_DECODED_IMAGE_BYTES);
+    decoder
+        .set_limits(limits)
+        .map_err(|error| format!("Image preview exceeds safe decode limits: {error}"))?;
+    let decoded = DynamicImage::from_decoder(decoder)
         .map_err(|error| format!("Could not decode image preview: {error}"))?;
     let has_alpha = decoded.color().has_alpha();
     let target_max_dimensions = target_dimensions(&decoded);

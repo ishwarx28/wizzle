@@ -5,8 +5,15 @@ import {
   sanitizeToolResultContentForReplay,
   type ChatRequestMessage,
 } from "../chat-stream";
-import { estimateTextTokens, type ReplayBlock } from "../context-budget";
+import {
+  estimateConversationTokens,
+  estimateTextTokens,
+  isCompactableReplayBlock,
+  resolveMaxReplayInput,
+  type ReplayBlock,
+} from "../context-budget";
 import { getAssistantConversationContent, getMessageParts } from "../message-parts";
+import { shouldManageSessionRuntimeForHelperCompletion } from "../session-runtime-helpers";
 import type {
   CompactedContextRecord,
   Message,
@@ -14,16 +21,10 @@ import type {
   PreviewFile,
   ProviderModelInfo,
 } from "../../types/workspace";
+import compactionSystemPrompt from "../prompts/compaction-system-prompt.txt?raw";
 
-export const COMPACTION_SYSTEM_PROMPT = `You are an anchored context summarization assistant for coding sessions.
-
-Summarize only the conversation history you are given. The newest turns may be kept verbatim outside your summary, so focus on the older context that still matters for continuing the work.
-
-If the prompt includes a <previous-summary> block, treat it as the current anchored summary. Update it with the new history by preserving still-true details, removing stale details, and merging in new facts.
-
-Always follow the exact output structure requested by the user prompt. Keep every section, preserve exact file paths and identifiers when known, and prefer terse bullets over paragraphs.
-
-Do not answer the conversation itself. Do not mention that you are summarizing, compacting, or merging context. Respond in the same language as the conversation.`;
+/** Loaded from `prompts/compaction-system-prompt.txt` (I-4). */
+export const COMPACTION_SYSTEM_PROMPT = compactionSystemPrompt.trim();
 
 const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
 <template>
@@ -104,11 +105,23 @@ function serializeAttachmentReferences(message: Message, previewFileMap: Map<str
     .map((file) => `[Attached ${file.kind}: ${file.name}]`);
 }
 
+function formatCompactionStatusSuffix(status: Message["status"] | undefined) {
+  if (status === "error") {
+    return " [status=error]";
+  }
+  if (status === "interrupted") {
+    return " [status=interrupted]";
+  }
+  return "";
+}
+
 function serializeMessageForCompaction(message: Message, previewFileMap: Map<string, PreviewFile>) {
+  const statusSuffix = formatCompactionStatusSuffix(message.status);
+
   if (message.role === "user") {
     const attachments = serializeAttachmentReferences(message, previewFileMap);
     return [
-      "USER:",
+      `USER${statusSuffix}:`,
       message.content.trim(),
       ...attachments,
     ].filter(Boolean).join("\n");
@@ -125,7 +138,7 @@ function serializeMessageForCompaction(message: Message, previewFileMap: Map<str
     const content = getAssistantConversationContent(message).trim();
 
     return [
-      "ASSISTANT:",
+      `ASSISTANT${statusSuffix}:`,
       content,
       ...toolCalls,
     ].filter(Boolean).join("\n");
@@ -136,7 +149,7 @@ function serializeMessageForCompaction(message: Message, previewFileMap: Map<str
   });
 
   return [
-    `TOOL ${message.toolName ?? "unknown"} (${message.toolCallId ?? message.id}):`,
+    `TOOL ${message.toolName ?? "unknown"} (${message.toolCallId ?? message.id})${statusSuffix}:`,
     truncateMiddle(replayContent, MAX_COMPACTION_TOOL_OUTPUT_CHARS),
   ].join("\n");
 }
@@ -301,6 +314,8 @@ async function requestSummary(options: {
       modelUuid: options.model.id,
       projectId: options.projectId,
       chatId: options.chatId,
+      // Frontend owns compacting/busy; do not Idle when the summary completes (#31 family).
+      manageSessionRuntime: shouldManageSessionRuntimeForHelperCompletion(),
       reasoningLevel: resolveCompactionReasoningLevel(options.model),
       body: {
         model: options.model.id,
@@ -323,12 +338,115 @@ async function requestSummary(options: {
   return parseCompletionText(response);
 }
 
+/** Same eligibility as live drop set — terminal history, not done-only (#34). */
 function isCompletedCandidateBlock(block: ReplayBlock, currentTurnId?: string) {
-  if (!block.turnId || block.turnId === currentTurnId || block.isActiveTurn || !block.isCompleted) {
-    return false;
+  return isCompactableReplayBlock(block, currentTurnId);
+}
+
+/**
+ * Compaction-request budget only: COMPACTION_SYSTEM_PROMPT + user prompt
+ * (history + template + previous summary). Does NOT count the agent system
+ * prompt or tool definitions — those are not sent on the summarizer call.
+ */
+export function estimateCompactionRequestTokens(options: {
+  historyText: string;
+  previousSummary?: string | null;
+  tokenizerKind?: string | null;
+}) {
+  const userPrompt = buildCompactionUserPrompt({
+    historyText: options.historyText,
+    previousSummary: options.previousSummary,
+  });
+
+  return estimateConversationTokens({
+    messages: [
+      {
+        content: COMPACTION_SYSTEM_PROMPT,
+        role: "system",
+      },
+      {
+        content: userPrompt,
+        role: "user",
+      },
+    ],
+    tokenizerKind: options.tokenizerKind,
+    tools: [],
+  });
+}
+
+/**
+ * Pack oldest → newer candidate turns into one summarizer call that fits the
+ * compaction input budget (no agent system/tools). Always includes at least
+ * the oldest candidate so the outer compact loop can make progress.
+ */
+export function selectOldestCompactionBatch(options: {
+  blocks: ReplayBlock[];
+  candidateTurnIds: string[];
+  currentTurnId?: string;
+  maxContext?: number | null;
+  maxOutputTokens?: number | null;
+  previousContext?: CompactedContextRecord | null;
+  previewFileMap: Map<string, PreviewFile>;
+  tokenLimit: number;
+  tokenizerKind?: string | null;
+}): string[] {
+  const candidateOrder = options.candidateTurnIds.filter((turnId, index, all) => all.indexOf(turnId) === index);
+  if (candidateOrder.length === 0) {
+    return [];
   }
 
-  return block.messages.every((message) => message.status === "done");
+  const blockByTurnId = new Map<string, ReplayBlock>();
+  for (const block of options.blocks) {
+    if (
+      block.turnId &&
+      candidateOrder.includes(block.turnId) &&
+      isCompletedCandidateBlock(block, options.currentTurnId)
+    ) {
+      blockByTurnId.set(block.turnId, block);
+    }
+  }
+
+  const orderedTurnIds = candidateOrder.filter((turnId) => blockByTurnId.has(turnId));
+  if (orderedTurnIds.length === 0) {
+    return [];
+  }
+
+  // Reserve room for the summary output (same cap family as compactReplayBlocks).
+  const reservedOutput = Math.min(
+    options.tokenLimit * 2,
+    typeof options.maxOutputTokens === "number" && Number.isFinite(options.maxOutputTokens) && options.maxOutputTokens > 0
+      ? Math.floor(options.maxOutputTokens)
+      : options.tokenLimit * 2,
+  );
+  const inputBudget = resolveMaxReplayInput(options.maxContext ?? undefined, reservedOutput);
+  const previousSummary = options.previousContext?.summary ?? null;
+  const batchTurnIds: string[] = [];
+
+  for (const turnId of orderedTurnIds) {
+    const nextBatch = [...batchTurnIds, turnId];
+    const historyText = buildCompactionHistoryText(
+      nextBatch.flatMap((id) => blockByTurnId.get(id)?.messages ?? []),
+      options.previewFileMap,
+    );
+    const requestTokens = estimateCompactionRequestTokens({
+      historyText,
+      previousSummary,
+      tokenizerKind: options.tokenizerKind,
+    });
+
+    if (requestTokens > inputBudget && batchTurnIds.length > 0) {
+      break;
+    }
+
+    batchTurnIds.push(turnId);
+    // Single oversized oldest turn: still force one turn so the loop progresses;
+    // compactReplayBlocks / the model may still fail if truly impossible.
+    if (requestTokens > inputBudget) {
+      break;
+    }
+  }
+
+  return batchTurnIds;
 }
 
 export async function compactReplayBlocks(options: {

@@ -6,9 +6,12 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
+    ops::{Deref, DerefMut},
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
+use uuid::Uuid;
 
 use crate::logging::log_desktop_event;
 
@@ -27,17 +30,61 @@ use super::{
         SetProjectExpandedInput, StoredAttachmentRecord, StoredMessageRecord,
         StoredMessageStepRecord, StoredProjectRecord, StoredSessionMetadata, StoredSettingsFile,
         StoredToolCallRecord, StoredToolResultRecord, StoredTurnSummaryRecord,
-        UpdateSessionSelectionInput, UpdateSessionTitleInput, UpsertTurnSummaryInput,
-        WorkspaceCompactedContextPayload, WorkspaceComposerStatePayload, WorkspaceMessagePayload,
-        WorkspaceMessageStepPayload, WorkspaceProjectPayload, WorkspaceQueuedMessagePayload,
-        WorkspaceSessionLoadPayload, WorkspaceSessionPayload, WorkspaceSnapshotPayload,
-        WorkspaceToolCallPayload, WorkspaceToolResultPayload, WorkspaceTurnSummaryPayload,
+        TruncateSessionTranscriptInput, UpdateSessionSelectionInput, UpdateSessionTitleInput,
+        UpsertTurnSummaryInput, WorkspaceCompactedContextPayload, WorkspaceComposerStatePayload,
+        WorkspaceMessagePayload, WorkspaceMessageStepPayload, WorkspaceProjectPayload,
+        WorkspaceQueuedMessagePayload, WorkspaceSessionLoadPayload, WorkspaceSessionPayload,
+        WorkspaceSnapshotPayload, WorkspaceToolCallPayload, WorkspaceToolResultPayload,
+        WorkspaceTurnSummaryPayload,
     },
     MAX_ATTACHMENT_BYTES,
 };
 
 const MIGRATION_VERSION: i64 = 1;
 const PROCESS_TAIL_BYTES: usize = 60_000;
+static MIGRATED_DATABASES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+static CONNECTION_POOL: OnceLock<Mutex<Option<(PathBuf, Connection)>>> = OnceLock::new();
+
+/// Borrowed SQLite connection that returns to a small process-local pool on drop.
+pub(crate) struct ManagedConnection {
+    connection: Option<Connection>,
+    path: PathBuf,
+}
+
+impl Deref for ManagedConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.connection
+            .as_ref()
+            .expect("managed SQLite connection is available")
+    }
+}
+
+impl DerefMut for ManagedConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.connection
+            .as_mut()
+            .expect("managed SQLite connection is available")
+    }
+}
+
+impl Drop for ManagedConnection {
+    fn drop(&mut self) {
+        let Some(connection) = self.connection.take() else {
+            return;
+        };
+        let Ok(pool) = CONNECTION_POOL
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+        else {
+            return;
+        };
+        let mut pool = pool;
+        // Keep one warm connection for the current database path.
+        *pool = Some((self.path.clone(), connection));
+    }
+}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +100,11 @@ pub struct WorkspaceProcessPayload {
     pub status: String,
     pub stderr_tail: String,
     pub stdout_tail: String,
+    /// Conversation turn that spawned this process (#75).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 pub struct NewProcessRecord {
@@ -63,6 +115,8 @@ pub struct NewProcessRecord {
     pub session_id: String,
     pub started_at_ms: u64,
     pub status: String,
+    pub tool_call_id: Option<String>,
+    pub turn_id: Option<String>,
 }
 
 pub(crate) fn now_unix_ms() -> u64 {
@@ -133,6 +187,10 @@ fn compact_time_label(timestamp_ms: u64) -> String {
     }
 
     format!("{}y", delta_days / 365)
+}
+
+fn new_project_id() -> String {
+    format!("project-{}", Uuid::new_v4())
 }
 
 fn read_compacted_context_from_row(
@@ -250,9 +308,30 @@ fn decode_data_url(data_url: &str) -> Result<(Vec<u8>, Option<String>), String> 
     Ok((bytes, mime_type))
 }
 
-pub(crate) fn open_database() -> Result<Connection, String> {
+pub(crate) fn open_database() -> Result<ManagedConnection, String> {
     let root = ensure_workspace_storage()?;
     let db_path = database_path(&root);
+    let pool = CONNECTION_POOL.get_or_init(|| Mutex::new(None));
+    let mut pool = pool
+        .lock()
+        .map_err(|_| "Could not access the Wizzle SQLite connection pool.".to_string())?;
+
+    if let Some((pooled_path, conn)) = pool.take() {
+        if pooled_path == db_path {
+            // Re-assert session-critical pragmas on reuse.
+            conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")
+                .map_err(|error| {
+                    db_error("Could not configure the Wizzle SQLite database", error)
+                })?;
+            return Ok(ManagedConnection {
+                connection: Some(conn),
+                path: db_path,
+            });
+        }
+        // Different path: drop the stale pooled connection.
+        drop(conn);
+    }
+
     let mut conn = Connection::open(&db_path)
         .map_err(|error| db_error("Could not open the Wizzle SQLite database", error))?;
 
@@ -264,9 +343,42 @@ pub(crate) fn open_database() -> Result<Connection, String> {
         ",
     )
     .map_err(|error| db_error("Could not configure the Wizzle SQLite database", error))?;
-    run_migrations(&mut conn)?;
+    ensure_database_migrated(&mut conn, &db_path)?;
 
-    Ok(conn)
+    Ok(ManagedConnection {
+        connection: Some(conn),
+        path: db_path,
+    })
+}
+
+fn ensure_database_migrated(conn: &mut Connection, db_path: &Path) -> Result<(), String> {
+    let migrated_databases = MIGRATED_DATABASES.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut migrated_databases = migrated_databases
+        .lock()
+        .map_err(|_| "Could not coordinate Wizzle database migrations.".to_string())?;
+
+    if migrated_databases.contains(db_path) {
+        return Ok(());
+    }
+
+    run_migrations(conn)?;
+    migrated_databases.insert(db_path.to_path_buf());
+    Ok(())
+}
+
+pub(crate) fn resolve_session_tool_permission(
+    session_id: &str,
+    project_id: &str,
+) -> Result<String, String> {
+    let conn = open_database()?;
+    conn.query_row(
+        "SELECT permission_mode FROM sessions WHERE id = ?1 AND project_id = ?2",
+        params![session_id, project_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|error| db_error("Could not verify the tool permission mode", error))?
+    .ok_or_else(|| "The tool request does not belong to a stored project session.".to_string())
 }
 
 fn run_migrations(conn: &mut Connection) -> Result<(), String> {
@@ -291,7 +403,11 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
         .map_err(|error| db_error("Could not read Wizzle migrations", error))?;
 
     if applied.is_some() {
+        // Includes turn part + turn budget column ensures / legacy summary migration.
         ensure_session_metadata_columns(conn)?;
+        ensure_process_link_columns(conn)?;
+        ensure_tokenizer_json_columns(conn)?;
+        repair_self_parent_tool_calls(conn)?;
         return Ok(());
     }
 
@@ -308,6 +424,7 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
           endpoint TEXT NOT NULL,
           api_key_encrypted BLOB NULL,
           default_model_id TEXT NULL,
+          tokenizer_json TEXT NULL,
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL
         );
@@ -322,6 +439,7 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
           max_context INTEGER NOT NULL,
           max_output_tokens INTEGER NULL,
           tokenizer_kind TEXT NULL,
+          tokenizer_json TEXT NULL,
           is_pinned INTEGER NOT NULL DEFAULT 0,
           last_used_at INTEGER NULL,
           created_at INTEGER NOT NULL,
@@ -392,6 +510,13 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
           status TEXT NOT NULL,
           compacted INTEGER NOT NULL DEFAULT 0,
           total_tokens INTEGER NOT NULL DEFAULT 0,
+          estimated_tokens_image_capable INTEGER NULL,
+          estimated_tokens_text_only INTEGER NULL,
+          estimator_version INTEGER NULL,
+          replay_message_count_image_capable INTEGER NULL,
+          replay_message_count_text_only INTEGER NULL,
+          summary_message_ids TEXT NULL,
+          summary_completed_at INTEGER NULL,
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
           UNIQUE(session_id, turn_index)
@@ -457,7 +582,9 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
           started_at INTEGER NOT NULL,
           ended_at INTEGER NULL,
           stdout_tail TEXT NOT NULL DEFAULT '',
-          stderr_tail TEXT NOT NULL DEFAULT ''
+          stderr_tail TEXT NOT NULL DEFAULT '',
+          turn_id TEXT NULL,
+          tool_call_id TEXT NULL
         );
 
         CREATE TABLE IF NOT EXISTS workspace_settings (
@@ -521,7 +648,73 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
     .map_err(|error| db_error("Could not record the Wizzle migration", error))?;
 
     tx.commit()
-        .map_err(|error| db_error("Could not commit the Wizzle migration", error))
+        .map_err(|error| db_error("Could not commit the Wizzle migration", error))?;
+
+    ensure_session_metadata_columns(conn)?;
+    ensure_turn_budget_columns(conn)?;
+    ensure_process_link_columns(conn)?;
+    ensure_tokenizer_json_columns(conn)?;
+    repair_self_parent_tool_calls(conn)?;
+    Ok(())
+}
+
+/// Provider/model HuggingFace tokenizer.json source paths (#53).
+fn ensure_tokenizer_json_columns(conn: &Connection) -> Result<(), String> {
+    if !table_has_column(conn, "providers", "tokenizer_json")? {
+        conn.execute(
+            "ALTER TABLE providers ADD COLUMN tokenizer_json TEXT NULL",
+            [],
+        )
+        .map_err(|error| db_error("Could not update provider tokenizer columns", error))?;
+    }
+
+    if !table_has_column(conn, "models", "tokenizer_json")? {
+        conn.execute("ALTER TABLE models ADD COLUMN tokenizer_json TEXT NULL", [])
+            .map_err(|error| db_error("Could not update model tokenizer columns", error))?;
+    }
+
+    Ok(())
+}
+
+/// Link background processes to the turn/tool that spawned them (#75).
+fn ensure_process_link_columns(conn: &Connection) -> Result<(), String> {
+    for (column_name, column_type) in [("turn_id", "TEXT NULL"), ("tool_call_id", "TEXT NULL")] {
+        if !table_has_column(conn, "processes", column_name)? {
+            conn.execute(
+                &format!("ALTER TABLE processes ADD COLUMN {column_name} {column_type}"),
+                [],
+            )
+            .map_err(|error| db_error("Could not update Wizzle process link columns", error))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Repair tool_call rows that parented themselves (re-upsert bug).
+fn repair_self_parent_tool_calls(conn: &Connection) -> Result<(), String> {
+    if !table_has_column(conn, "turn_parts", "parent_part_id")?
+        || !table_has_column(conn, "turn_parts", "message_id")?
+    {
+        return Ok(());
+    }
+
+    conn.execute(
+        "
+        UPDATE turn_parts
+        SET parent_part_id = message_id
+        WHERE part_type = 'tool_call'
+          AND parent_part_id IS NOT NULL
+          AND parent_part_id = id
+          AND message_id IS NOT NULL
+          AND message_id != ''
+          AND message_id != id
+        ",
+        [],
+    )
+    .map_err(|error| db_error("Could not repair self-parent tool_call parts", error))?;
+
+    Ok(())
 }
 
 fn table_has_column(
@@ -671,7 +864,118 @@ fn ensure_session_metadata_columns(conn: &Connection) -> Result<(), String> {
         .map_err(|error| db_error("Could not update Wizzle session metadata", error))?;
     }
 
-    ensure_turn_part_columns(conn)
+    ensure_turn_part_columns(conn)?;
+    ensure_turn_budget_columns(conn)
+}
+
+/// Budget cache columns live on the real conversation turn (#71), not summary-* turns.
+fn ensure_turn_budget_columns(conn: &Connection) -> Result<(), String> {
+    let columns = [
+        ("estimated_tokens_image_capable", "INTEGER NULL"),
+        ("estimated_tokens_text_only", "INTEGER NULL"),
+        ("estimator_version", "INTEGER NULL"),
+        ("replay_message_count_image_capable", "INTEGER NULL"),
+        ("replay_message_count_text_only", "INTEGER NULL"),
+        ("summary_message_ids", "TEXT NULL"),
+        ("summary_completed_at", "INTEGER NULL"),
+    ];
+
+    for (column_name, column_type) in columns {
+        if !table_has_column(conn, "turns", column_name)? {
+            conn.execute(
+                &format!("ALTER TABLE turns ADD COLUMN {column_name} {column_type}"),
+                [],
+            )
+            .map_err(|error| db_error("Could not update Wizzle turn budget columns", error))?;
+        }
+    }
+
+    migrate_legacy_summary_turns_onto_real_turns(conn)?;
+    Ok(())
+}
+
+/// One-time: copy budget fields from summary-* turn_parts onto real turns, then drop fake turns.
+fn migrate_legacy_summary_turns_onto_real_turns(conn: &Connection) -> Result<(), String> {
+    if !table_has_column(conn, "turn_parts", "summary_turn_id")? {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "
+        UPDATE turns
+        SET
+          estimated_tokens_image_capable = (
+            SELECT tp.estimated_tokens_image_capable
+            FROM turn_parts tp
+            WHERE tp.part_type = 'turn_summary'
+              AND tp.summary_turn_id = turns.id
+            ORDER BY tp.updated_at DESC
+            LIMIT 1
+          ),
+          estimated_tokens_text_only = (
+            SELECT tp.estimated_tokens_text_only
+            FROM turn_parts tp
+            WHERE tp.part_type = 'turn_summary'
+              AND tp.summary_turn_id = turns.id
+            ORDER BY tp.updated_at DESC
+            LIMIT 1
+          ),
+          estimator_version = (
+            SELECT tp.estimator_version
+            FROM turn_parts tp
+            WHERE tp.part_type = 'turn_summary'
+              AND tp.summary_turn_id = turns.id
+            ORDER BY tp.updated_at DESC
+            LIMIT 1
+          ),
+          replay_message_count_image_capable = (
+            SELECT tp.replay_message_count_image_capable
+            FROM turn_parts tp
+            WHERE tp.part_type = 'turn_summary'
+              AND tp.summary_turn_id = turns.id
+            ORDER BY tp.updated_at DESC
+            LIMIT 1
+          ),
+          replay_message_count_text_only = (
+            SELECT tp.replay_message_count_text_only
+            FROM turn_parts tp
+            WHERE tp.part_type = 'turn_summary'
+              AND tp.summary_turn_id = turns.id
+            ORDER BY tp.updated_at DESC
+            LIMIT 1
+          ),
+          summary_message_ids = (
+            SELECT tp.summary_message_ids
+            FROM turn_parts tp
+            WHERE tp.part_type = 'turn_summary'
+              AND tp.summary_turn_id = turns.id
+            ORDER BY tp.updated_at DESC
+            LIMIT 1
+          ),
+          summary_completed_at = (
+            SELECT COALESCE(tp.completed_at, tp.updated_at)
+            FROM turn_parts tp
+            WHERE tp.part_type = 'turn_summary'
+              AND tp.summary_turn_id = turns.id
+            ORDER BY tp.updated_at DESC
+            LIMIT 1
+          )
+        WHERE EXISTS (
+          SELECT 1
+          FROM turn_parts tp
+          WHERE tp.part_type = 'turn_summary'
+            AND tp.summary_turn_id = turns.id
+        )
+          AND turns.estimator_version IS NULL;
+
+        DELETE FROM turns
+        WHERE id LIKE 'summary-%'
+           OR id LIKE 'summary-turn-%';
+        ",
+    )
+    .map_err(|error| db_error("Could not migrate legacy Wizzle turn summaries", error))?;
+
+    Ok(())
 }
 
 fn ensure_turn_part_columns(conn: &Connection) -> Result<(), String> {
@@ -762,13 +1066,15 @@ fn row_to_process_payload(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workspace
         status: row.get(8)?,
         stderr_tail: row.get(10)?,
         stdout_tail: row.get(9)?,
+        tool_call_id: row.get(12)?,
+        turn_id: row.get(11)?,
     })
 }
 
 fn process_select_sql() -> &'static str {
     "
     SELECT id, session_id, command, cwd, pid, exit_code, started_at, ended_at,
-           status, stdout_tail, stderr_tail
+           status, stdout_tail, stderr_tail, turn_id, tool_call_id
     FROM processes
     "
 }
@@ -798,14 +1104,22 @@ pub fn mark_orphaned_processes_on_startup() -> Result<(), String> {
 pub fn insert_process(record: NewProcessRecord) -> Result<WorkspaceProcessPayload, String> {
     validate_storage_id("session", &record.session_id)?;
     validate_storage_id("process", &record.id)?;
+    if let Some(turn_id) = record.turn_id.as_deref() {
+        validate_storage_id("turn", turn_id)?;
+    }
+    // Tool call ids may include underscores (provider ids); same alphabet as storage ids.
+    if let Some(tool_call_id) = record.tool_call_id.as_deref() {
+        validate_storage_id("tool call", tool_call_id)?;
+    }
     let conn = open_database()?;
+    ensure_process_link_columns(&conn)?;
 
     conn.execute(
         "
         INSERT INTO processes (
           id, session_id, command, cwd, pid, status, exit_code, started_at,
-          ended_at, stdout_tail, stderr_tail
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, NULL, '', '')
+          ended_at, stdout_tail, stderr_tail, turn_id, tool_call_id
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, NULL, '', '', ?8, ?9)
         ",
         params![
             record.id,
@@ -814,7 +1128,9 @@ pub fn insert_process(record: NewProcessRecord) -> Result<WorkspaceProcessPayloa
             record.cwd,
             record.pid.map(|pid| pid as i64),
             record.status,
-            record.started_at_ms as i64
+            record.started_at_ms as i64,
+            record.turn_id,
+            record.tool_call_id,
         ],
     )
     .map_err(|error| db_error("Could not record the Wizzle process", error))?;
@@ -1065,33 +1381,138 @@ fn to_workspace_turn_summary(record: StoredTurnSummaryRecord) -> WorkspaceTurnSu
     }
 }
 
-fn normalize_message_record(record: StoredMessageRecord) -> StoredMessageRecord {
-    if record.status.as_deref() != Some("streaming") {
+fn is_incomplete_lifecycle_status(status: Option<&str>) -> bool {
+    matches!(status, Some("streaming" | "pending" | "running"))
+}
+
+/// Crash/reload recovery (#8 / #68): unfinished work becomes `interrupted`, never `done`.
+/// Covers streaming, pending, and running message/part/tool statuses (not only streaming).
+fn recover_incomplete_message(mut record: StoredMessageRecord) -> StoredMessageRecord {
+    let message_incomplete = is_incomplete_lifecycle_status(record.status.as_deref());
+    let has_incomplete_parts = record
+        .parts
+        .iter()
+        .any(|part| is_incomplete_lifecycle_status(part.status.as_deref()));
+    let has_incomplete_tool_calls = record
+        .tool_calls
+        .iter()
+        .any(|tool_call| is_incomplete_lifecycle_status(tool_call.status.as_deref()));
+    let has_incomplete_tool_results = record
+        .tool_results
+        .iter()
+        .any(|tool_result| is_incomplete_lifecycle_status(tool_result.status.as_deref()));
+
+    if !message_incomplete
+        && !has_incomplete_parts
+        && !has_incomplete_tool_calls
+        && !has_incomplete_tool_results
+    {
+        // Historical settle bug left user anchors as interrupted/error (#9); repair on load.
+        if record.role == "user"
+            && matches!(record.status.as_deref(), Some("interrupted" | "error"))
+        {
+            record.status = Some("done".to_string());
+        }
         return record;
     }
 
-    let has_content = !record.content.trim().is_empty();
-    StoredMessageRecord {
-        assistant_phase: record.assistant_phase,
-        content: if has_content {
-            record.content
-        } else {
-            "Response interrupted.".to_string()
-        },
-        status: Some("done".to_string()),
-        ..record
+    // User prompts were accepted; never leave them non-done after crash recovery.
+    if record.role == "user" {
+        record.status = Some("done".to_string());
+        for part in &mut record.parts {
+            if is_incomplete_lifecycle_status(part.status.as_deref()) || part.status.is_none() {
+                part.status = Some("done".to_string());
+            }
+        }
+        if record.completed_at_ms.is_none() {
+            record.completed_at_ms = Some(record.created_at);
+        }
+        return record;
     }
+
+    let has_visible_content = !record.content.trim().is_empty()
+        || record.parts.iter().any(|part| {
+            matches!(part.r#type.as_str(), "content" | "activity_content")
+                && part
+                    .content
+                    .as_ref()
+                    .is_some_and(|value| !value.trim().is_empty())
+        });
+
+    // Keep any partial text; only inject fallback when the assistant is empty.
+    if record.role == "assistant" && !has_visible_content {
+        record.content = "Response interrupted.".to_string();
+    }
+
+    record.status = Some("interrupted".to_string());
+    if record.completed_at_ms.is_none() {
+        record.completed_at_ms = Some(record.created_at);
+    }
+
+    for part in &mut record.parts {
+        if is_incomplete_lifecycle_status(part.status.as_deref())
+            || (message_incomplete && part.status.is_none())
+        {
+            // Terminal error parts stay error; other open work becomes interrupted.
+            if part.status.as_deref() != Some("error") {
+                part.status = Some("interrupted".to_string());
+            }
+        }
+    }
+
+    for tool_call in &mut record.tool_calls {
+        if (is_incomplete_lifecycle_status(tool_call.status.as_deref())
+            || (message_incomplete && tool_call.status.is_none()))
+            && tool_call.status.as_deref() != Some("error")
+        {
+            tool_call.status = Some("interrupted".to_string());
+        }
+    }
+
+    for tool_result in &mut record.tool_results {
+        if is_incomplete_lifecycle_status(tool_result.status.as_deref())
+            && tool_result.status.as_deref() != Some("error")
+        {
+            tool_result.status = Some("interrupted".to_string());
+        }
+    }
+
+    record
+}
+
+fn normalize_message_record(record: StoredMessageRecord) -> StoredMessageRecord {
+    recover_incomplete_message(record)
+}
+
+/// Cold-load recovery (#68): a process restart cannot continue in-flight turns.
+fn interrupt_running_turns_on_load(conn: &Connection, session_id: &str) -> Result<(), String> {
+    let now = now_unix_ms() as i64;
+    conn.execute(
+        "
+        UPDATE turns
+        SET status = 'interrupted',
+            updated_at = MAX(updated_at, ?1)
+        WHERE session_id = ?2
+          AND status = 'running'
+        ",
+        params![now, session_id],
+    )
+    .map_err(|error| db_error("Could not recover running Wizzle turns on load", error))?;
+    Ok(())
 }
 
 fn derive_legacy_steps(record: &StoredMessageRecord) -> Vec<StoredMessageStepRecord> {
     let mut steps = Vec::new();
 
     for tool_call in &record.tool_calls {
+        let tool_call_part_id = format!("{}-tool-call-{}", record.id, tool_call.id);
         steps.push(StoredMessageStepRecord {
             created_at_ms: record.started_at_ms.or(Some(record.created_at)),
-            id: format!("{}-tool-call-{}", record.id, tool_call.id),
+            id: tool_call_part_id.clone(),
             input: tool_call.input.clone(),
             name: Some(tool_call.name.clone()),
+            // tool_call parents the assistant message anchor.
+            parent_part_id: Some(record.id.clone()),
             status: tool_call.status.clone(),
             tool_call_id: Some(tool_call.id.clone()),
             r#type: "tool_call".to_string(),
@@ -1108,6 +1529,7 @@ fn derive_legacy_steps(record: &StoredMessageRecord) -> Vec<StoredMessageStepRec
                 error: tool_result.error.clone(),
                 id: tool_result.id.clone(),
                 output: tool_result.output.clone(),
+                parent_part_id: Some(tool_call_part_id.clone()),
                 status: tool_result.status.clone(),
                 tool_call_id: tool_result
                     .tool_call_id
@@ -1512,10 +1934,12 @@ fn load_session_history(
 
         match message.role.as_str() {
             "assistant" => {
+                // Include activity_content so reload keeps pre-tool assistant text
+                // on the message anchor (matches frontend synchronizeMessageFromParts).
                 message.content = message
                     .parts
                     .iter()
-                    .filter(|part| part.r#type == "content")
+                    .filter(|part| part.r#type == "content" || part.r#type == "activity_content")
                     .filter_map(|part| part.content.clone())
                     .collect::<Vec<_>>()
                     .join("");
@@ -1564,14 +1988,8 @@ fn load_session_history(
             _ => {}
         }
 
-        if message.status.as_deref() == Some("streaming") && message.completed_at_ms.is_none() {
-            message.status = Some("interrupted".to_string());
-            for part in &mut message.parts {
-                if part.status.as_deref() == Some("streaming") || part.status.is_none() {
-                    part.status = Some("interrupted".to_string());
-                }
-            }
-        }
+        // Same recovery as JSON/legacy load: never promote unfinished work to done (#8/#68).
+        *message = recover_incomplete_message(std::mem::take(message));
     }
 
     fn parse_summary_message_ids(raw_value: Option<String>) -> Result<Vec<String>, String> {
@@ -1768,13 +2186,121 @@ fn load_session_history(
         }
     }
 
+    // Prefer budget columns on real turns (#71); keep any legacy part-based summaries as fallback.
+    let mut summary_by_turn = std::collections::HashMap::<String, StoredTurnSummaryRecord>::new();
+    for summary in summaries {
+        if !summary.turn_id.is_empty() {
+            summary_by_turn.insert(summary.turn_id.clone(), summary);
+        }
+    }
+    for summary in load_turn_budget_summaries(conn, session_id)? {
+        summary_by_turn.insert(summary.turn_id.clone(), summary);
+    }
+    let mut merged_summaries = summary_by_turn.into_values().collect::<Vec<_>>();
+    merged_summaries.sort_by(|left, right| left.turn_id.cmp(&right.turn_id));
+
     Ok((
         message_order
             .into_iter()
             .filter_map(|message_id| messages.remove(&message_id))
             .collect(),
-        summaries,
+        merged_summaries,
     ))
+}
+
+fn load_turn_budget_summaries(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<StoredTurnSummaryRecord>, String> {
+    if !table_has_column(conn, "turns", "estimator_version")? {
+        return Ok(Vec::new());
+    }
+
+    let mut statement = conn
+        .prepare(
+            "
+            SELECT
+              id,
+              estimated_tokens_image_capable,
+              estimated_tokens_text_only,
+              estimator_version,
+              replay_message_count_image_capable,
+              replay_message_count_text_only,
+              summary_message_ids,
+              summary_completed_at,
+              updated_at
+            FROM turns
+            WHERE session_id = ?1
+              AND estimator_version IS NOT NULL
+              AND id NOT LIKE 'summary-%'
+            ORDER BY turn_index ASC
+            ",
+        )
+        .map_err(|error| db_error("Could not prepare turn budget loading", error))?;
+
+    let rows = statement
+        .query_map(params![session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<i64>>(7)?,
+                row.get::<_, i64>(8)?,
+            ))
+        })
+        .map_err(|error| db_error("Could not read turn budget rows", error))?;
+
+    let mut summaries = Vec::new();
+    for row in rows {
+        let (
+            turn_id,
+            estimated_tokens_image_capable,
+            estimated_tokens_text_only,
+            estimator_version,
+            replay_message_count_image_capable,
+            replay_message_count_text_only,
+            summary_message_ids,
+            summary_completed_at,
+            updated_at,
+        ) = row.map_err(|error| db_error("Could not parse turn budget row", error))?;
+
+        let Some(estimator_version) = estimator_version else {
+            continue;
+        };
+
+        let message_ids = parse_summary_message_ids_value(summary_message_ids)?;
+        summaries.push(StoredTurnSummaryRecord {
+            completed_at_ms: summary_completed_at
+                .map(|value| value.max(0) as u64)
+                .unwrap_or_else(|| updated_at.max(0) as u64),
+            estimated_tokens_image_capable: estimated_tokens_image_capable.unwrap_or(0).max(0)
+                as u64,
+            estimated_tokens_text_only: estimated_tokens_text_only.unwrap_or(0).max(0) as u64,
+            estimator_version: estimator_version.max(0) as u32,
+            message_ids,
+            replay_message_count_image_capable: replay_message_count_image_capable
+                .unwrap_or(0)
+                .max(0) as u64,
+            replay_message_count_text_only: replay_message_count_text_only.unwrap_or(0).max(0)
+                as u64,
+            turn_id,
+        });
+    }
+
+    Ok(summaries)
+}
+
+fn parse_summary_message_ids_value(raw_value: Option<String>) -> Result<Vec<String>, String> {
+    let Some(raw_value) = raw_value.filter(|value| !value.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
+
+    serde_json::from_str::<Vec<String>>(&raw_value)
+        .map_err(|error| format!("Could not parse saved Wizzle summary message ids: {error}"))
 }
 
 fn load_workspace_session_payload(
@@ -1788,6 +2314,8 @@ fn load_workspace_session_payload(
     if let Some(compacted_context) = metadata.compacted_context.as_mut() {
         compacted_context.compacted_turn_ids = read_compacted_turn_ids(conn, session_id)?;
     }
+    // Cold load: in-flight agent state is gone — close stuck running turns (#68).
+    interrupt_running_turns_on_load(conn, session_id)?;
     let (messages, summaries) = load_session_history(conn, session_id)?;
     let root = ensure_workspace_storage()?;
     let session_root = sqlite_session_dir(&root, session_id)?;
@@ -2127,7 +2655,7 @@ pub fn add_project_from_path(root_path: &str) -> Result<WorkspaceSnapshotPayload
     }
 
     let timestamp = now_unix_ms();
-    let project_id = format!("project-{timestamp}");
+    let project_id = new_project_id();
     let project_name = Path::new(&normalized_root_path)
         .file_name()
         .and_then(|value| value.to_str())
@@ -2161,17 +2689,24 @@ pub fn remove_project_by_id(project_id: &str) -> Result<WorkspaceSnapshotPayload
     validate_storage_id("project", project_id)?;
     let mut conn = open_database()?;
     let session_ids = read_session_ids_for_project(&conn, project_id)?;
-    let tx = conn
-        .transaction()
-        .map_err(|error| db_error("Could not start project removal", error))?;
+    let quarantined = quarantine_session_directories(&session_ids)?;
+    let deletion_result = (|| {
+        let tx = conn
+            .transaction()
+            .map_err(|error| db_error("Could not start project removal", error))?;
 
-    tx.execute("DELETE FROM projects WHERE id = ?1", params![project_id])
-        .map_err(|error| db_error("Could not remove the Wizzle project", error))?;
-    update_settings_after_project_delete(&tx, project_id)?;
-    tx.commit()
-        .map_err(|error| db_error("Could not finish project removal", error))?;
+        tx.execute("DELETE FROM projects WHERE id = ?1", params![project_id])
+            .map_err(|error| db_error("Could not remove the Wizzle project", error))?;
+        update_settings_after_project_delete(&tx, project_id)?;
+        tx.commit()
+            .map_err(|error| db_error("Could not finish project removal", error))
+    })();
 
-    remove_session_directories(&session_ids)?;
+    if let Err(error) = deletion_result {
+        return Err(restore_after_failed_deletion(error, &quarantined));
+    }
+
+    finalize_quarantined_deletion(&quarantined);
     build_workspace_snapshot()
 }
 
@@ -2220,22 +2755,80 @@ fn update_settings_after_project_delete(
     Ok(())
 }
 
-fn remove_session_directories(session_ids: &[String]) -> Result<(), String> {
+struct QuarantinedSessionDirectory {
+    original: PathBuf,
+    quarantined: PathBuf,
+    session_id: String,
+}
+
+fn quarantine_session_directories(
+    session_ids: &[String],
+) -> Result<Vec<QuarantinedSessionDirectory>, String> {
     let root = ensure_workspace_storage()?;
+    let trash_root = root.join("sessions").join(".trash");
+    let mut quarantined = Vec::new();
 
     for session_id in session_ids {
         let session_dir = sqlite_session_dir(&root, session_id)?;
-        if session_dir.exists() {
-            fs::remove_dir_all(&session_dir).map_err(|error| {
-                io_error(
-                    &format!("Could not remove local files for session {session_id}"),
-                    error,
-                )
-            })?;
+        if !session_dir.exists() {
+            continue;
+        }
+
+        ensure_dir(&trash_root)?;
+        let trash_dir = trash_root.join(format!("{session_id}-{}", Uuid::new_v4()));
+        if let Err(error) = fs::rename(&session_dir, &trash_dir) {
+            let message = io_error(
+                &format!("Could not prepare local files for deleting session {session_id}"),
+                error,
+            );
+            return Err(restore_after_failed_deletion(message, &quarantined));
+        }
+
+        quarantined.push(QuarantinedSessionDirectory {
+            original: session_dir,
+            quarantined: trash_dir,
+            session_id: session_id.clone(),
+        });
+    }
+
+    Ok(quarantined)
+}
+
+fn restore_after_failed_deletion(
+    error: String,
+    quarantined: &[QuarantinedSessionDirectory],
+) -> String {
+    let mut restore_failures = Vec::new();
+    for entry in quarantined.iter().rev() {
+        if let Err(restore_error) = fs::rename(&entry.quarantined, &entry.original) {
+            restore_failures.push(format!("{}: {restore_error}", entry.session_id));
         }
     }
 
-    Ok(())
+    if restore_failures.is_empty() {
+        error
+    } else {
+        format!(
+            "{error} Local files could not be restored for: {}.",
+            restore_failures.join(", ")
+        )
+    }
+}
+
+fn finalize_quarantined_deletion(quarantined: &[QuarantinedSessionDirectory]) {
+    for entry in quarantined {
+        if let Err(error) = fs::remove_dir_all(&entry.quarantined) {
+            log_desktop_event(
+                "error",
+                "desktop.workspace",
+                "session_file_cleanup_failed",
+                json!({
+                    "errorKind": error.kind().to_string(),
+                    "sessionIdLength": entry.session_id.len(),
+                }),
+            );
+        }
+    }
 }
 
 pub fn save_workspace_settings(input: SaveWorkspaceSettingsInput) -> Result<(), String> {
@@ -2306,36 +2899,56 @@ pub fn delete_session(input: DeleteSessionInput) -> Result<WorkspaceSnapshotPayl
     validate_storage_id("project", &input.project_id)?;
     validate_storage_id("session", &input.session_id)?;
     let mut conn = open_database()?;
+    let session_exists = conn
+        .query_row(
+            "SELECT 1 FROM sessions WHERE id = ?1 AND project_id = ?2",
+            params![input.session_id, input.project_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| db_error("Could not verify the Wizzle session", error))?
+        .is_some();
+    if !session_exists {
+        return build_workspace_snapshot();
+    }
+
+    let quarantined = quarantine_session_directories(std::slice::from_ref(&input.session_id))?;
     let timestamp = now_unix_ms();
-    let tx = conn
-        .transaction()
-        .map_err(|error| db_error("Could not start session deletion", error))?;
+    let deletion_result = (|| {
+        let tx = conn
+            .transaction()
+            .map_err(|error| db_error("Could not start session deletion", error))?;
 
-    tx.execute(
-        "DELETE FROM sessions WHERE id = ?1 AND project_id = ?2",
-        params![input.session_id, input.project_id],
-    )
-    .map_err(|error| db_error("Could not delete the Wizzle session", error))?;
-    tx.execute(
-        "UPDATE projects SET updated_at = ?1 WHERE id = ?2",
-        params![timestamp as i64, input.project_id],
-    )
-    .map_err(|error| db_error("Could not update the Wizzle project", error))?;
-    tx.execute(
-        "
-        UPDATE workspace_settings
-        SET selected_session_id = NULL
-        WHERE id = 1
-          AND selected_project_id = ?1
-          AND selected_session_id = ?2
-        ",
-        params![input.project_id, input.session_id],
-    )
-    .map_err(|error| db_error("Could not clear Wizzle selection", error))?;
-    tx.commit()
-        .map_err(|error| db_error("Could not finish session deletion", error))?;
+        tx.execute(
+            "DELETE FROM sessions WHERE id = ?1 AND project_id = ?2",
+            params![input.session_id, input.project_id],
+        )
+        .map_err(|error| db_error("Could not delete the Wizzle session", error))?;
+        tx.execute(
+            "UPDATE projects SET updated_at = ?1 WHERE id = ?2",
+            params![timestamp as i64, input.project_id],
+        )
+        .map_err(|error| db_error("Could not update the Wizzle project", error))?;
+        tx.execute(
+            "
+            UPDATE workspace_settings
+            SET selected_session_id = NULL
+            WHERE id = 1
+              AND selected_project_id = ?1
+              AND selected_session_id = ?2
+            ",
+            params![input.project_id, input.session_id],
+        )
+        .map_err(|error| db_error("Could not clear Wizzle selection", error))?;
+        tx.commit()
+            .map_err(|error| db_error("Could not finish session deletion", error))
+    })();
 
-    remove_session_directories(&[input.session_id])?;
+    if let Err(error) = deletion_result {
+        return Err(restore_after_failed_deletion(error, &quarantined));
+    }
+
+    finalize_quarantined_deletion(&quarantined);
     build_workspace_snapshot()
 }
 
@@ -2707,6 +3320,30 @@ fn update_next_part_index(
     Ok(part_index)
 }
 
+/// Keep the first-assigned `part_index` for an existing part id.
+/// Only allocate a new index when the part is first inserted.
+fn resolve_stable_part_index(
+    tx: &Transaction<'_>,
+    turn_indexes: &mut HashMap<String, (i64, i64)>,
+    turn_id: &str,
+    part_id: &str,
+) -> Result<i64, String> {
+    let existing_index = tx
+        .query_row(
+            "SELECT part_index FROM turn_parts WHERE id = ?1",
+            params![part_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| db_error("Could not read an existing Wizzle part index", error))?;
+
+    if let Some(part_index) = existing_index {
+        return Ok(part_index);
+    }
+
+    update_next_part_index(turn_indexes, turn_id)
+}
+
 fn load_turn_indexes(
     tx: &Transaction<'_>,
     session_id: &str,
@@ -2883,6 +3520,85 @@ fn step_metadata(message: &StoredMessageRecord, step: &StoredMessageStepRecord) 
     metadata
 }
 
+fn part_id_exists(
+    tx: &Transaction<'_>,
+    inserted_part_ids: &HashSet<String>,
+    part_id: &str,
+) -> Result<bool, String> {
+    if inserted_part_ids.contains(part_id) {
+        return Ok(true);
+    }
+
+    let exists = tx
+        .query_row(
+            "SELECT 1 FROM turn_parts WHERE id = ?1",
+            params![part_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| db_error("Could not check Wizzle parent part existence", error))?;
+
+    Ok(exists.is_some())
+}
+
+/// Resolve a durable parent link for tool results.
+/// Prefer the requested parent when it exists (this transaction or DB).
+/// Resolve parent for a turn part.
+/// - `tool_call` → assistant message anchor (`message_id`), never self
+/// - `tool_result` → matching `tool_call` part (by tool_call_id)
+/// - never returns the part's own id as parent
+fn resolve_parent_part_id(
+    tx: &Transaction<'_>,
+    inserted_part_ids: &HashSet<String>,
+    step_id: &str,
+    step_type: &str,
+    message_id: &str,
+    requested_parent_part_id: Option<&str>,
+    tool_call_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let requested = requested_parent_part_id.filter(|parent_id| *parent_id != step_id);
+
+    if let Some(parent_id) = requested {
+        if part_id_exists(tx, inserted_part_ids, parent_id)? {
+            return Ok(Some(parent_id.to_string()));
+        }
+    }
+
+    // tool_call parents the assistant message, not another tool_call (which became self on re-upsert).
+    if step_type == "tool_call" {
+        if !message_id.is_empty()
+            && message_id != step_id
+            && part_id_exists(tx, inserted_part_ids, message_id)?
+        {
+            return Ok(Some(message_id.to_string()));
+        }
+        return Ok(None);
+    }
+
+    // tool_result (and similar) fall back to the tool_call part matching tool_call_id.
+    let Some(tool_call_id) = tool_call_id.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    let parent_from_tool_call = tx
+        .query_row(
+            "
+            SELECT id
+            FROM turn_parts
+            WHERE tool_call_id = ?1
+              AND part_type = 'tool_call'
+            ORDER BY part_index ASC
+            LIMIT 1
+            ",
+            params![tool_call_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| db_error("Could not resolve Wizzle tool-call parent part", error))?;
+
+    Ok(parent_from_tool_call.filter(|parent_id| parent_id != step_id))
+}
+
 fn insert_normalized_message_steps(
     tx: &Transaction<'_>,
     inserted_part_ids: &mut HashSet<String>,
@@ -2899,7 +3615,7 @@ fn insert_normalized_message_steps(
             continue;
         }
 
-        let part_index = update_next_part_index(turn_indexes, turn_id)?;
+        let part_index = resolve_stable_part_index(tx, turn_indexes, turn_id, &step.id)?;
         let content = step_content(step);
         let content_text = match step.r#type.as_str() {
             "activity_content" | "content" => step.content.clone(),
@@ -2908,11 +3624,15 @@ fn insert_normalized_message_steps(
         let metadata = step_metadata(message, step);
         let metadata = serde_json::to_string(&metadata)
             .map_err(|error| format!("Could not serialize tool metadata: {error}"))?;
-        let parent_part_id = step
-            .parent_part_id
-            .as_ref()
-            .filter(|part_id| inserted_part_ids.contains(*part_id))
-            .cloned();
+        let parent_part_id = resolve_parent_part_id(
+            tx,
+            inserted_part_ids,
+            &step.id,
+            &step.r#type,
+            &message.id,
+            step.parent_part_id.as_deref(),
+            step.tool_call_id.as_deref(),
+        )?;
         let updated_at = message.completed_at_ms.unwrap_or(message.created_at);
         let tokens = step
             .tokens
@@ -2935,7 +3655,7 @@ fn insert_normalized_message_steps(
               tokens = excluded.tokens,
               metadata = excluded.metadata,
               status = excluded.status,
-              parent_part_id = excluded.parent_part_id,
+              parent_part_id = COALESCE(excluded.parent_part_id, turn_parts.parent_part_id),
               tool_call_id = excluded.tool_call_id,
               message_id = excluded.message_id,
               tool_name = excluded.tool_name,
@@ -2943,7 +3663,7 @@ fn insert_normalized_message_steps(
               tool_output = excluded.tool_output,
               tool_error = excluded.tool_error,
               duration_ms = excluded.duration_ms,
-              part_index = excluded.part_index,
+              part_index = turn_parts.part_index,
               pruned = excluded.pruned,
               created_at = MIN(turn_parts.created_at, excluded.created_at),
               updated_at = excluded.updated_at
@@ -3001,7 +3721,7 @@ fn insert_message_part(
         message.created_at,
         updated_at,
     )?;
-    let part_index = update_next_part_index(turn_indexes, &turn_id)?;
+    let part_index = resolve_stable_part_index(tx, turn_indexes, &turn_id, &message.id)?;
     let content = if message.role == "user" {
         optional_text(&message.content)
     } else {
@@ -3033,7 +3753,7 @@ fn insert_message_part(
           completed_at = excluded.completed_at,
           duration_ms = excluded.duration_ms,
           edited_at = excluded.edited_at,
-          part_index = excluded.part_index,
+          part_index = turn_parts.part_index,
           pruned = excluded.pruned,
           created_at = MIN(turn_parts.created_at, excluded.created_at),
           updated_at = excluded.updated_at
@@ -3065,78 +3785,83 @@ fn insert_message_part(
     insert_normalized_message_steps(tx, inserted_part_ids, message, &turn_id, turn_indexes)
 }
 
-fn insert_summary_part(
+/// Persist replay budget estimates on the real conversation turn (#71).
+/// Does not rewrite turn lifecycle status when the turn already exists.
+fn upsert_turn_budget_summary(
     tx: &Transaction<'_>,
-    inserted_part_ids: &mut HashSet<String>,
     session_id: &str,
     turn_indexes: &mut HashMap<String, (i64, i64)>,
     summary: &StoredTurnSummaryRecord,
 ) -> Result<(), String> {
-    let turn_id = format!("summary-{}", summary.turn_id);
-    insert_turn_if_needed(
-        tx,
-        session_id,
-        turn_indexes,
-        &turn_id,
-        "complete",
-        summary.completed_at_ms,
-        summary.completed_at_ms,
-    )?;
-    let part_index = update_next_part_index(turn_indexes, &turn_id)?;
-    let part_id = format!("summary-part-{}", summary.turn_id);
     let message_ids = serde_json::to_string(&summary.message_ids)
         .map_err(|error| format!("Could not serialize Wizzle summary message ids: {error}"))?;
 
-    tx.execute(
-        "
-        INSERT INTO turn_parts (
-          id, turn_id, role, part_type, content, tokens, metadata, status,
-          parent_part_id, tool_call_id, summary_turn_id, summary_message_ids,
-          estimated_tokens_image_capable, estimated_tokens_text_only, estimator_version,
-          replay_message_count_image_capable, replay_message_count_text_only,
-          completed_at, part_index, pruned, created_at, updated_at
-        ) VALUES (?1, ?2, 'system', 'turn_summary', NULL, ?3, '{}', 'done', NULL, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13, ?13)
-        ON CONFLICT(id) DO UPDATE SET
-          turn_id = excluded.turn_id,
-          role = excluded.role,
-          part_type = excluded.part_type,
-          content = excluded.content,
-          tokens = excluded.tokens,
-          metadata = excluded.metadata,
-          status = excluded.status,
-          parent_part_id = excluded.parent_part_id,
-          tool_call_id = excluded.tool_call_id,
-          summary_turn_id = excluded.summary_turn_id,
-          summary_message_ids = excluded.summary_message_ids,
-          estimated_tokens_image_capable = excluded.estimated_tokens_image_capable,
-          estimated_tokens_text_only = excluded.estimated_tokens_text_only,
-          estimator_version = excluded.estimator_version,
-          replay_message_count_image_capable = excluded.replay_message_count_image_capable,
-          replay_message_count_text_only = excluded.replay_message_count_text_only,
-          completed_at = excluded.completed_at,
-          part_index = excluded.part_index,
-          pruned = excluded.pruned,
-          created_at = MIN(turn_parts.created_at, excluded.created_at),
-          updated_at = excluded.updated_at
-        ",
+    let apply_budget = |tx: &Transaction<'_>| {
+        tx.execute(
+            "
+            UPDATE turns
+            SET estimated_tokens_image_capable = ?1,
+                estimated_tokens_text_only = ?2,
+                estimator_version = ?3,
+                replay_message_count_image_capable = ?4,
+                replay_message_count_text_only = ?5,
+                summary_message_ids = ?6,
+                summary_completed_at = ?7,
+                total_tokens = CASE
+                  WHEN total_tokens = 0 THEN ?2
+                  ELSE total_tokens
+                END,
+                updated_at = MAX(updated_at, ?7)
+            WHERE id = ?8
+              AND session_id = ?9
+            ",
+            params![
+                summary.estimated_tokens_image_capable as i64,
+                summary.estimated_tokens_text_only as i64,
+                summary.estimator_version as i64,
+                summary.replay_message_count_image_capable as i64,
+                summary.replay_message_count_text_only as i64,
+                message_ids,
+                summary.completed_at_ms as i64,
+                summary.turn_id,
+                session_id,
+            ],
+        )
+        .map_err(|error| db_error("Could not save a Wizzle turn budget summary", error))
+    };
+
+    let mut updated = apply_budget(tx)?;
+    if updated == 0 {
+        // Turn row missing (edge case) — create shell, then apply budget.
+        insert_turn_if_needed(
+            tx,
+            session_id,
+            turn_indexes,
+            &summary.turn_id,
+            "complete",
+            summary.completed_at_ms,
+            summary.completed_at_ms,
+        )?;
+        updated = apply_budget(tx)?;
+    }
+
+    if updated == 0 {
+        return Err(format!(
+            "Could not save turn budget for missing turn {}.",
+            summary.turn_id
+        ));
+    }
+
+    // Drop legacy synthetic summary turns if they still exist.
+    let legacy_turn_id = format!("summary-{}", summary.turn_id);
+    let _ = tx.execute(
+        "DELETE FROM turns WHERE session_id = ?1 AND (id = ?2 OR id = ?3)",
         params![
-            part_id,
-            turn_id,
-            0,
-            summary.turn_id,
-            message_ids,
-            summary.estimated_tokens_image_capable as i64,
-            summary.estimated_tokens_text_only as i64,
-            summary.estimator_version as i64,
-            summary.replay_message_count_image_capable as i64,
-            summary.replay_message_count_text_only as i64,
-            summary.completed_at_ms as i64,
-            part_index,
-            summary.completed_at_ms as i64
+            session_id,
+            legacy_turn_id,
+            format!("summary-turn-{}", summary.turn_id)
         ],
-    )
-    .map_err(|error| db_error("Could not save a Wizzle turn summary", error))?;
-    inserted_part_ids.insert(part_id);
+    );
 
     Ok(())
 }
@@ -3147,6 +3872,28 @@ fn delete_stale_transcript_rows(
     current_turn_ids: &HashSet<String>,
     current_part_ids: &HashSet<String>,
 ) -> Result<(), String> {
+    // Refuse to wipe an entire session from an empty snapshot (#7).
+    if current_turn_ids.is_empty() {
+        let existing_turns = {
+            let mut statement = tx
+                .prepare("SELECT COUNT(*) FROM turns WHERE session_id = ?1")
+                .map_err(|error| {
+                    db_error("Could not count Wizzle turns for safety check", error)
+                })?;
+            statement
+                .query_row(params![session_id], |row| row.get::<_, i64>(0))
+                .map_err(|error| db_error("Could not count Wizzle turns for safety check", error))?
+        };
+
+        if existing_turns > 0 {
+            return Err(
+                "Refusing to delete session transcript from an empty snapshot.".to_string(),
+            );
+        }
+
+        return Ok(());
+    }
+
     let stale_part_ids = {
         let mut statement = tx
             .prepare(
@@ -3189,6 +3936,65 @@ fn delete_stale_transcript_rows(
     }
 
     Ok(())
+}
+
+/// Immediately drop SQL turns not in `keep_turn_ids` so edit truncation is durable before the run (#3/#57).
+pub fn truncate_session_transcript_to_turns(
+    input: TruncateSessionTranscriptInput,
+) -> Result<u32, String> {
+    validate_storage_id("session", &input.session_id)?;
+
+    let keep_turn_ids = input
+        .keep_turn_ids
+        .into_iter()
+        .filter(|turn_id| !turn_id.trim().is_empty())
+        .collect::<HashSet<_>>();
+
+    // Editing the first message of a session can legitimately keep only the new turn.
+    // An empty keep set with existing history is still refused (same as #7).
+    let mut conn = open_database()?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| db_error("Could not start transcript truncate", error))?;
+
+    let existing_turn_ids = {
+        let mut statement = tx
+            .prepare("SELECT id FROM turns WHERE session_id = ?1")
+            .map_err(|error| db_error("Could not list Wizzle turns for truncate", error))?;
+        let rows = statement
+            .query_map(params![input.session_id], |row| row.get::<_, String>(0))
+            .map_err(|error| db_error("Could not read Wizzle turns for truncate", error))?;
+        rows.filter_map(|row| row.ok()).collect::<Vec<_>>()
+    };
+
+    if keep_turn_ids.is_empty() && !existing_turn_ids.is_empty() {
+        return Err(
+            "Refusing to delete the entire session transcript without retained turns.".to_string(),
+        );
+    }
+
+    let mut deleted = 0u32;
+    for turn_id in existing_turn_ids {
+        if keep_turn_ids.contains(&turn_id) {
+            continue;
+        }
+
+        // turn_parts cascade via FK ON DELETE CASCADE.
+        tx.execute(
+            "DELETE FROM turns WHERE id = ?1 AND session_id = ?2",
+            params![turn_id, input.session_id],
+        )
+        .map_err(|error| db_error("Could not truncate Wizzle turn", error))?;
+        deleted = deleted.saturating_add(1);
+    }
+
+    // Drop compacted flags / summary for turns that no longer exist is implicit (rows gone).
+    // Compacted session summary may still mention deleted turns; next compact refresh is fine.
+
+    tx.commit()
+        .map_err(|error| db_error("Could not commit transcript truncate", error))?;
+
+    Ok(deleted)
 }
 
 fn update_turn_token_totals(tx: &Transaction<'_>, session_id: &str) -> Result<(), String> {
@@ -3288,6 +4094,30 @@ fn upsert_session_metadata(
     Ok(())
 }
 
+/// Marks complete turns as compacted when session summary advances.
+/// Used by both full `persist_session` and targeted metadata saves (compaction path).
+fn mark_compacted_turns(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    compacted_turn_ids: &[String],
+) -> Result<(), String> {
+    for turn_id in compacted_turn_ids {
+        tx.execute(
+            "
+            UPDATE turns
+            SET compacted = 1
+            WHERE session_id = ?1
+              AND id = ?2
+              AND status = 'complete'
+            ",
+            params![session_id, turn_id],
+        )
+        .map_err(|error| db_error("Could not mark compacted Wizzle turns", error))?;
+    }
+
+    Ok(())
+}
+
 pub fn create_session_if_needed(input: PersistSessionMetadataInput) -> Result<(), String> {
     validate_storage_id("project", &input.project_id)?;
     validate_storage_id("session", &input.session.id)?;
@@ -3318,6 +4148,9 @@ pub fn create_session_if_needed(input: PersistSessionMetadataInput) -> Result<()
         .transaction()
         .map_err(|error| db_error("Could not start targeted session persistence", error))?;
     upsert_session_metadata(&tx, &metadata)?;
+    if let Some(compacted_context) = &metadata.compacted_context {
+        mark_compacted_turns(&tx, &metadata.id, &compacted_context.compacted_turn_ids)?;
+    }
     tx.execute(
         "UPDATE projects SET updated_at = ?1 WHERE id = ?2",
         params![metadata.updated_at as i64, input.project_id],
@@ -3460,16 +4293,33 @@ pub fn upsert_turn_summary(input: UpsertTurnSummaryInput) -> Result<(), String> 
         .transaction()
         .map_err(|error| db_error("Could not start turn summary persistence", error))?;
     let mut turn_indexes = load_turn_indexes(&tx, &input.session_id)?;
-    let mut inserted_part_ids = HashSet::new();
-    insert_summary_part(
-        &tx,
-        &mut inserted_part_ids,
-        &input.session_id,
-        &mut turn_indexes,
-        &summary,
-    )?;
+    upsert_turn_budget_summary(&tx, &input.session_id, &mut turn_indexes, &summary)?;
     tx.commit()
         .map_err(|error| db_error("Could not finish turn summary persistence", error))
+}
+
+fn resolve_finalize_turn_result(
+    turn_id: &str,
+    desired_status: &str,
+    rows_updated: usize,
+    current_status: Option<&str>,
+) -> Result<(), String> {
+    if rows_updated > 0 {
+        return Ok(());
+    }
+
+    match current_status {
+        None => Err(format!(
+            "Could not finalize turn {turn_id} because it was not found."
+        )),
+        // Idempotent: already closed with the same terminal status.
+        Some(existing) if existing == desired_status => Ok(()),
+        // Already terminal under a different label — still closed, not stuck running.
+        Some("complete") | Some("interrupted") | Some("error") => Ok(()),
+        Some(existing) => Err(format!(
+            "Could not finalize turn {turn_id} from status {existing}."
+        )),
+    }
 }
 
 pub fn finalize_turn(input: FinalizeTurnInput) -> Result<(), String> {
@@ -3484,24 +4334,39 @@ pub fn finalize_turn(input: FinalizeTurnInput) -> Result<(), String> {
 
     ensure_workspace_storage()?;
     let conn = open_database()?;
-    conn.execute(
-        "
-        UPDATE turns
-        SET status = ?1,
-            updated_at = MAX(updated_at, ?2)
-        WHERE id = ?3
-          AND session_id = ?4
-          AND status = 'running'
-        ",
-        params![
-            status,
-            input.updated_at_ms as i64,
-            input.turn_id,
-            input.session_id
-        ],
-    )
-    .map_err(|error| db_error("Could not finalize the Wizzle turn", error))?;
-    Ok(())
+    let updated = conn
+        .execute(
+            "
+            UPDATE turns
+            SET status = ?1,
+                updated_at = MAX(updated_at, ?2)
+            WHERE id = ?3
+              AND session_id = ?4
+              AND status = 'running'
+            ",
+            params![
+                status,
+                input.updated_at_ms as i64,
+                input.turn_id,
+                input.session_id
+            ],
+        )
+        .map_err(|error| db_error("Could not finalize the Wizzle turn", error))?;
+
+    if updated > 0 {
+        return Ok(());
+    }
+
+    let current_status = conn
+        .query_row(
+            "SELECT status FROM turns WHERE id = ?1 AND session_id = ?2",
+            params![input.turn_id, input.session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| db_error("Could not read Wizzle turn status after finalize", error))?;
+
+    resolve_finalize_turn_result(&input.turn_id, status, updated, current_status.as_deref())
 }
 
 pub fn persist_session(input: PersistWorkspaceSessionInput) -> Result<(), String> {
@@ -3645,15 +4510,8 @@ pub fn persist_session(input: PersistWorkspaceSessionInput) -> Result<(), String
             ],
         )
         .map_err(|error| db_error("Could not save the Wizzle session", error))?;
-        let expected_turn_ids = messages
-            .iter()
-            .map(message_turn_id)
-            .chain(
-                turn_summaries
-                    .iter()
-                    .map(|summary| format!("summary-{}", summary.turn_id)),
-            )
-            .collect::<HashSet<_>>();
+        // Real conversation turns only — budget metadata is columns on those rows (#71).
+        let expected_turn_ids = messages.iter().map(message_turn_id).collect::<HashSet<_>>();
         let expected_part_ids = messages
             .iter()
             .flat_map(|message| {
@@ -3665,11 +4523,6 @@ pub fn persist_session(input: PersistWorkspaceSessionInput) -> Result<(), String
                         .map(|part| part.id.clone()),
                 )
             })
-            .chain(
-                turn_summaries
-                    .iter()
-                    .map(|summary| format!("summary-part-{}", summary.turn_id)),
-            )
             .collect::<HashSet<_>>();
         delete_stale_transcript_rows(&tx, &session_id, &expected_turn_ids, &expected_part_ids)?;
         let mut turn_indexes = HashMap::new();
@@ -3685,30 +4538,12 @@ pub fn persist_session(input: PersistWorkspaceSessionInput) -> Result<(), String
             )?;
         }
         for summary in &turn_summaries {
-            insert_summary_part(
-                &tx,
-                &mut inserted_part_ids,
-                &session_id,
-                &mut turn_indexes,
-                summary,
-            )?;
+            upsert_turn_budget_summary(&tx, &session_id, &mut turn_indexes, summary)?;
         }
         let current_turn_ids = turn_indexes.keys().cloned().collect::<HashSet<_>>();
         delete_stale_transcript_rows(&tx, &session_id, &current_turn_ids, &inserted_part_ids)?;
         if let Some(compacted_context) = &metadata.compacted_context {
-            for turn_id in &compacted_context.compacted_turn_ids {
-                tx.execute(
-                    "
-                    UPDATE turns
-                    SET compacted = 1
-                    WHERE session_id = ?1
-                      AND id = ?2
-                      AND status = 'complete'
-                    ",
-                    params![session_id, turn_id],
-                )
-                .map_err(|error| db_error("Could not mark compacted Wizzle turns", error))?;
-            }
+            mark_compacted_turns(&tx, &session_id, &compacted_context.compacted_turn_ids)?;
         }
         update_turn_token_totals(&tx, &session_id)?;
 
@@ -3772,6 +4607,10 @@ pub fn resolve_project_root(project_id: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unique_temp_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("wizzle-{label}-{}", Uuid::new_v4()))
+    }
 
     fn migrated_memory_db() -> Connection {
         let mut conn = Connection::open_in_memory().expect("open in-memory db");
@@ -3841,6 +4680,62 @@ mod tests {
         assert!(settings.is_sidebar_open);
         assert_eq!(settings.model_id, "wizzle-1-thinking");
         assert_eq!(settings.permission_mode, "manual-approve");
+    }
+
+    #[test]
+    fn completed_migrations_are_cached_for_the_database_path() {
+        let db_path = unique_temp_path("migration-cache").with_extension("db");
+        let mut conn = Connection::open(&db_path).expect("open database");
+        ensure_database_migrated(&mut conn, &db_path).expect("migrate database");
+        conn.execute("DROP TABLE schema_migrations", [])
+            .expect("remove migration marker");
+        drop(conn);
+
+        let mut reopened = Connection::open(&db_path).expect("reopen database");
+        ensure_database_migrated(&mut reopened, &db_path).expect("use cached migration");
+        assert!(!table_exists(&reopened, "schema_migrations"));
+        drop(reopened);
+        fs::remove_file(db_path).expect("remove test database");
+    }
+
+    #[test]
+    fn project_ids_are_uuid_backed_and_unique() {
+        let mut project_ids = (0..32)
+            .map(|_| std::thread::spawn(new_project_id))
+            .map(|handle| handle.join().expect("generate project ID"))
+            .collect::<Vec<_>>();
+        project_ids.sort();
+        project_ids.dedup();
+
+        assert_eq!(project_ids.len(), 32);
+        for project_id in project_ids {
+            assert!(project_id.starts_with("project-"));
+            Uuid::parse_str(project_id.trim_start_matches("project-")).expect("parse project UUID");
+        }
+    }
+
+    #[test]
+    fn failed_deletion_restores_quarantined_session_directory() {
+        let root = unique_temp_path("deletion-restore");
+        let original = root.join("session-1");
+        let quarantined = root.join("trash-session-1");
+        fs::create_dir_all(&original).expect("create original directory");
+        fs::write(original.join("attachment.txt"), "private").expect("write attachment");
+        fs::rename(&original, &quarantined).expect("quarantine directory");
+        let entries = vec![QuarantinedSessionDirectory {
+            original: original.clone(),
+            quarantined,
+            session_id: "session-1".to_string(),
+        }];
+
+        let error = restore_after_failed_deletion("database failed".to_string(), &entries);
+
+        assert_eq!(error, "database failed");
+        assert_eq!(
+            fs::read_to_string(original.join("attachment.txt")).expect("read restored attachment"),
+            "private"
+        );
+        fs::remove_dir_all(root).expect("remove test directory");
     }
 
     #[test]
@@ -4046,6 +4941,491 @@ mod tests {
     }
 
     #[test]
+    fn reupserting_messages_preserves_part_index_order() {
+        let mut conn = migrated_memory_db();
+        let now = now_unix_ms();
+        insert_test_session(&conn);
+
+        let user = StoredMessageRecord {
+            content: "hello".to_string(),
+            created_at: now,
+            id: "message-user-1".to_string(),
+            role: "user".to_string(),
+            status: Some("done".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            ..StoredMessageRecord::default()
+        };
+        let assistant = StoredMessageRecord {
+            content: String::new(),
+            created_at: now + 1,
+            id: "message-assistant-1".to_string(),
+            role: "assistant".to_string(),
+            status: Some("streaming".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            parts: vec![StoredMessageStepRecord {
+                content: Some("thinking".to_string()),
+                created_at_ms: Some(now + 1),
+                id: "message-assistant-1-content".to_string(),
+                status: Some("streaming".to_string()),
+                r#type: "content".to_string(),
+                ..StoredMessageStepRecord::default()
+            }],
+            ..StoredMessageRecord::default()
+        };
+
+        {
+            let tx = conn.transaction().expect("start first write");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("load indexes");
+            let mut inserted_part_ids = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted_part_ids,
+                "session-1",
+                &mut turn_indexes,
+                &user,
+                Some("running"),
+            )
+            .expect("insert user");
+            insert_message_part(
+                &tx,
+                &mut inserted_part_ids,
+                "session-1",
+                &mut turn_indexes,
+                &assistant,
+                Some("running"),
+            )
+            .expect("insert assistant");
+            tx.commit().expect("commit first write");
+        }
+
+        let user_index_before: i64 = conn
+            .query_row(
+                "SELECT part_index FROM turn_parts WHERE id = 'message-user-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read user index");
+        let assistant_index_before: i64 = conn
+            .query_row(
+                "SELECT part_index FROM turn_parts WHERE id = 'message-assistant-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read assistant index");
+        assert!(
+            user_index_before < assistant_index_before,
+            "user should sort before assistant initially"
+        );
+
+        // Re-persist user last (settle path). Index must stay stable.
+        let updated_user = StoredMessageRecord {
+            content: "hello".to_string(),
+            completed_at_ms: Some(now + 10),
+            created_at: now,
+            id: "message-user-1".to_string(),
+            role: "user".to_string(),
+            status: Some("done".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            ..StoredMessageRecord::default()
+        };
+        {
+            let tx = conn.transaction().expect("start reupsert");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("load indexes");
+            let mut inserted_part_ids = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted_part_ids,
+                "session-1",
+                &mut turn_indexes,
+                &updated_user,
+                Some("running"),
+            )
+            .expect("reupsert user");
+            tx.commit().expect("commit reupsert");
+        }
+
+        let user_index_after: i64 = conn
+            .query_row(
+                "SELECT part_index FROM turn_parts WHERE id = 'message-user-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read user index after");
+        let assistant_index_after: i64 = conn
+            .query_row(
+                "SELECT part_index FROM turn_parts WHERE id = 'message-assistant-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read assistant index after");
+
+        assert_eq!(user_index_after, user_index_before);
+        assert_eq!(assistant_index_after, assistant_index_before);
+        assert!(
+            user_index_after < assistant_index_after,
+            "reupsert must not move user after assistant"
+        );
+
+        // Re-persist assistant content streaming update; content part index must stay stable.
+        let content_index_before: i64 = conn
+            .query_row(
+                "SELECT part_index FROM turn_parts WHERE id = 'message-assistant-1-content'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read content index");
+        let updated_assistant = StoredMessageRecord {
+            content: String::new(),
+            created_at: now + 1,
+            id: "message-assistant-1".to_string(),
+            role: "assistant".to_string(),
+            status: Some("streaming".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            parts: vec![StoredMessageStepRecord {
+                content: Some("thinking more".to_string()),
+                created_at_ms: Some(now + 1),
+                id: "message-assistant-1-content".to_string(),
+                status: Some("streaming".to_string()),
+                r#type: "content".to_string(),
+                ..StoredMessageStepRecord::default()
+            }],
+            ..StoredMessageRecord::default()
+        };
+        {
+            let tx = conn.transaction().expect("start assistant reupsert");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("load indexes");
+            let mut inserted_part_ids = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted_part_ids,
+                "session-1",
+                &mut turn_indexes,
+                &updated_assistant,
+                Some("running"),
+            )
+            .expect("reupsert assistant");
+            tx.commit().expect("commit assistant reupsert");
+        }
+        let content_index_after: i64 = conn
+            .query_row(
+                "SELECT part_index FROM turn_parts WHERE id = 'message-assistant-1-content'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read content index after");
+        let content_text: String = conn
+            .query_row(
+                "SELECT content FROM turn_parts WHERE id = 'message-assistant-1-content'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read content text");
+
+        assert_eq!(content_index_after, content_index_before);
+        assert_eq!(content_text, "thinking more");
+    }
+
+    #[test]
+    fn tool_messages_with_provider_ids_persist_results_and_parent_links() {
+        let mut conn = migrated_memory_db();
+        let now = now_unix_ms();
+        insert_test_session(&conn);
+
+        let tool_call_id = "call_00_ABzCHrM8TDY9yQ6gWYME8154";
+        let assistant_id = "message-assistant-2fc8bdd8-067a-4cb0-863b-dce69787e1d4";
+        let tool_call_part_id = format!("{assistant_id}-tool-call-{tool_call_id}");
+        let tool_message_id = format!("message-tool-{tool_call_id}");
+        let tool_result_part_id = format!("{tool_message_id}-result");
+
+        let assistant = StoredMessageRecord {
+            created_at: now,
+            id: assistant_id.to_string(),
+            role: "assistant".to_string(),
+            status: Some("done".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            parts: vec![StoredMessageStepRecord {
+                created_at_ms: Some(now),
+                id: tool_call_part_id.clone(),
+                input: Some(r#"{"command":"ls"}"#.to_string()),
+                name: Some("bash".to_string()),
+                status: Some("done".to_string()),
+                tool_call_id: Some(tool_call_id.to_string()),
+                r#type: "tool_call".to_string(),
+                ..StoredMessageStepRecord::default()
+            }],
+            ..StoredMessageRecord::default()
+        };
+
+        {
+            let tx = conn.transaction().expect("start assistant write");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("indexes");
+            let mut inserted = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted,
+                "session-1",
+                &mut turn_indexes,
+                &assistant,
+                Some("running"),
+            )
+            .expect("insert assistant with tool_call");
+            tx.commit().expect("commit assistant");
+        }
+
+        let tool_call_parent: Option<String> = conn
+            .query_row(
+                "SELECT parent_part_id FROM turn_parts WHERE id = ?1",
+                params![tool_call_part_id],
+                |row| row.get(0),
+            )
+            .expect("read tool_call parent");
+        assert_eq!(
+            tool_call_parent.as_deref(),
+            Some(assistant_id),
+            "tool_call must parent the assistant message, not itself"
+        );
+        assert_ne!(
+            tool_call_parent.as_deref(),
+            Some(tool_call_part_id.as_str()),
+            "tool_call must not self-parent"
+        );
+
+        // Re-upsert the same assistant tool_call — must not flip parent to self.
+        {
+            let tx = conn.transaction().expect("start assistant reupsert");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("indexes");
+            let mut inserted = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted,
+                "session-1",
+                &mut turn_indexes,
+                &assistant,
+                Some("running"),
+            )
+            .expect("reupsert assistant with tool_call");
+            tx.commit().expect("commit assistant reupsert");
+        }
+        let tool_call_parent_after: Option<String> = conn
+            .query_row(
+                "SELECT parent_part_id FROM turn_parts WHERE id = ?1",
+                params![tool_call_part_id],
+                |row| row.get(0),
+            )
+            .expect("read tool_call parent after reupsert");
+        assert_eq!(tool_call_parent_after.as_deref(), Some(assistant_id));
+
+        // Separate transaction (targeted persist of tool message alone).
+        let tool_message = StoredMessageRecord {
+            content: r#"{"ok":true,"stdout":"file.txt"}"#.to_string(),
+            completed_at_ms: Some(now + 5),
+            created_at: now + 2,
+            id: tool_message_id.clone(),
+            role: "tool".to_string(),
+            status: Some("done".to_string()),
+            tool_call_id: Some(tool_call_id.to_string()),
+            tool_name: Some("bash".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            parts: vec![StoredMessageStepRecord {
+                created_at_ms: Some(now + 2),
+                id: tool_result_part_id.clone(),
+                name: Some("bash".to_string()),
+                output: Some(r#"{"ok":true,"stdout":"file.txt"}"#.to_string()),
+                parent_part_id: Some(tool_call_part_id.clone()),
+                status: Some("done".to_string()),
+                tool_call_id: Some(tool_call_id.to_string()),
+                r#type: "tool_result".to_string(),
+                ..StoredMessageStepRecord::default()
+            }],
+            ..StoredMessageRecord::default()
+        };
+
+        {
+            let tx = conn.transaction().expect("start tool write");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("indexes");
+            let mut inserted = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted,
+                "session-1",
+                &mut turn_indexes,
+                &tool_message,
+                Some("running"),
+            )
+            .expect("insert tool message with underscore id");
+            tx.commit().expect("commit tool");
+        }
+
+        let (role, status): (String, String) = conn
+            .query_row(
+                "SELECT role, status FROM turn_parts WHERE id = ?1",
+                params![tool_message_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read tool message anchor");
+        assert_eq!(role, "tool");
+        assert_eq!(status, "done");
+
+        let (part_type, tool_output, parent_part_id, stored_tool_call_id): (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT part_type, tool_output, parent_part_id, tool_call_id FROM turn_parts WHERE id = ?1",
+                params![tool_result_part_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read tool_result part");
+
+        assert_eq!(part_type, "tool_result");
+        assert_eq!(
+            tool_output.as_deref(),
+            Some(r#"{"ok":true,"stdout":"file.txt"}"#)
+        );
+        assert_eq!(parent_part_id.as_deref(), Some(tool_call_part_id.as_str()));
+        assert_eq!(stored_tool_call_id.as_deref(), Some(tool_call_id));
+
+        // Re-upsert without parent should keep existing parent link.
+        let tool_message_without_parent = StoredMessageRecord {
+            content: r#"{"ok":true,"stdout":"file.txt"}"#.to_string(),
+            completed_at_ms: Some(now + 6),
+            created_at: now + 2,
+            id: tool_message_id.clone(),
+            role: "tool".to_string(),
+            status: Some("done".to_string()),
+            tool_call_id: Some(tool_call_id.to_string()),
+            tool_name: Some("bash".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            parts: vec![StoredMessageStepRecord {
+                created_at_ms: Some(now + 2),
+                id: tool_result_part_id.clone(),
+                name: Some("bash".to_string()),
+                output: Some(r#"{"ok":true,"stdout":"file.txt"}"#.to_string()),
+                parent_part_id: None,
+                status: Some("done".to_string()),
+                tool_call_id: Some(tool_call_id.to_string()),
+                r#type: "tool_result".to_string(),
+                ..StoredMessageStepRecord::default()
+            }],
+            ..StoredMessageRecord::default()
+        };
+        {
+            let tx = conn.transaction().expect("start tool reupsert");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("indexes");
+            let mut inserted = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted,
+                "session-1",
+                &mut turn_indexes,
+                &tool_message_without_parent,
+                Some("running"),
+            )
+            .expect("reupsert tool message");
+            tx.commit().expect("commit reupsert");
+        }
+
+        let parent_after: Option<String> = conn
+            .query_row(
+                "SELECT parent_part_id FROM turn_parts WHERE id = ?1",
+                params![tool_result_part_id],
+                |row| row.get(0),
+            )
+            .expect("read parent after reupsert");
+        assert_eq!(parent_after.as_deref(), Some(tool_call_part_id.as_str()));
+    }
+
+    #[test]
+    fn tool_result_parent_falls_back_to_tool_call_id_lookup() {
+        let mut conn = migrated_memory_db();
+        let now = now_unix_ms();
+        insert_test_session(&conn);
+
+        let tool_call_id = "call_01_fallbackParent";
+        let tool_call_part_id = "message-assistant-aaa-tool-call-call_01_fallbackParent";
+
+        {
+            let tx = conn.transaction().expect("tx");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("indexes");
+            let mut inserted = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted,
+                "session-1",
+                &mut turn_indexes,
+                &StoredMessageRecord {
+                    created_at: now,
+                    id: "message-assistant-aaa".to_string(),
+                    role: "assistant".to_string(),
+                    status: Some("done".to_string()),
+                    turn_id: Some("turn-1".to_string()),
+                    parts: vec![StoredMessageStepRecord {
+                        id: tool_call_part_id.to_string(),
+                        name: Some("bash".to_string()),
+                        input: Some("{}".to_string()),
+                        status: Some("done".to_string()),
+                        tool_call_id: Some(tool_call_id.to_string()),
+                        r#type: "tool_call".to_string(),
+                        ..StoredMessageStepRecord::default()
+                    }],
+                    ..StoredMessageRecord::default()
+                },
+                Some("running"),
+            )
+            .expect("assistant");
+            tx.commit().expect("commit");
+        }
+
+        {
+            let tx = conn.transaction().expect("tx tool");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("indexes");
+            let mut inserted = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted,
+                "session-1",
+                &mut turn_indexes,
+                &StoredMessageRecord {
+                    content: "done".to_string(),
+                    created_at: now + 1,
+                    id: format!("message-tool-{tool_call_id}"),
+                    role: "tool".to_string(),
+                    status: Some("done".to_string()),
+                    tool_call_id: Some(tool_call_id.to_string()),
+                    tool_name: Some("bash".to_string()),
+                    turn_id: Some("turn-1".to_string()),
+                    parts: vec![StoredMessageStepRecord {
+                        id: format!("message-tool-{tool_call_id}-result"),
+                        name: Some("bash".to_string()),
+                        output: Some("done".to_string()),
+                        // Wrong / missing parent id — resolve via tool_call_id.
+                        parent_part_id: Some("missing-parent".to_string()),
+                        status: Some("done".to_string()),
+                        tool_call_id: Some(tool_call_id.to_string()),
+                        r#type: "tool_result".to_string(),
+                        ..StoredMessageStepRecord::default()
+                    }],
+                    ..StoredMessageRecord::default()
+                },
+                Some("running"),
+            )
+            .expect("tool without valid parent id");
+            tx.commit().expect("commit tool");
+        }
+
+        let parent: Option<String> = conn
+            .query_row(
+                "SELECT parent_part_id FROM turn_parts WHERE id = ?1",
+                params![format!("message-tool-{tool_call_id}-result")],
+                |row| row.get(0),
+            )
+            .expect("parent");
+        assert_eq!(parent.as_deref(), Some(tool_call_part_id));
+    }
+
+    #[test]
     fn finalized_turn_rejects_targeted_message_updates() {
         let mut conn = migrated_memory_db();
         let now = now_unix_ms();
@@ -4061,6 +5441,22 @@ mod tests {
             .expect_err("final turn rejects updates");
 
         assert!(error.contains("already finalized"));
+    }
+
+    #[test]
+    fn resolve_finalize_turn_result_closes_running_and_is_idempotent() {
+        assert!(resolve_finalize_turn_result("turn-1", "complete", 1, None).is_ok());
+        assert!(resolve_finalize_turn_result("turn-1", "complete", 0, Some("complete")).is_ok());
+        assert!(resolve_finalize_turn_result("turn-1", "complete", 0, Some("interrupted")).is_ok());
+        assert!(resolve_finalize_turn_result("turn-1", "error", 0, Some("error")).is_ok());
+
+        let missing = resolve_finalize_turn_result("turn-missing", "complete", 0, None)
+            .expect_err("missing turn");
+        assert!(missing.contains("not found"));
+
+        let bad = resolve_finalize_turn_result("turn-1", "complete", 0, Some("running"))
+            .expect_err("still running after zero updates");
+        assert!(bad.contains("from status running"));
     }
 
     #[test]
@@ -4093,6 +5489,39 @@ mod tests {
         assert_eq!(process.status, "interrupted");
         assert_eq!(process.stdout_tail.len(), PROCESS_TAIL_BYTES);
         assert_eq!(process.ended_at_ms, Some((now + 1) as u64));
+    }
+
+    #[test]
+    fn insert_process_stores_turn_and_tool_call_ids() {
+        let conn = migrated_memory_db();
+        insert_test_session(&conn);
+        ensure_process_link_columns(&conn).expect("link columns");
+
+        conn.execute(
+            "
+            INSERT INTO processes (
+              id, session_id, command, cwd, pid, status, started_at,
+              stdout_tail, stderr_tail, turn_id, tool_call_id
+            ) VALUES (
+              'process-linked', 'session-1', 'npm run dev', '/tmp', 9, 'running', ?1,
+              '', '', 'turn-abc', 'call_00_xyz'
+            )
+            ",
+            params![now_unix_ms() as i64],
+        )
+        .expect("insert linked process");
+
+        let process = conn
+            .query_row(
+                &format!("{} WHERE id = 'process-linked'", process_select_sql()),
+                [],
+                row_to_process_payload,
+            )
+            .expect("read linked process");
+
+        assert_eq!(process.turn_id.as_deref(), Some("turn-abc"));
+        assert_eq!(process.tool_call_id.as_deref(), Some("call_00_xyz"));
+        assert_eq!(process.session_id, "session-1");
     }
 
     #[test]
@@ -4187,5 +5616,409 @@ mod tests {
         assert_eq!(state.queued_messages.len(), 1);
         assert_eq!(state.queued_messages[0].id, "queue-new");
         assert_eq!(state.queued_messages[0].status, "queued");
+    }
+
+    #[test]
+    fn truncate_session_transcript_deletes_turns_not_kept() {
+        let mut conn = migrated_memory_db();
+        insert_test_session(&conn);
+        let now = now_unix_ms() as i64;
+
+        for (turn_id, turn_index) in [("turn-a", 0), ("turn-b", 1), ("turn-c", 2)] {
+            conn.execute(
+                "INSERT INTO turns (id, session_id, turn_index, status, created_at, updated_at) VALUES (?1, 'session-1', ?2, 'complete', ?3, ?3)",
+                params![turn_id, turn_index, now],
+            )
+            .expect("insert turn");
+            conn.execute(
+                "INSERT INTO turn_parts (id, turn_id, part_type, role, part_index, status, created_at, updated_at) VALUES (?1, ?2, 'message', 'user', 0, 'done', ?3, ?3)",
+                params![format!("{turn_id}-part"), turn_id, now],
+            )
+            .expect("insert part");
+        }
+
+        let tx = conn.transaction().expect("tx");
+        // Inline the keep logic for unit test without open_database.
+        let keep = HashSet::from(["turn-a".to_string()]);
+        let existing: Vec<String> = {
+            let mut statement = tx
+                .prepare("SELECT id FROM turns WHERE session_id = 'session-1'")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .filter_map(|row| row.ok())
+                .collect()
+        };
+        for turn_id in existing {
+            if !keep.contains(&turn_id) {
+                tx.execute("DELETE FROM turns WHERE id = ?1", params![turn_id])
+                    .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM turns WHERE session_id = 'session-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 1);
+        let parts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turn_parts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(parts, 1, "parts cascade with turn delete");
+    }
+
+    #[test]
+    fn delete_stale_refuses_empty_snapshot_when_turns_exist() {
+        let mut conn = migrated_memory_db();
+        insert_test_session(&conn);
+        let now = now_unix_ms() as i64;
+        conn.execute(
+            "INSERT INTO turns (id, session_id, turn_index, status, created_at, updated_at) VALUES ('turn-x', 'session-1', 0, 'complete', ?1, ?1)",
+            params![now],
+        )
+        .unwrap();
+
+        let tx = conn.transaction().unwrap();
+        let err = delete_stale_transcript_rows(&tx, "session-1", &HashSet::new(), &HashSet::new())
+            .expect_err("must refuse empty wipe");
+        assert!(err.contains("empty snapshot"), "{err}");
+    }
+
+    #[test]
+    fn unfinished_streaming_message_becomes_interrupted_not_done() {
+        let record = StoredMessageRecord {
+            content: "partial answer".to_string(),
+            created_at: 1_000,
+            id: "message-assistant-1".to_string(),
+            role: "assistant".to_string(),
+            status: Some("streaming".to_string()),
+            parts: vec![StoredMessageStepRecord {
+                content: Some("partial answer".to_string()),
+                id: "part-1".to_string(),
+                status: Some("streaming".to_string()),
+                r#type: "content".to_string(),
+                ..StoredMessageStepRecord::default()
+            }],
+            ..StoredMessageRecord::default()
+        };
+
+        let recovered = recover_incomplete_message(record);
+        assert_eq!(recovered.status.as_deref(), Some("interrupted"));
+        assert_ne!(recovered.status.as_deref(), Some("done"));
+        assert_eq!(recovered.content, "partial answer");
+        assert_eq!(recovered.parts[0].status.as_deref(), Some("interrupted"));
+        assert_eq!(recovered.completed_at_ms, Some(1_000));
+    }
+
+    #[test]
+    fn empty_streaming_assistant_gets_interrupted_fallback_text() {
+        let record = StoredMessageRecord {
+            content: String::new(),
+            created_at: 2_000,
+            id: "message-assistant-2".to_string(),
+            role: "assistant".to_string(),
+            status: Some("streaming".to_string()),
+            parts: vec![StoredMessageStepRecord {
+                id: "part-empty".to_string(),
+                status: Some("streaming".to_string()),
+                r#type: "content".to_string(),
+                ..StoredMessageStepRecord::default()
+            }],
+            ..StoredMessageRecord::default()
+        };
+
+        let recovered = recover_incomplete_message(record);
+        assert_eq!(recovered.status.as_deref(), Some("interrupted"));
+        assert_eq!(recovered.content, "Response interrupted.");
+        assert_eq!(recovered.parts[0].status.as_deref(), Some("interrupted"));
+    }
+
+    #[test]
+    fn done_messages_are_unchanged_by_stream_recovery() {
+        let record = StoredMessageRecord {
+            content: "finished".to_string(),
+            created_at: 3_000,
+            id: "message-assistant-3".to_string(),
+            role: "assistant".to_string(),
+            status: Some("done".to_string()),
+            parts: vec![StoredMessageStepRecord {
+                content: Some("finished".to_string()),
+                id: "part-done".to_string(),
+                status: Some("done".to_string()),
+                r#type: "content".to_string(),
+                ..StoredMessageStepRecord::default()
+            }],
+            ..StoredMessageRecord::default()
+        };
+
+        let recovered = recover_incomplete_message(record.clone());
+        assert_eq!(recovered.status.as_deref(), Some("done"));
+        assert_eq!(recovered.content, "finished");
+        assert_eq!(recovered.parts[0].status.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn mark_compacted_turns_sets_flags_for_complete_turns_only() {
+        let mut conn = migrated_memory_db();
+        let now = now_unix_ms() as i64;
+        insert_test_session(&conn);
+        conn.execute(
+            "INSERT INTO turns (id, session_id, turn_index, status, compacted, created_at, updated_at)
+             VALUES ('turn-a', 'session-1', 0, 'complete', 0, ?1, ?1)",
+            params![now],
+        )
+        .expect("insert complete turn a");
+        conn.execute(
+            "INSERT INTO turns (id, session_id, turn_index, status, compacted, created_at, updated_at)
+             VALUES ('turn-b', 'session-1', 1, 'complete', 0, ?1, ?1)",
+            params![now],
+        )
+        .expect("insert complete turn b");
+        conn.execute(
+            "INSERT INTO turns (id, session_id, turn_index, status, compacted, created_at, updated_at)
+             VALUES ('turn-running', 'session-1', 2, 'running', 0, ?1, ?1)",
+            params![now],
+        )
+        .expect("insert running turn");
+
+        {
+            let tx = conn.transaction().expect("start mark tx");
+            mark_compacted_turns(
+                &tx,
+                "session-1",
+                &[
+                    "turn-a".to_string(),
+                    "turn-running".to_string(),
+                    "missing-turn".to_string(),
+                ],
+            )
+            .expect("mark compacted turns");
+            tx.commit().expect("commit mark");
+        }
+
+        let compacted_ids = read_compacted_turn_ids(&conn, "session-1").expect("read flags");
+        assert_eq!(compacted_ids, vec!["turn-a".to_string()]);
+
+        let turn_b_flag: i64 = conn
+            .query_row(
+                "SELECT compacted FROM turns WHERE id = 'turn-b'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read turn-b flag");
+        let running_flag: i64 = conn
+            .query_row(
+                "SELECT compacted FROM turns WHERE id = 'turn-running'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read running flag");
+        assert_eq!(turn_b_flag, 0, "unlisted complete turn stays uncompacted");
+        assert_eq!(running_flag, 0, "running turns are not marked compacted");
+    }
+
+    #[test]
+    fn pending_and_running_parts_become_interrupted_on_load() {
+        let record = StoredMessageRecord {
+            content: String::new(),
+            created_at: 1_000,
+            id: "message-assistant-mixed".to_string(),
+            role: "assistant".to_string(),
+            status: Some("done".to_string()),
+            parts: vec![
+                StoredMessageStepRecord {
+                    content: Some("done text".to_string()),
+                    id: "part-done".to_string(),
+                    status: Some("done".to_string()),
+                    r#type: "content".to_string(),
+                    ..StoredMessageStepRecord::default()
+                },
+                StoredMessageStepRecord {
+                    id: "part-pending-tool".to_string(),
+                    status: Some("pending".to_string()),
+                    r#type: "tool_call".to_string(),
+                    name: Some("bash".to_string()),
+                    tool_call_id: Some("call-1".to_string()),
+                    ..StoredMessageStepRecord::default()
+                },
+                StoredMessageStepRecord {
+                    id: "part-running-result".to_string(),
+                    status: Some("running".to_string()),
+                    r#type: "tool_result".to_string(),
+                    tool_call_id: Some("call-1".to_string()),
+                    ..StoredMessageStepRecord::default()
+                },
+            ],
+            tool_calls: vec![StoredToolCallRecord {
+                id: "call-1".to_string(),
+                input: Some("{}".to_string()),
+                name: "bash".to_string(),
+                status: Some("running".to_string()),
+            }],
+            ..StoredMessageRecord::default()
+        };
+
+        let recovered = recover_incomplete_message(record);
+        assert_eq!(recovered.status.as_deref(), Some("interrupted"));
+        assert_eq!(recovered.parts[0].status.as_deref(), Some("done"));
+        assert_eq!(recovered.parts[1].status.as_deref(), Some("interrupted"));
+        assert_eq!(recovered.parts[2].status.as_deref(), Some("interrupted"));
+        assert_eq!(
+            recovered.tool_calls[0].status.as_deref(),
+            Some("interrupted")
+        );
+    }
+
+    #[test]
+    fn user_message_interrupted_status_repairs_to_done_on_load() {
+        let record = StoredMessageRecord {
+            content: "hello".to_string(),
+            created_at: 1_000,
+            id: "message-user-1".to_string(),
+            role: "user".to_string(),
+            status: Some("interrupted".to_string()),
+            ..StoredMessageRecord::default()
+        };
+
+        let recovered = recover_incomplete_message(record);
+        assert_eq!(recovered.status.as_deref(), Some("done"));
+        assert_eq!(recovered.content, "hello");
+    }
+
+    #[test]
+    fn interrupt_running_turns_on_load_closes_stuck_turns() {
+        let conn = migrated_memory_db();
+        let now = now_unix_ms() as i64;
+        insert_test_session(&conn);
+        conn.execute(
+            "INSERT INTO turns (id, session_id, turn_index, status, created_at, updated_at)
+             VALUES ('turn-running', 'session-1', 0, 'running', ?1, ?1)",
+            params![now],
+        )
+        .expect("insert running turn");
+        conn.execute(
+            "INSERT INTO turns (id, session_id, turn_index, status, created_at, updated_at)
+             VALUES ('turn-complete', 'session-1', 1, 'complete', ?1, ?1)",
+            params![now],
+        )
+        .expect("insert complete turn");
+
+        interrupt_running_turns_on_load(&conn, "session-1").expect("recover turns");
+
+        let running_status: String = conn
+            .query_row(
+                "SELECT status FROM turns WHERE id = 'turn-running'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read running");
+        let complete_status: String = conn
+            .query_row(
+                "SELECT status FROM turns WHERE id = 'turn-complete'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read complete");
+        assert_eq!(running_status, "interrupted");
+        assert_eq!(complete_status, "complete");
+    }
+
+    #[test]
+    fn turn_budget_summary_writes_columns_on_real_turn_not_synthetic_turn() {
+        let mut conn = migrated_memory_db();
+        let now = now_unix_ms() as i64;
+        insert_test_session(&conn);
+        conn.execute(
+            "INSERT INTO turns (id, session_id, turn_index, status, created_at, updated_at)
+             VALUES ('turn-real', 'session-1', 0, 'running', ?1, ?1)",
+            params![now],
+        )
+        .expect("insert real turn");
+        // Legacy synthetic summary turn should be deleted on upsert.
+        conn.execute(
+            "INSERT INTO turns (id, session_id, turn_index, status, created_at, updated_at)
+             VALUES ('summary-turn-real', 'session-1', 1, 'complete', ?1, ?1)",
+            params![now],
+        )
+        .expect("insert legacy summary turn");
+
+        {
+            let tx = conn.transaction().expect("tx");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("indexes");
+            upsert_turn_budget_summary(
+                &tx,
+                "session-1",
+                &mut turn_indexes,
+                &StoredTurnSummaryRecord {
+                    completed_at_ms: now as u64 + 10,
+                    estimated_tokens_image_capable: 120,
+                    estimated_tokens_text_only: 100,
+                    estimator_version: 4,
+                    message_ids: vec!["m1".to_string(), "m2".to_string()],
+                    replay_message_count_image_capable: 3,
+                    replay_message_count_text_only: 2,
+                    turn_id: "turn-real".to_string(),
+                },
+            )
+            .expect("upsert budget");
+            tx.commit().expect("commit");
+        }
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM turns WHERE id = 'turn-real'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("status");
+        assert_eq!(status, "running", "budget upsert must not force complete");
+
+        let text_tokens: i64 = conn
+            .query_row(
+                "SELECT estimated_tokens_text_only FROM turns WHERE id = 'turn-real'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("text tokens");
+        let version: i64 = conn
+            .query_row(
+                "SELECT estimator_version FROM turns WHERE id = 'turn-real'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("version");
+        let message_ids: String = conn
+            .query_row(
+                "SELECT summary_message_ids FROM turns WHERE id = 'turn-real'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("message ids");
+        assert_eq!(text_tokens, 100);
+        assert_eq!(version, 4);
+        assert!(message_ids.contains("m1"));
+
+        let legacy_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM turns WHERE id LIKE 'summary-%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy count");
+        assert_eq!(legacy_count, 0, "synthetic summary turns removed");
+
+        let loaded = load_turn_budget_summaries(&conn, "session-1").expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].turn_id, "turn-real");
+        assert_eq!(loaded[0].estimated_tokens_text_only, 100);
+        assert_eq!(
+            loaded[0].message_ids,
+            vec!["m1".to_string(), "m2".to_string()]
+        );
     }
 }

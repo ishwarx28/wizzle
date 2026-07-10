@@ -254,6 +254,9 @@ pub struct StoredMessagesFile {
 }
 
 #[allow(dead_code)]
+// This legacy JSONL boundary mirrors the on-disk schema; boxing would add churn to every reader
+// for a type that is used only during migration and import/export.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StoredSessionHistoryRecord {
@@ -479,6 +482,15 @@ pub struct FinalizeTurnInput {
     pub status: String,
     pub turn_id: String,
     pub updated_at_ms: u64,
+}
+
+/// Keep only these turn ids in SQL; delete all other turns (and cascaded parts) for the session.
+/// Used immediately on message edit so crash mid-run cannot resurrect truncated history (#3/#57).
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TruncateSessionTranscriptInput {
+    pub keep_turn_ids: Vec<String>,
+    pub session_id: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]

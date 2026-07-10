@@ -19,11 +19,40 @@ pub async fn run_agent_tool(
     runtime: &AgentRuntimeState,
 ) -> Result<AgentToolRunPayload, String> {
     let project_root = pathing::canonical_project_root(&input.project_id)?;
+    let session_id = input
+        .session_id
+        .as_deref()
+        .ok_or_else(|| "A stored session is required to run agent tools.".to_string())?;
+    if input
+        .tool_call_id
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err("A tool call identifier is required to run agent tools.".to_string());
+    }
+
+    if !runtime.is_session_run_active(session_id) {
+        return Err("Agent tools can only run during an active session turn.".to_string());
+    }
+
+    // In-app approval is enforced in the agent runner UI. Backend still verifies the
+    // session exists, the run is active, and the permission mode is known.
+    let permission_mode = crate::workspace::sqlite_repository::resolve_session_tool_permission(
+        session_id,
+        &input.project_id,
+    )?;
+    if !matches!(
+        permission_mode.as_str(),
+        "full-access" | "manual-approve"
+    ) {
+        return Err("The session has an unsupported tool permission mode.".to_string());
+    }
+
     let arguments = serde_json::from_str::<Value>(&input.arguments)
         .map_err(|error| format!("Invalid JSON tool arguments: {error}"))?;
 
     match input.tool_name.as_str() {
-        "read" => read::run(project_root, arguments).await,
+        "read" => read::run(project_root, arguments, input.image_capable).await,
         "write" => {
             let lock_path = write::resolve_lock_path(&project_root, &arguments)?;
             let session_lock = input
@@ -62,6 +91,7 @@ pub async fn run_agent_tool(
                 &window,
                 runtime,
                 input.session_id.as_deref(),
+                input.turn_id.as_deref(),
             )
             .await
         }

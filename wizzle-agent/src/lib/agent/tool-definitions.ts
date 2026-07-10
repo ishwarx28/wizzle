@@ -1,4 +1,6 @@
 import type { ProxyToolDefinition } from "../chat-stream";
+import { resolveReadToolDescription } from "../image-capability";
+import type { ModelCapability } from "../../types/workspace";
 import {
   DEFAULT_TOOL_TIMEOUT,
   TOOL_TIMEOUT_DESCRIPTION,
@@ -43,33 +45,36 @@ function createTimeoutProperty() {
   } as const;
 }
 
-export const READ_TOOL: WizzleToolDefinition = {
-  description:
-    "Read a text or image file from the selected project, or a markdown skill file from ~/.wizzle/skills/. You can request a specific line range for text files. If the file is an image (png, jpg, jpeg, gif, webp, bmp, svg, avif), the result includes the image data you can view and analyze.",
-  name: "read",
-  parameters: {
-    additionalProperties: false,
-    properties: {
-      endLine: {
-        minimum: 1,
-        type: "integer",
+export function buildReadToolDefinition(imageCapable: boolean): WizzleToolDefinition {
+  return {
+    description: resolveReadToolDescription(imageCapable),
+    name: "read",
+    parameters: {
+      additionalProperties: false,
+      properties: {
+        endLine: {
+          minimum: 1,
+          type: "integer",
+        },
+        path: {
+          description:
+            "Path to read, relative to the selected project root unless absolute. Global skill files under ~/.wizzle/skills/ are also allowed.",
+          type: "string",
+        },
+        startLine: {
+          minimum: 1,
+          type: "integer",
+        },
       },
-      path: {
-        description:
-          "Path to read, relative to the selected project root unless absolute. Global skill files under ~/.wizzle/skills/ are also allowed.",
-        type: "string",
-      },
-      startLine: {
-        minimum: 1,
-        type: "integer",
-      },
-      timeout: createTimeoutProperty(),
+      required: ["path"],
+      type: "object",
     },
-    required: ["path"],
-    type: "object",
-  },
-  schemaVersion: TOOL_SCHEMA_VERSION,
-};
+    schemaVersion: TOOL_SCHEMA_VERSION,
+  };
+}
+
+/** Default read tool (image-capable). Prefer `buildReadToolDefinition` for the active model. */
+export const READ_TOOL: WizzleToolDefinition = buildReadToolDefinition(true);
 
 export const WRITE_TOOL: WizzleToolDefinition = {
   description:
@@ -82,10 +87,9 @@ export const WRITE_TOOL: WizzleToolDefinition = {
         type: "string",
       },
       path: {
-        description: "Path to write, relative to the selected project root unless absolute.",
+        description: "Path to write inside the selected project root.",
         type: "string",
       },
-      timeout: createTimeoutProperty(),
     },
     required: ["path", "content"],
     type: "object",
@@ -107,13 +111,12 @@ export const EDIT_TOOL: WizzleToolDefinition = {
         type: "string",
       },
       path: {
-        description: "Path to edit, relative to the selected project root unless absolute.",
+        description: "Path to edit inside the selected project root.",
         type: "string",
       },
       replaceAll: {
         type: "boolean",
       },
-      timeout: createTimeoutProperty(),
     },
     required: ["path", "oldText", "newText"],
     type: "object",
@@ -123,7 +126,7 @@ export const EDIT_TOOL: WizzleToolDefinition = {
 
 export const BASH_TOOL: WizzleToolDefinition = {
   description:
-    "Run or manage shell commands inside the selected project root. Use action \"run\" for git inspection, rg searches, tests, formatting, and other terminal tasks. Use background: true only for long-running dev servers or watchers, then inspect with list_processes/read_process and stop with stop_process.",
+    "Run or manage host shell commands with the selected project as the working directory. Shell commands are not filesystem- or network-sandboxed and can access anything permitted to the Wizzle OS user. Use action \"run\" for git inspection, rg searches, tests, formatting, and other terminal tasks. Use background: true only for long-running dev servers or watchers, then inspect with list_processes/read_process and stop with stop_process.",
   name: "bash",
   parameters: {
     additionalProperties: false,
@@ -158,8 +161,15 @@ export const BASH_TOOL: WizzleToolDefinition = {
   schemaVersion: TOOL_SCHEMA_VERSION,
 };
 
-export function resolveVersionedAgentToolDefinitions() {
-  return [READ_TOOL, WRITE_TOOL, EDIT_TOOL, BASH_TOOL];
+export function resolveVersionedAgentToolDefinitions(options?: {
+  imageCapable?: boolean;
+  modelCapabilities?: ModelCapability[];
+}) {
+  const imageCapable =
+    options?.imageCapable ??
+    (options?.modelCapabilities ? options.modelCapabilities.includes("image") : true);
+
+  return [buildReadToolDefinition(imageCapable), WRITE_TOOL, EDIT_TOOL, BASH_TOOL];
 }
 
 function toOpenAiToolDefinition(tool: WizzleToolDefinition): ProxyToolDefinition {
@@ -230,11 +240,23 @@ export function resolveToolDefinitionsMetadata() {
   };
 }
 
-export function adaptAgentToolsForProvider(format: "openai_compatible"): ProxyToolDefinition[];
-export function adaptAgentToolsForProvider(format: "anthropic"): AnthropicToolDefinition[];
-export function adaptAgentToolsForProvider(format: "google"): GoogleToolDefinition[];
-export function adaptAgentToolsForProvider(format: ToolProviderFormat) {
-  const tools = resolveVersionedAgentToolDefinitions();
+export function adaptAgentToolsForProvider(
+  format: "openai_compatible",
+  options?: { imageCapable?: boolean; modelCapabilities?: ModelCapability[] },
+): ProxyToolDefinition[];
+export function adaptAgentToolsForProvider(
+  format: "anthropic",
+  options?: { imageCapable?: boolean; modelCapabilities?: ModelCapability[] },
+): AnthropicToolDefinition[];
+export function adaptAgentToolsForProvider(
+  format: "google",
+  options?: { imageCapable?: boolean; modelCapabilities?: ModelCapability[] },
+): GoogleToolDefinition[];
+export function adaptAgentToolsForProvider(
+  format: ToolProviderFormat,
+  options?: { imageCapable?: boolean; modelCapabilities?: ModelCapability[] },
+) {
+  const tools = resolveVersionedAgentToolDefinitions(options);
 
   if (format === "anthropic") {
     return tools.map(toAnthropicToolDefinition);
@@ -247,18 +269,10 @@ export function adaptAgentToolsForProvider(format: ToolProviderFormat) {
   return tools.map(toOpenAiToolDefinition);
 }
 
-export function resolveAgentTools(): ProxyToolDefinition[];
-export function resolveAgentTools(format: "openai_compatible"): ProxyToolDefinition[];
-export function resolveAgentTools(format: "anthropic"): AnthropicToolDefinition[];
-export function resolveAgentTools(format: "google"): GoogleToolDefinition[];
-export function resolveAgentTools(format: ToolProviderFormat = "openai_compatible") {
-  if (format === "anthropic") {
-    return adaptAgentToolsForProvider("anthropic");
-  }
-
-  if (format === "google") {
-    return adaptAgentToolsForProvider("google");
-  }
-
-  return adaptAgentToolsForProvider("openai_compatible");
+/** OpenAI-compatible tool defs for the agent loop (image description depends on model). */
+export function resolveAgentTools(options?: {
+  imageCapable?: boolean;
+  modelCapabilities?: ModelCapability[];
+}): ProxyToolDefinition[] {
+  return adaptAgentToolsForProvider("openai_compatible", options);
 }

@@ -94,12 +94,8 @@ fn normalize_candidate_path(
             Component::RootDir => normalized.push(component.as_os_str()),
             Component::CurDir => {}
             Component::ParentDir => {
-                if !normalized.pop() {
-                    if enforce_root_boundary {
-                        return Err(
-                            "The requested path is outside the selected project.".to_string()
-                        );
-                    }
+                if !normalized.pop() && enforce_root_boundary {
+                    return Err("The requested path is outside the selected project.".to_string());
                 }
             }
             Component::Normal(value) => normalized.push(value),
@@ -189,6 +185,26 @@ pub fn resolve_existing_read_path(
         return resolve_existing_path_with_boundary(project_root, requested_path, true);
     }
 
+    if candidate.file_name().and_then(|value| value.to_str()) == Some("AGENTS.md") {
+        let candidate_parent = candidate.parent().ok_or_else(|| {
+            "Could not determine the parent directory for the instruction file.".to_string()
+        })?;
+        let normalized_project_root = normalize_path(project_root);
+        let normalized_parent = normalize_path(candidate_parent);
+
+        if path_stays_inside_root(&normalized_parent, &normalized_project_root) {
+            let metadata = fs::symlink_metadata(&candidate)
+                .map_err(|error| format!("Could not read {}: {error}", candidate.display()))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(
+                    "Project instruction files must be regular files, not symlinks.".to_string(),
+                );
+            }
+            return fs::canonicalize(&candidate)
+                .map_err(|error| format!("Could not read {}: {error}", candidate.display()));
+        }
+    }
+
     let Some(global_skills_dir) = global_skills_dir() else {
         return Err(
             "The requested path is outside the selected project and ~/.wizzle/skills/.".to_string(),
@@ -221,7 +237,7 @@ pub fn resolve_existing_tool_path(
     project_root: &Path,
     requested_path: &str,
 ) -> Result<PathBuf, String> {
-    resolve_existing_path_with_boundary(project_root, requested_path, false)
+    resolve_existing_path_with_boundary(project_root, requested_path, true)
 }
 
 fn resolve_target_path_with_boundary(
@@ -267,5 +283,67 @@ pub fn resolve_target_tool_path(
     project_root: &Path,
     requested_path: &str,
 ) -> Result<PathBuf, String> {
-    resolve_target_path_with_boundary(project_root, requested_path, false)
+    resolve_target_path_with_boundary(project_root, requested_path, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_existing_read_path, resolve_existing_tool_path, resolve_target_tool_path};
+    use std::fs;
+    use uuid::Uuid;
+
+    fn temporary_root() -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("wizzle-pathing-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create temporary project root");
+        fs::canonicalize(root).expect("canonicalize temporary project root")
+    }
+
+    #[test]
+    fn mutation_paths_reject_parent_traversal() {
+        let root = temporary_root();
+        fs::write(root.join("inside.txt"), "inside").expect("write fixture");
+
+        assert!(resolve_existing_tool_path(&root, "../outside.txt").is_err());
+        assert!(resolve_target_tool_path(&root, "../outside.txt").is_err());
+
+        fs::remove_dir_all(root).expect("remove temporary project root");
+    }
+
+    #[test]
+    fn reads_only_named_instruction_files_from_project_ancestors() {
+        let parent = temporary_root();
+        let project_root = parent.join("nested/project");
+        fs::create_dir_all(&project_root).expect("create nested project");
+        let instruction_path = parent.join("AGENTS.md");
+        let unrelated_path = parent.join("secrets.txt");
+        fs::write(&instruction_path, "instructions").expect("write instruction file");
+        fs::write(&unrelated_path, "secret").expect("write unrelated file");
+
+        assert_eq!(
+            resolve_existing_read_path(&project_root, &instruction_path.to_string_lossy())
+                .expect("ancestor instruction should be readable"),
+            fs::canonicalize(&instruction_path).expect("canonical instruction path"),
+        );
+        assert!(
+            resolve_existing_read_path(&project_root, &unrelated_path.to_string_lossy()).is_err()
+        );
+
+        fs::remove_dir_all(parent).expect("remove temporary root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutation_paths_reject_symlink_parents() {
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_root();
+        let outside = std::env::temp_dir().join(format!("wizzle-outside-{}", Uuid::new_v4()));
+        fs::create_dir_all(&outside).expect("create outside directory");
+        symlink(&outside, root.join("linked")).expect("create symlink");
+
+        assert!(resolve_target_tool_path(&root, "linked/new.txt").is_err());
+
+        fs::remove_dir_all(root).expect("remove temporary project root");
+        fs::remove_dir_all(outside).expect("remove outside directory");
+    }
 }

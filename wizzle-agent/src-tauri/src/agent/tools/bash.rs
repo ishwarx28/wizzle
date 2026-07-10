@@ -19,12 +19,13 @@ use super::{
     shared::{truncate_text, ToolTimeout, MAX_COMMAND_OUTPUT_BYTES},
 };
 use crate::{
-    agent::{types::AgentToolRunPayload, AgentRuntimeState},
+    agent::{runtime::terminate_pid, types::AgentToolRunPayload, AgentRuntimeState},
     workspace::sqlite_repository::{self, NewProcessRecord, WorkspaceProcessPayload},
 };
 
 const AGENT_TOOL_CHUNK_EVENT: &str = "agent-tool-chunk";
 const MAX_STREAM_CAPTURE_BYTES: usize = MAX_COMMAND_OUTPUT_BYTES / 2;
+const PROCESS_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -87,6 +88,7 @@ pub async fn run(
     window: &Window,
     runtime: &AgentRuntimeState,
     session_id: Option<&str>,
+    turn_id: Option<&str>,
 ) -> Result<AgentToolRunPayload, String> {
     let arguments: BashToolArguments = serde_json::from_value(arguments)
         .map_err(|error| format!("Invalid arguments for bash: {error}"))?;
@@ -101,6 +103,7 @@ pub async fn run(
                 window,
                 runtime,
                 session_id,
+                turn_id,
             )
             .await
         }
@@ -195,6 +198,11 @@ fn build_shell_command(command: &str) -> Command {
     } else {
         let mut process = Command::new("sh");
         process.args(["-lc", command]);
+        // Own process group so stop can kill the shell and its children (http.server, etc.).
+        #[cfg(unix)]
+        {
+            process.process_group(0);
+        }
         process
     }
 }
@@ -279,6 +287,9 @@ async fn wait_for_child(
     mut child: Child,
     timeout: ToolTimeout,
 ) -> Result<ProcessCompletion, String> {
+    let pid = child
+        .id()
+        .ok_or_else(|| "Could not determine the command process ID.".to_string())?;
     let mut timed_out = false;
     let status = match tokio::time::timeout(timeout.duration(), child.wait()).await {
         Ok(result) => {
@@ -286,10 +297,17 @@ async fn wait_for_child(
         }
         Err(_) => {
             timed_out = true;
-            let _ = child.kill().await;
-            child.wait().await.map_err(|error| {
-                format!("Could not finish the timed-out command cleanup: {error}")
-            })?
+            tokio::time::timeout(PROCESS_CLEANUP_TIMEOUT, terminate_pid(pid))
+                .await
+                .map_err(|_| {
+                    "Timed out while terminating the command process group.".to_string()
+                })??;
+            tokio::time::timeout(PROCESS_CLEANUP_TIMEOUT, child.wait())
+                .await
+                .map_err(|_| "Timed out while reaping the terminated command.".to_string())?
+                .map_err(|error| {
+                    format!("Could not finish the timed-out command cleanup: {error}")
+                })?
         }
     };
 
@@ -379,12 +397,14 @@ async fn collect_output(
         }
     }
 
-    stdout_task
+    tokio::time::timeout(PROCESS_CLEANUP_TIMEOUT, stdout_task)
         .await
+        .map_err(|_| "Timed out while closing command stdout after process cleanup.".to_string())?
         .map_err(|error| format!("Could not collect command stdout: {error}"))?
         .map_err(|error| format!("Could not read command stdout: {error}"))?;
-    stderr_task
+    tokio::time::timeout(PROCESS_CLEANUP_TIMEOUT, stderr_task)
         .await
+        .map_err(|_| "Timed out while closing command stderr after process cleanup.".to_string())?
         .map_err(|error| format!("Could not collect command stderr: {error}"))?
         .map_err(|error| format!("Could not read command stderr: {error}"))?;
 
@@ -408,6 +428,7 @@ async fn run_command(
     window: &Window,
     runtime: &AgentRuntimeState,
     session_id: Option<&str>,
+    turn_id: Option<&str>,
 ) -> Result<AgentToolRunPayload, String> {
     let command = require_command(&arguments)?;
 
@@ -421,7 +442,16 @@ async fn run_command(
         let session_id = require_session_id(session_id)?;
         let lock = runtime.background_process_lock(session_id)?;
         let _guard = lock.lock().await;
-        return start_background_process(session_id, command, cwd, window, runtime).await;
+        return start_background_process(
+            session_id,
+            command,
+            cwd,
+            window,
+            runtime,
+            turn_id,
+            tool_call_id,
+        )
+        .await;
     }
 
     let session_key = session_id
@@ -540,6 +570,8 @@ async fn start_background_process(
     cwd: PathBuf,
     window: &Window,
     runtime: &AgentRuntimeState,
+    turn_id: Option<&str>,
+    tool_call_id: Option<&str>,
 ) -> Result<AgentToolRunPayload, String> {
     let mut command = build_shell_command(&command_text);
     command
@@ -564,6 +596,8 @@ async fn start_background_process(
         session_id: session_id.to_string(),
         started_at_ms: sqlite_repository::now_unix_ms(),
         status: "running".to_string(),
+        tool_call_id: tool_call_id.map(str::to_string),
+        turn_id: turn_id.map(str::to_string),
     }) {
         Ok(process) => process,
         Err(error) => {
@@ -670,4 +704,58 @@ fn spawn_background_monitor(
 #[allow(dead_code)]
 fn _serialize_process_for_tests(process: WorkspaceProcessPayload) -> Value {
     json!(process)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::{process::Stdio, time::Duration};
+
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    use super::{build_shell_command, terminate_pid};
+
+    #[tokio::test]
+    async fn process_group_termination_stops_shell_descendants() {
+        let mut command = build_shell_command("sleep 30 & echo $!; wait");
+        command
+            .kill_on_drop(true)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().expect("spawn shell command");
+        let shell_pid = child.id().expect("shell pid");
+        let mut child_pid_line = String::new();
+        let mut stdout = BufReader::new(child.stdout.take().expect("shell stdout"));
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            stdout.read_line(&mut child_pid_line),
+        )
+        .await
+        .expect("child pid output timeout")
+        .expect("read child pid");
+        let descendant_pid = child_pid_line.trim().parse::<u32>().expect("child pid");
+
+        terminate_pid(shell_pid)
+            .await
+            .expect("terminate process group");
+        tokio::time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .expect("shell reap timeout")
+            .expect("reap shell");
+
+        let mut descendant_alive = true;
+        for _ in 0..20 {
+            descendant_alive = std::process::Command::new("kill")
+                .args(["-0", &descendant_pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            if !descendant_alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!descendant_alive, "descendant process remained alive");
+    }
 }

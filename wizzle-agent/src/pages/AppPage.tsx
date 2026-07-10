@@ -1,15 +1,25 @@
 import { PanelLeftOpen, PanelRightOpen } from "lucide-react";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { ChatView } from "../components/workspace/ChatView";
 import { FilePanel } from "../components/workspace/FilePanel";
-import { ProviderSettingsPage } from "../components/workspace/ProviderSettingsDialog";
+import { SessionProcessMenu } from "../components/workspace/SessionProcessMenu";
 import { Sidebar } from "../components/workspace/Sidebar";
 import { usePanelResize } from "../hooks/use-panel-resize";
 import { useWindowDrag } from "../hooks/use-window-drag";
 import { frontendLogger } from "../lib/logger";
 import { listProviderModels, listProviders, loadWorkspaceSnapshot } from "../lib/local-workspace";
-import { useWorkspaceStore } from "../store/workspace-store";
+import {
+  interruptAllWorkspaceRunsForShutdown,
+  useWorkspaceStore,
+} from "../store/workspace-store";
+
+const ProviderSettingsPage = lazy(() =>
+  import("../components/workspace/ProviderSettingsDialog").then((module) => ({
+    default: module.ProviderSettingsPage,
+  })),
+);
 
 function shouldAllowNativeContextMenu(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) {
@@ -132,6 +142,33 @@ export function AppPage() {
   }, [setProviderConfig]);
 
   useEffect(() => {
+    // App close / refresh: pending approvals cannot be completed by a dead process.
+    // Resolve them as interrupted and stop in-flight session runs (#26 restart policy).
+    const handlePageHide = () => {
+      void interruptAllWorkspaceRunsForShutdown();
+    };
+
+    window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("beforeunload", handlePageHide);
+
+    let unlistenClose: (() => void) | undefined;
+    void getCurrentWindow()
+      .onCloseRequested(async () => {
+        await interruptAllWorkspaceRunsForShutdown();
+      })
+      .then((unlisten) => {
+        unlistenClose = unlisten;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("beforeunload", handlePageHide);
+      unlistenClose?.();
+    };
+  }, []);
+
+  useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       const isToggleShortcut = event.key.toLowerCase() === "b" && (event.metaKey || event.ctrlKey);
 
@@ -196,7 +233,7 @@ export function AppPage() {
           {isSidebarOpen ? (
             <div
               aria-label="Resize left panel"
-              className="absolute right-0 top-0 z-20 h-full w-3 translate-x-1/2 cursor-col-resize"
+              className="absolute right-0 top-0 z-20 h-full w-3 translate-x-1/2 cursor-col-resize touch-none select-none"
               onPointerDown={startSidebarResize}
             >
               <div className="mx-auto h-full w-px bg-transparent transition hover:bg-[var(--color-border-strong)]" />
@@ -237,15 +274,20 @@ export function AppPage() {
                 </div>
               </div>
 
-              {!isFilePanelOpen ? (
-                <button
-                  aria-label="Open file panel"
-                  className="relative z-10 rounded-xl p-2 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
-                  onClick={toggleFilePanel}
-                >
-                  <PanelRightOpen className="h-4 w-4" />
-                </button>
-              ) : null}
+              <div className="relative z-10 flex shrink-0 items-center gap-0.5">
+                {activePage === "chat" ? (
+                  <SessionProcessMenu sessionId={currentSession?.id ?? selectedSessionId} />
+                ) : null}
+                {!isFilePanelOpen ? (
+                  <button
+                    aria-label="Open file panel"
+                    className="rounded-xl p-2 text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                    onClick={toggleFilePanel}
+                  >
+                    <PanelRightOpen className="h-4 w-4" />
+                  </button>
+                ) : null}
+              </div>
             </header>
 
             {providerModelsError ? (
@@ -271,7 +313,15 @@ export function AppPage() {
             ) : null}
 
             {hasHydratedWorkspace && activePage === "providers" ? (
-              <ProviderSettingsPage onBack={() => setActivePage("chat")} />
+              <Suspense
+                fallback={
+                  <div className="flex min-h-0 flex-1 items-center justify-center text-[13px] text-[var(--color-text-secondary)]">
+                    Loading providers…
+                  </div>
+                }
+              >
+                <ProviderSettingsPage onBack={() => setActivePage("chat")} />
+              </Suspense>
             ) : hasHydratedWorkspace ? (
               <ChatView />
             ) : startupError ? (
@@ -312,7 +362,7 @@ export function AppPage() {
             {isFilePanelOpen ? (
               <div
                 aria-label="Resize right panel"
-                className="absolute left-0 top-0 z-20 h-full w-3 -translate-x-1/2 cursor-col-resize"
+                className="absolute left-0 top-0 z-20 h-full w-3 -translate-x-1/2 cursor-col-resize touch-none select-none"
                 onPointerDown={startFileResize}
               >
                 <div className="mx-auto h-full w-px bg-transparent transition hover:bg-[var(--color-border-strong)]" />

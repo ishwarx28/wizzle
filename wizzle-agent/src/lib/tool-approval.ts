@@ -45,6 +45,7 @@ export function createToolApprovalRequest(input: {
   globalSkillsDir?: string;
   permissionMode: PermissionMode;
   projectRoot: string;
+  sessionId: string;
   toolCallId: string;
   toolName: string;
 }): ToolApprovalRequest | null {
@@ -70,6 +71,7 @@ export function createToolApprovalRequest(input: {
   return {
     command: toolName === "bash" ? payload.command?.trim() : undefined,
     path: toolName !== "bash" ? payload.path?.trim() : undefined,
+    sessionId: input.sessionId,
     summary: summarizeRequest(toolName, payload),
     timeout: payload.timeout ?? DEFAULT_TOOL_TIMEOUT,
     toolCallId: input.toolCallId,
@@ -80,6 +82,7 @@ export function createToolApprovalRequest(input: {
 
 export function createRejectedToolPayload(request: ToolApprovalRequest): ToolExecutionPayload {
   return {
+    error: "The user rejected this tool request.",
     output: JSON.stringify({
       command: request.command,
       error: "The user rejected this tool request.",
@@ -88,6 +91,7 @@ export function createRejectedToolPayload(request: ToolApprovalRequest): ToolExe
       rejected: true,
       timeout: request.timeout,
     }),
-    status: "done",
+    // Not "done" — rejection must not look like a successful tool run (#39).
+    status: "error",
   };
 }

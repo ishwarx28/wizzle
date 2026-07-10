@@ -10,6 +10,7 @@ pub struct AgentInstructionFilePayload {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentGlobalSkillFilePayload {
+    pub description: Option<String>,
     pub name: String,
     pub path: String,
 }
@@ -30,10 +31,21 @@ pub struct AgentProjectContextPayload {
 #[serde(rename_all = "camelCase")]
 pub struct RunAgentToolInput {
     pub arguments: String,
+    /// When false, image file reads return an error instead of inline image data.
+    #[serde(default = "default_image_capable")]
+    pub image_capable: bool,
     pub project_id: String,
     pub session_id: Option<String>,
     pub tool_call_id: Option<String>,
     pub tool_name: String,
+    /// Conversation turn that owns this tool call (background process linkage, #75).
+    #[serde(default)]
+    pub turn_id: Option<String>,
+}
+
+fn default_image_capable() -> bool {
+    // Prefer explicit FE flag; default true preserves older callers.
+    true
 }
 
 #[derive(Clone, Serialize)]

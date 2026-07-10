@@ -15,8 +15,9 @@ use types::{
     AppendOrUpdateMessageInput, DeleteSessionInput, FinalizeTurnInput, LoadComposerStateInput,
     LoadWorkspaceSessionInput, PersistSessionMetadataInput, PersistWorkspaceSessionInput,
     RenameSessionInput, SaveComposerStateInput, SaveWorkspaceSettingsInput,
-    SetProjectExpandedInput, UpdateSessionSelectionInput, UpdateSessionTitleInput,
-    UpsertTurnSummaryInput, WorkspaceComposerStatePayload, WorkspaceSessionLoadPayload,
+    SetProjectExpandedInput, TruncateSessionTranscriptInput, UpdateSessionSelectionInput,
+    UpdateSessionTitleInput, UpsertTurnSummaryInput, WorkspaceComposerStatePayload,
+    WorkspaceSessionLoadPayload,
 };
 
 pub const MAX_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
@@ -227,6 +228,18 @@ pub fn upsert_turn_summary(
         .lock()
         .map_err(|_| "Could not access Wizzle workspace storage.".to_string())?;
     sqlite_repository::upsert_turn_summary(input)
+}
+
+#[tauri::command]
+pub fn truncate_session_transcript_to_turns(
+    input: TruncateSessionTranscriptInput,
+    lock: State<'_, WorkspaceStorageLock>,
+) -> Result<u32, String> {
+    let _guard = lock
+        .0
+        .lock()
+        .map_err(|_| "Could not access Wizzle workspace storage.".to_string())?;
+    sqlite_repository::truncate_session_transcript_to_turns(input)
 }
 
 #[tauri::command]

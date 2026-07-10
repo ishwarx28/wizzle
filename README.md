@@ -1,63 +1,43 @@
 # Wizzle
 
-Wizzle is a desktop AI coding agent paired with a stateless OpenAI-compatible proxy.
+Wizzle is a local-first desktop AI coding agent. The Tauri application owns the workspace UI, project/session state, tool execution, and direct calls to configured OpenAI-compatible model providers. This checkout does not require a separate proxy or sign-in service.
 
-## Repositories
+## Architecture
 
-- `wizzle-agent`: Tauri desktop app for auth screens, workspace UI, local state, local file access, and local tool execution.
-- `wizzle-proxy`: Node.js proxy for auth validation, model routing, and OpenAI-compatible `/v1` endpoints.
+- `wizzle-agent/src`: React and TypeScript workspace UI plus agent orchestration.
+- `wizzle-agent/src-tauri`: Rust commands for SQLite persistence, provider HTTP calls, local file tools, and process control.
+- `opencode-models.yaml`: initial OpenAI-compatible provider and model metadata imported when no providers exist.
+- Local state and provider credentials are stored under `~/.wizzle`.
 
-## Product Contract
-
-- A project is one local folder chosen by the user.
-- A chat belongs to exactly one project.
-- The desktop app stores projects, chats, settings, and permission mode locally.
-- The proxy stays stateless and does not store project files or chat history.
-- The desktop app never calls model providers directly.
-- The proxy never executes local shell commands or accesses local files.
-
-## Public Model Contract
-
-- Public model ids belong to Wizzle.
-- Current public model: `wizzle-1-thinking`
-- Chat requests must include `X-Wizzle-Reasoning-Level: balanced|max`
+A project maps to one user-selected local folder, and every stored session belongs to one project. File mutations are confined to that project. Shell commands are clearly disclosed as host-capable and remain subject to the selected session permission mode.
 
 ## Quick Start
 
-Desktop app:
+Wizzle uses Node.js 22, declared in `wizzle-agent/.nvmrc`.
 
 ```bash
-cd /Users/mrdev.288/StudioProjects/wizzle/wizzle-agent
+cd wizzle-agent
 npm install
 cp .env.example .env
 source "$HOME/.cargo/env"
 npm run tauri dev
 ```
 
-Proxy:
-
-```bash
-cd /Users/mrdev.288/StudioProjects/wizzle/wizzle-proxy
-npm install
-cp .env.example .env
-npm run dev
-```
-
-Google sign-in in the desktop app opens in the system browser and returns through a temporary loopback callback on `127.0.0.1`. For that flow you must also set `VITE_GOOGLE_OAUTH_CLIENT_ID` in `/Users/mrdev.288/StudioProjects/wizzle/wizzle-agent/.env` with a Google desktop OAuth client id.
-
 ## Verification
 
-- Agent frontend build: `cd wizzle-agent && npm run build`
-- Proxy typecheck: `cd wizzle-proxy && npm run check`
-- Proxy tests: `cd wizzle-proxy && npm run test`
+- TypeScript tests: `cd wizzle-agent && npm test`
+- Frontend build and bundle budget: `cd wizzle-agent && npm run build`
+- Rust tests: `cd wizzle-agent/src-tauri && cargo test --all-features`
+- Rust formatting: `cd wizzle-agent/src-tauri && cargo fmt --all -- --check`
+- Strict Rust linting: `cd wizzle-agent/src-tauri && cargo clippy --all-targets --all-features -- -D warnings`
 
 ## Packaging
 
 - macOS `.dmg`: `cd wizzle-agent && npm run tauri build -- --bundles dmg`
 - Windows `.exe` installer: `cd wizzle-agent && npm run tauri build -- --bundles nsis`
 - Linux bundles: `cd wizzle-agent && npm run tauri build -- --bundles appimage`, `deb`, or `rpm`
-- GitHub Actions also builds `dmg`, `exe`, and `deb` on every push to `main` and publishes them to the rolling prerelease tag `main-build` via `.github/workflows/build-desktop-packages.yml`
+- GitHub Actions verifies the app, builds all three package formats on pushes to `main`, and publishes them to the rolling `main-build` prerelease.
 
 ## License
 
-This repository is proprietary. See [LICENSE.txt](/Users/mrdev.288/StudioProjects/wizzle/LICENSE.txt).
+This repository is proprietary. See [LICENSE.txt](LICENSE.txt).

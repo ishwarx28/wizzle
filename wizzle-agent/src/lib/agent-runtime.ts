@@ -7,6 +7,7 @@ export type AgentInstructionFile = {
 };
 
 export type AgentGlobalSkillFile = {
+  description: string | null;
   name: string;
   path: string;
 };
@@ -39,13 +40,21 @@ export async function loadAgentProjectContext(projectId: string, sessionId?: str
 
 export async function runAgentTool(input: {
   arguments: string;
+  /** When false, read on image files returns an error instead of image data. */
+  imageCapable?: boolean;
   onChunk?: (chunk: AgentToolOutputChunk) => void;
   projectId: string;
   sessionId?: string;
   toolCallId?: string;
   toolName: string;
+  /** Links background processes to this conversation turn (#75). */
+  turnId?: string;
 }) {
-  const { onChunk, ...invokeInput } = input;
+  const { onChunk, imageCapable = true, ...rest } = input;
+  const invokeInput = {
+    ...rest,
+    imageCapable,
+  };
   const unlisten = await listen<AgentToolOutputChunk>("agent-tool-chunk", (event) => {
     if (!onChunk || !invokeInput.toolCallId || event.payload.toolCallId !== invokeInput.toolCallId) {
       return;

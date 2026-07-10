@@ -1,86 +1,28 @@
 mod crypto;
 mod openai_compatible;
 mod repository;
+mod tokenizer_assets;
 mod types;
 
 use futures_util::future::{AbortHandle, Abortable, Aborted};
 use serde_json::json;
-use std::{
-    collections::HashMap,
-    fs,
-    sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashMap, sync::Mutex};
 use tauri::{State, Window};
 use uuid::Uuid;
 
 use crate::agent::{AgentRuntimeState, SessionRuntimeStateKind};
 use crate::logging::log_desktop_event;
-use crate::workspace::paths::{ensure_dir, wizzle_root_dir};
 
 pub use types::{
     CancelProviderChatInput, DeleteProviderInput, ImportProviderYamlInput,
     ProviderChatCompletionInput, ProviderChatStreamInput, ProviderModelPayload, ProviderPayload,
-    RefreshProviderModelsInput, UpsertProviderInput,
+    ReadTokenizerAssetInput, RefreshProviderModelsInput, UpsertProviderInput,
 };
 
 const INTERRUPTED_ERROR: &str = "__WIZZLE_PROVIDER_CHAT_INTERRUPTED__";
 
-fn now_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-fn write_debug_history(body: &serde_json::Value) -> Result<(), String> {
-    let root = wizzle_root_dir()?;
-    ensure_dir(&root)?;
-    let path = root.join("debug-history.json");
-    // Temporary debugging only: this file captures the latest provider replay body and should not be treated as durable storage.
-    let payload = json!({
-        "body": body,
-        "writtenAtMs": now_unix_ms(),
-    });
-    let contents = serde_json::to_string_pretty(&payload)
-        .map_err(|error| format!("Could not serialize Wizzle debug history: {error}"))?;
-    fs::write(&path, contents).map_err(|error| {
-        format!(
-            "Could not write Wizzle debug history to {}: {error}",
-            path.display()
-        )
-    })
-}
-
-fn resolved_debug_body(
-    body: &serde_json::Value,
-    resolved_model: &types::ProviderResolvedModel,
-    stream: bool,
-) -> serde_json::Value {
-    let mut body = body.clone();
-
-    if let Some(object) = body.as_object_mut() {
-        object.insert(
-            "model".to_string(),
-            serde_json::Value::String(resolved_model.model.model_id.clone()),
-        );
-        object.insert("stream".to_string(), serde_json::Value::Bool(stream));
-    }
-
-    body
-}
-
-fn write_unresolved_debug_history(body: &serde_json::Value, error: &str) -> Result<(), String> {
-    let mut body = body.clone();
-
-    if let Some(object) = body.as_object_mut() {
-        object.insert(
-            "modelResolutionError".to_string(),
-            serde_json::Value::String(error.to_string()),
-        );
-    }
-
-    write_debug_history(&body)
+pub fn migrate_provider_api_key_encryption() -> Result<usize, String> {
+    repository::migrate_provider_api_key_encryption()
 }
 
 #[derive(Default)]
@@ -139,6 +81,11 @@ pub fn import_provider_yaml(input: ImportProviderYamlInput) -> Result<(), String
 }
 
 #[tauri::command]
+pub fn read_tokenizer_asset(input: ReadTokenizerAssetInput) -> Result<String, String> {
+    repository::read_tokenizer_asset(&input.path)
+}
+
+#[tauri::command]
 pub async fn complete_provider_chat(
     window: Window,
     request_store: State<'_, ProviderChatRequestStore>,
@@ -162,15 +109,24 @@ pub async fn complete_provider_chat(
         .clone()
         .unwrap_or_else(|| format!("completion-{}", Uuid::new_v4()));
     let resolved_model = repository::resolve_model(&input.model_uuid)?;
-    let client = reqwest::Client::new();
+    let client = openai_compatible::completion_client()?;
     let (abort_handle, abort_registration) = AbortHandle::new_pair();
 
     request_store.insert(request_id.clone(), abort_handle.clone())?;
     runtime.register_provider_request(&input.chat_id, &request_id, abort_handle)?;
-    let _ = runtime.set_state(&window, &input.chat_id, SessionRuntimeStateKind::Busy, None);
+    // Helpers (title, compaction) pass manage_session_runtime=false so they never
+    // flip Idle while the agent run still owns the session (#31/#32/#61).
+    if input.manage_session_runtime && !runtime.is_session_run_active(&input.chat_id) {
+        let _ = runtime.set_state(&window, &input.chat_id, SessionRuntimeStateKind::Busy, None);
+    }
 
     let completion_result = Abortable::new(
-        openai_compatible::complete_chat(&client, &resolved_model, input.body),
+        openai_compatible::complete_chat(
+            &client,
+            &resolved_model,
+            input.body,
+            input.reasoning_level.as_deref(),
+        ),
         abort_registration,
     )
     .await;
@@ -180,16 +136,15 @@ pub async fn complete_provider_chat(
 
     let result = match completion_result {
         Ok(result) => {
-            let _ = runtime.set_state(&window, &input.chat_id, SessionRuntimeStateKind::Idle, None);
+            if input.manage_session_runtime {
+                let _ = runtime.release_provider_session_runtime(&window, &input.chat_id, false);
+            }
             result
         }
         Err(Aborted) => {
-            let _ = runtime.set_state(
-                &window,
-                &input.chat_id,
-                SessionRuntimeStateKind::Interrupted,
-                None,
-            );
+            if input.manage_session_runtime {
+                let _ = runtime.release_provider_session_runtime(&window, &input.chat_id, true);
+            }
             Err(INTERRUPTED_ERROR.to_string())
         }
     };
@@ -221,30 +176,17 @@ pub async fn stream_provider_chat(
         }),
     );
     let request_id = input.request_id.clone();
-    let resolved_model = match repository::resolve_model(&input.model_uuid) {
-        Ok(model) => model,
-        Err(error) => {
-            let _ = write_unresolved_debug_history(&input.body, &error);
-            return Err(error);
-        }
-    };
-    let debug_body = resolved_debug_body(&input.body, &resolved_model, true);
-
-    if let Err(error) = write_debug_history(&debug_body) {
-        log_desktop_event(
-            "warn",
-            "desktop.provider",
-            "debug_history_write_failed",
-            json!({ "error": error }),
-        );
-    }
-
-    let client = reqwest::Client::new();
+    let resolved_model = repository::resolve_model(&input.model_uuid)?;
+    let client = openai_compatible::stream_client()?;
     let (abort_handle, abort_registration) = AbortHandle::new_pair();
 
     request_store.insert(request_id.clone(), abort_handle.clone())?;
     runtime.register_provider_request(&input.chat_id, &request_id, abort_handle)?;
-    let _ = runtime.set_state(&window, &input.chat_id, SessionRuntimeStateKind::Busy, None);
+    // Stream steps run inside an agent turn: begin_session_run already set Busy.
+    // Only mark Busy when there is no active run (standalone streams).
+    if !runtime.is_session_run_active(&input.chat_id) {
+        let _ = runtime.set_state(&window, &input.chat_id, SessionRuntimeStateKind::Busy, None);
+    }
 
     let stream_result = Abortable::new(
         openai_compatible::stream_chat(
@@ -253,6 +195,7 @@ pub async fn stream_provider_chat(
             &request_id,
             &resolved_model,
             input.body,
+            input.reasoning_level.as_deref(),
         ),
         abort_registration,
     )
@@ -263,19 +206,15 @@ pub async fn stream_provider_chat(
 
     match stream_result {
         Ok(result) => {
-            let _ = runtime.set_state(&window, &input.chat_id, SessionRuntimeStateKind::Idle, None);
+            // Never Idle while the session run is still open (tools / next steps).
+            let _ = runtime.release_provider_session_runtime(&window, &input.chat_id, false);
             if result.is_ok() {
                 repository::mark_model_used(&resolved_model.model_uuid)?;
             }
             result
         }
         Err(Aborted) => {
-            let _ = runtime.set_state(
-                &window,
-                &input.chat_id,
-                SessionRuntimeStateKind::Interrupted,
-                None,
-            );
+            let _ = runtime.release_provider_session_runtime(&window, &input.chat_id, true);
             Err(INTERRUPTED_ERROR.to_string())
         }
     }

@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use super::{
     output, pathing,
     shared::{
-        content_hash, run_blocking_with_timeout, truncate_text, ToolTimeout,
+        content_hash, run_blocking, truncate_text, MAX_READ_SOURCE_BYTES,
         MAX_TOOL_FILE_CONTENT_BYTES,
     },
 };
@@ -17,7 +17,6 @@ use crate::agent::types::AgentToolRunPayload;
 struct WriteToolArguments {
     content: String,
     path: String,
-    timeout: Option<ToolTimeout>,
 }
 
 pub fn resolve_lock_path(
@@ -32,21 +31,26 @@ pub fn resolve_lock_path(
 pub async fn run(project_root: PathBuf, arguments: Value) -> Result<AgentToolRunPayload, String> {
     let arguments: WriteToolArguments = serde_json::from_value(arguments)
         .map_err(|error| format!("Invalid arguments for write: {error}"))?;
-    let timeout = arguments.timeout.unwrap_or_default();
-
-    run_blocking_with_timeout(timeout, "write", move || {
-        execute(project_root, arguments, timeout)
-    })
-    .await
+    run_blocking("write", move || execute(project_root, arguments)).await
 }
 
 fn execute(
     project_root: PathBuf,
     arguments: WriteToolArguments,
-    timeout: ToolTimeout,
 ) -> Result<AgentToolRunPayload, String> {
     let path = pathing::resolve_target_tool_path(&project_root, &arguments.path)?;
     let created = !path.exists();
+    if !created {
+        let metadata = fs::metadata(&path)
+            .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
+        if metadata.len() > MAX_READ_SOURCE_BYTES as u64 {
+            return Err(format!(
+                "{} is larger than {} MB and cannot be safely replaced with the write tool.",
+                path.display(),
+                MAX_READ_SOURCE_BYTES / (1024 * 1024)
+            ));
+        }
+    }
     let previous_content = fs::read_to_string(&path).ok();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -76,6 +80,5 @@ fn execute(
         "diffTruncated": before_truncated || after_truncated,
         "path": path.to_string_lossy(),
         "realPath": path.to_string_lossy(),
-        "timeout": timeout.label(),
     })))
 }

@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use super::{
     output, pathing,
     shared::{
-        content_hash, run_blocking_with_timeout, truncate_text, ToolTimeout,
+        content_hash, run_blocking, truncate_text, MAX_READ_SOURCE_BYTES,
         MAX_TOOL_FILE_CONTENT_BYTES,
     },
 };
@@ -19,7 +19,6 @@ struct EditToolArguments {
     old_text: String,
     path: String,
     replace_all: Option<bool>,
-    timeout: Option<ToolTimeout>,
 }
 
 pub fn resolve_lock_path(
@@ -34,24 +33,27 @@ pub fn resolve_lock_path(
 pub async fn run(project_root: PathBuf, arguments: Value) -> Result<AgentToolRunPayload, String> {
     let arguments: EditToolArguments = serde_json::from_value(arguments)
         .map_err(|error| format!("Invalid arguments for edit: {error}"))?;
-    let timeout = arguments.timeout.unwrap_or_default();
-
-    run_blocking_with_timeout(timeout, "edit", move || {
-        execute(project_root, arguments, timeout)
-    })
-    .await
+    run_blocking("edit", move || execute(project_root, arguments)).await
 }
 
 fn execute(
     project_root: PathBuf,
     arguments: EditToolArguments,
-    timeout: ToolTimeout,
 ) -> Result<AgentToolRunPayload, String> {
     if arguments.old_text.is_empty() {
         return Err("The edit tool requires a non-empty oldText value.".to_string());
     }
 
     let path = pathing::resolve_existing_tool_path(&project_root, &arguments.path)?;
+    let metadata = fs::metadata(&path)
+        .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
+    if metadata.len() > MAX_READ_SOURCE_BYTES as u64 {
+        return Err(format!(
+            "{} is larger than {} MB and cannot be safely edited.",
+            path.display(),
+            MAX_READ_SOURCE_BYTES / (1024 * 1024)
+        ));
+    }
     let content = fs::read_to_string(&path)
         .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
     let line_ending = if content.contains("\r\n") {
@@ -110,7 +112,6 @@ fn execute(
         "path": path.to_string_lossy(),
         "realPath": path.to_string_lossy(),
         "replacements": if arguments.replace_all.unwrap_or(false) { occurrences } else { 1 },
-        "timeout": timeout.label(),
     })))
 }
 

@@ -5,6 +5,8 @@ providers:
     apiKey: ""
     defaultModelId: deepseek-v4-flash-free
     onlySpecifiedModels: true
+    # Optional provider-level HuggingFace tokenizer.json (path or HTTPS URL).
+    # tokenizerJson: "https://huggingface.co/Qwen/Qwen2.5-7B/resolve/main/tokenizer.json"
     models:
       - modelId: deepseek-v4-flash-free
         displayName: deepseek-v4-flash
@@ -15,7 +17,10 @@ providers:
           - medium
           - high
           - max
+          - xhigh
         maxContext: 128000
+        # Optional model-level tokenizer (overrides provider tokenizerJson).
+        # tokenizerJson: "https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/tokenizer.json"
         tokenizerKind: heuristic
       - modelId: hy3-free
         displayName: hy3
@@ -25,6 +30,8 @@ providers:
           - low
           - medium
           - high
+          - max
+          - xhigh
         maxContext: 128000
         tokenizerKind: heuristic
       - modelId: mimo-v2.5-free
@@ -36,6 +43,7 @@ providers:
           - low
           - medium
           - high
+          - max
+          - xhigh
         maxContext: 128000
         tokenizerKind: heuristic
-      

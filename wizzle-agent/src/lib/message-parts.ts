@@ -29,11 +29,14 @@ function buildLegacyToolParts(message: Message): MessagePart[] {
   const parts: MessagePart[] = [];
 
   for (const toolCall of message.toolCalls ?? []) {
+    const toolCallPartId = `${message.id}-tool-call-${toolCall.id}`;
     parts.push({
       createdAtMs: message.startedAtMs ?? message.createdAtMs,
-      id: `${message.id}-tool-call-${toolCall.id}`,
+      id: toolCallPartId,
       input: toolCall.input,
       name: toolCall.name,
+      // tool_call parents the assistant message; tool_result parents the tool_call.
+      parentPartId: message.id,
       status: toolCall.status,
       toolCallId: toolCall.id,
       type: "tool_call",
@@ -45,6 +48,7 @@ function buildLegacyToolParts(message: Message): MessagePart[] {
         error: toolResult.error,
         id: toolResult.id,
         output: toolResult.output,
+        parentPartId: toolCallPartId,
         status: toolResult.status,
         toolCallId: toolResult.toolCallId ?? toolCall.id,
         type: "tool_result",
@@ -155,12 +159,26 @@ export function getMessageParts(message: Message) {
   return buildAssistantLegacyParts(message);
 }
 
+/**
+ * Final assistant bubble text (`content` parts only).
+ * Pre-tool narration lives in `activity_content` and is shown in the activity
+ * panel — do not fall back to `message.content` when only activity parts exist,
+ * or the UI double-renders after #49 sync.
+ */
 export function getMessageContent(message: Message) {
   if (message.role === "user") {
     return message.content;
   }
 
   const parts = getMessageParts(message);
+
+  if (message.role === "assistant" && parts.length > 0) {
+    return parts
+      .filter((part) => part.type === "content")
+      .map((part) => part.content ?? "")
+      .join("");
+  }
+
   const contentParts = parts.filter((part) => part.type === "content");
 
   if (contentParts.length === 0) {
@@ -170,6 +188,10 @@ export function getMessageContent(message: Message) {
   return contentParts.map((part) => part.content ?? "").join("");
 }
 
+/**
+ * Full assistant text for replay, compaction, and durable anchors:
+ * activity_content (pre-tool) + content (final), in part order (#49/#50/#51).
+ */
 export function getAssistantConversationContent(message: Message) {
   if (message.role !== "assistant") {
     return getMessageContent(message);
@@ -185,6 +207,14 @@ export function getAssistantConversationContent(message: Message) {
   }
 
   return contentParts.map((part) => part.content ?? "").join("");
+}
+
+/** Join activity + final content parts in order (shared by sync + tests). */
+export function resolveAssistantDurableContentFromParts(parts: MessagePart[]) {
+  return parts
+    .filter((part) => part.type === "activity_content" || part.type === "content")
+    .map((part) => part.content ?? "")
+    .join("");
 }
 
 export function appendMessagePart(
@@ -256,19 +286,11 @@ export function synchronizeMessageFromParts(message: Message) {
   message.parts = parts;
 
   if (message.role === "assistant") {
-    const content: string[] = [];
     const toolCalls: ToolCall[] = [];
     const toolResults: ToolResult[] = [];
 
     for (const part of parts) {
-      if (part.type === "content") {
-        if (part.content) {
-          content.push(part.content);
-        }
-        continue;
-      }
-
-      if (part.type === "activity_content") {
+      if (part.type === "activity_content" || part.type === "content") {
         continue;
       }
 
@@ -288,7 +310,8 @@ export function synchronizeMessageFromParts(message: Message) {
       }
     }
 
-    message.content = content.join("");
+    // Durable top-level content includes pre-tool activity (#49 / #50).
+    message.content = resolveAssistantDurableContentFromParts(parts);
     message.reasoning = "";
     message.toolCalls = toolCalls;
     message.toolResults = toolResults;
@@ -361,6 +384,7 @@ export function buildDisplayMessages(messages: Message[]): DisplayMessage[] {
     const linkedFileIds = Array.from(
       new Set(groupedMessages.flatMap((message) => message.linkedFileIds ?? [])),
     );
+    // Final bubble only (content parts). Activity stays in parts/activity panel.
     const content = groupedMessages
       .filter((message) => message.role === "assistant")
       .map((message) => getMessageContent(message))

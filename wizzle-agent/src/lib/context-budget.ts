@@ -7,10 +7,15 @@ import {
   type ProxyToolDefinition,
 } from "./chat-stream";
 import {
+  extractUserAndFinalMessages,
+  MAX_REINFLATED_COMPACTED_TURNS,
+} from "./agent/context-pressure";
+import {
   resolveCompactedContextTokens,
   resolveHealthyContextPercent,
   resolveOutputReservedPercent,
 } from "./env";
+import { countWithActiveTokenizer } from "./tokenizer-runtime";
 import type {
   CompactedContextRecord,
   Message,
@@ -20,11 +25,11 @@ import type {
   ReplayCapabilityMode,
 } from "../types/workspace";
 
-export const FALLBACK_CONTEXT_LIMIT = 128_000;
+// Unknown catalog metadata must use a conservative budget instead of claiming 128k.
+export const FALLBACK_CONTEXT_LIMIT = 16_384;
 export const TOTAL_CONTEXT_LIMIT = FALLBACK_CONTEXT_LIMIT;
 export const REPLAY_ESTIMATOR_VERSION = 4;
 
-const UNKNOWN_TOKENIZER_MULTIPLIER = 1.15;
 const MESSAGE_OVERHEAD_TOKENS = 6;
 const CONTENT_PART_OVERHEAD_TOKENS = 4;
 const TOOL_CALL_OVERHEAD_TOKENS = 24;
@@ -66,6 +71,8 @@ export type ReplaySelectionResult = {
   droppedTurnIds: string[];
   estimatedTokens: number;
   messages: Message[];
+  /** Compacted turns reinflated as user+final only (newest-fit residual budget). */
+  reinflatedTurnIds: string[];
 };
 
 export type TurnSummaryBuildResult = PersistedTurnSummaryRecord | null;
@@ -86,21 +93,21 @@ export class ReplayBudgetError extends Error {
   }
 }
 
+export function isReplayBudgetError(error: unknown): error is ReplayBudgetError {
+  return error instanceof ReplayBudgetError;
+}
+
 export function estimateTextTokens(
   text: string,
   options: {
     tokenizerKind?: string | null;
+    /** Cached local tokenizer.json path; uses active HF counter when loaded. */
+    tokenizerLocalPath?: string | null;
   } = {},
 ) {
-  if (!text) {
-    return 0;
-  }
-
-  const baseTokens = Math.ceil(text.length / 3.5);
-
-  return options.tokenizerKind?.trim()
-    ? baseTokens
-    : Math.ceil(baseTokens * UNKNOWN_TOKENIZER_MULTIPLIER);
+  // Prefer an activated HuggingFace tokenizer.json counter when the path matches.
+  // Loaded via activateTokenizer() when the selected model is ready.
+  return countWithActiveTokenizer(text, options);
 }
 
 function stableHash(value: string) {
@@ -223,6 +230,24 @@ function resolveReplayCapabilityMode(modelCapabilities: ModelCapability[]): Repl
 
 function isMessageCompleted(message: Message) {
   return message.status !== "streaming";
+}
+
+/**
+ * Historical turn eligible to leave live replay and enter the anchored summary.
+ * Terminal turns only: done, error, interrupted (and legacy missing status).
+ * Active / streaming turns must stay verbatim (#33 / #34).
+ */
+export function isCompactableReplayBlock(block: ReplayBlock, currentTurnId?: string) {
+  if (!block.turnId || block.isActiveTurn || !block.isCompleted) {
+    return false;
+  }
+
+  if (currentTurnId && block.turnId === currentTurnId) {
+    return false;
+  }
+
+  // Refuse mid-stream leftovers; allow done | error | interrupted | undefined.
+  return block.messages.every((message) => message.status !== "streaming");
 }
 
 function canReuseTurnSummary(block: ReplayBlock, summary: PersistedTurnSummaryRecord | null) {
@@ -418,6 +443,15 @@ function estimateCompactedSummaryTokens(
 
 export const MAX_REPLAY_INPUT = resolveMaxReplayInput(FALLBACK_CONTEXT_LIMIT);
 
+/**
+ * Live agent-turn budget only. Counts agent system prompt + tools + summary +
+ * history. Compaction request sizing lives separately (no agent system/tools).
+ *
+ * When over budget, frees space by dropping the oldest completed non-compacted
+ * turns first (oldest → newer). Newer completed turns and the active turn are
+ * preferred for verbatim keep. Callers must compact `droppedTurnIds` (possibly
+ * in multiple batches under the compaction input budget) before sending.
+ */
 export function selectReplayHistoryWithinBudget(options: {
   cachedEstimateByBlockId?: Map<string, ReplayBlockEstimate>;
   cacheKeyData?: PromptTokenCacheKeyData;
@@ -442,15 +476,13 @@ export function selectReplayHistoryWithinBudget(options: {
   const blocks = buildReplayBlocks(options.history, options.currentTurnId);
   const duplicateReadMessageIds = collectDuplicateReadReplayMessageIds(options.history);
   const compactedTurnIds = new Set(options.compactedContext?.compactedTurnIds ?? []);
-  const includedBlocks: ReplayBlock[] = [];
-  const droppedTurnIds: string[] = [];
   const budget = resolveReplayBudget({
     maxContext: options.maxContext,
     maxContextTokens: options.maxContextTokens,
     maxOutputTokens: options.maxOutputTokens,
   });
   const compactedSummaryTokens = estimateCompactedSummaryTokens(options.compactedContext, tokenizerKind);
-  let estimatedTokens =
+  const fixedLiveTokens =
     REQUEST_OVERHEAD_TOKENS +
     SYSTEM_MESSAGE_OVERHEAD_TOKENS +
     estimateTextTokens(options.systemPrompt, { tokenizerKind }) +
@@ -464,71 +496,176 @@ export function selectReplayHistoryWithinBudget(options: {
     );
   }
 
-  if (estimatedTokens >= budget.inputBudget) {
+  if (fixedLiveTokens >= budget.inputBudget) {
     throw new ReplayBudgetError(
       "system_tool_prompt_too_large",
       "The system prompt and tool definitions are too large for the selected model context. Choose a larger-context model.",
     );
   }
 
-  for (let index = blocks.length - 1; index >= 0; index -= 1) {
-    const block = blocks[index]!;
+  const estimateBlock = (block: ReplayBlock) =>
+    (!block.isActiveTurn && block.isCompleted
+      ? getCachedTurnSummaryEstimate({
+          block,
+          duplicateReadMessageIds,
+          modelCapabilities: options.modelCapabilities,
+          turnSummaryByTurnId,
+        })
+      : null) ??
+    estimateReplayBlock({
+      block,
+      cachedEstimateByBlockId: options.cachedEstimateByBlockId,
+      duplicateReadMessageIds,
+      modelCapabilities: options.modelCapabilities,
+      previewFileMap: options.previewFileMap,
+      tokenizerKind,
+    });
 
+  // Chronological candidates that can still appear verbatim in the live turn.
+  type Candidate = { block: ReplayBlock; tokens: number };
+  const requiredCandidates: Candidate[] = [];
+  const compactableCandidates: Candidate[] = [];
+
+  for (const block of blocks) {
     if (block.turnId && compactedTurnIds.has(block.turnId)) {
       continue;
     }
 
-    const blockEstimate =
-      (!block.isActiveTurn && block.isCompleted
-        ? getCachedTurnSummaryEstimate({
-            block,
-            duplicateReadMessageIds,
-            modelCapabilities: options.modelCapabilities,
-            turnSummaryByTurnId,
-          })
-        : null) ??
-      estimateReplayBlock({
-        block,
-        cachedEstimateByBlockId: options.cachedEstimateByBlockId,
-        duplicateReadMessageIds,
-        modelCapabilities: options.modelCapabilities,
-        previewFileMap: options.previewFileMap,
-        tokenizerKind,
-      });
+    const tokens = estimateBlock(block).tokens;
 
-    if (estimatedTokens + blockEstimate.tokens > budget.inputBudget) {
-      if (block.isActiveTurn || includedBlocks.length === 0) {
-        throw buildActiveBlockBudgetError(block);
-      }
-
-      droppedTurnIds.unshift(
-        ...blocks
-          .slice(0, index + 1)
-          .filter(
-            (entry) =>
-              entry.turnId &&
-              entry.isCompleted &&
-              !entry.isActiveTurn &&
-              !compactedTurnIds.has(entry.turnId),
-          )
-          .map((entry) => entry.turnId)
-          .filter((turnId): turnId is string => Boolean(turnId)),
-      );
-      break;
+    if (isCompactableReplayBlock(block, options.currentTurnId)) {
+      compactableCandidates.push({ block, tokens });
+    } else {
+      requiredCandidates.push({ block, tokens });
     }
-
-    estimatedTokens += blockEstimate.tokens;
-    includedBlocks.unshift(block);
   }
+
+  const requiredTokens = requiredCandidates.reduce((total, entry) => total + entry.tokens, 0);
+  if (fixedLiveTokens + requiredTokens > budget.inputBudget) {
+    const activeBlock =
+      requiredCandidates.find((entry) => entry.block.isActiveTurn)?.block ??
+      requiredCandidates[requiredCandidates.length - 1]?.block ??
+      blocks[blocks.length - 1];
+    throw buildActiveBlockBudgetError(activeBlock ?? {
+      blockId: "active",
+      isActiveTurn: true,
+      isCompleted: false,
+      messages: [],
+      turnId: options.currentTurnId ?? null,
+    });
+  }
+
+  // Prefer keeping newer completed turns. Drop oldest compactable first until live fits.
+  let compactableTokens = compactableCandidates.reduce((total, entry) => total + entry.tokens, 0);
+  const droppedTurnIds: string[] = [];
+  let dropCount = 0;
+
+  while (
+    fixedLiveTokens + requiredTokens + compactableTokens > budget.inputBudget &&
+    dropCount < compactableCandidates.length
+  ) {
+    const oldest = compactableCandidates[dropCount]!;
+    droppedTurnIds.push(oldest.block.turnId!);
+    compactableTokens -= oldest.tokens;
+    dropCount += 1;
+  }
+
+  const droppedTurnIdSet = new Set(droppedTurnIds);
+  const includedBlocks = blocks.filter((block) => {
+    if (block.turnId && compactedTurnIds.has(block.turnId)) {
+      return false;
+    }
+    if (block.turnId && droppedTurnIdSet.has(block.turnId)) {
+      return false;
+    }
+    return true;
+  });
+
+  let estimatedTokens =
+    fixedLiveTokens +
+    includedBlocks.reduce((total, block) => total + estimateBlock(block).tokens, 0);
+
+  // Residual budget: reinflate up to last N compacted turns as user + final only.
+  // Summary stays unchanged (intentional shallow overlap). See compacting-current-turn.md.
+  const reinflate = selectReinflatedCompactedTurns({
+    blocks,
+    compactedTurnIds,
+    estimateMessages: (messages) =>
+      estimateChatMessagesTokens(
+        buildChatMessages(messages, options.previewFileMap, options.modelCapabilities, {
+          duplicateReadMessageIds,
+        }),
+        tokenizerKind,
+      ),
+    residualTokens: budget.inputBudget - estimatedTokens,
+  });
+
+  estimatedTokens += reinflate.tokens;
 
   return {
     blocks,
     budget,
     compactedSummaryTokens,
-    droppedTurnIds: Array.from(new Set(droppedTurnIds)),
+    droppedTurnIds,
     estimatedTokens,
-    messages: includedBlocks.flatMap((block) => block.messages),
+    messages: [...reinflate.messages, ...includedBlocks.flatMap((block) => block.messages)],
+    reinflatedTurnIds: reinflate.turnIds,
   } satisfies ReplaySelectionResult;
+}
+
+/**
+ * Newest compacted turns first for fitting; emit chronological user+final pairs.
+ * Skip turns without a usable final; stop when the next candidate does not fit.
+ */
+export function selectReinflatedCompactedTurns(options: {
+  blocks: ReplayBlock[];
+  compactedTurnIds: ReadonlySet<string>;
+  estimateMessages: (messages: Message[]) => number;
+  maxTurns?: number;
+  residualTokens: number;
+}): { messages: Message[]; tokens: number; turnIds: string[] } {
+  const maxTurns = options.maxTurns ?? MAX_REINFLATED_COMPACTED_TURNS;
+  if (options.residualTokens <= 0 || maxTurns < 1 || options.compactedTurnIds.size === 0) {
+    return { messages: [], tokens: 0, turnIds: [] };
+  }
+
+  const compactedBlocks = options.blocks.filter(
+    (block) => block.turnId && options.compactedTurnIds.has(block.turnId),
+  );
+  // Newest first among last maxTurns candidates in history order.
+  const newestFirst = compactedBlocks.slice(-maxTurns).reverse();
+
+  const selectedPairs: Message[][] = [];
+  const selectedTurnIds: string[] = [];
+  let remaining = options.residualTokens;
+  let usedTokens = 0;
+
+  for (const block of newestFirst) {
+    const pair = extractUserAndFinalMessages(block.messages);
+    if (pair.length === 0) {
+      continue;
+    }
+
+    const tokens = options.estimateMessages(pair);
+    if (tokens > remaining) {
+      break;
+    }
+
+    selectedPairs.push(pair);
+    selectedTurnIds.push(block.turnId!);
+    remaining -= tokens;
+    usedTokens += tokens;
+  }
+
+  // Restore chronological order (oldest reinflated first).
+  selectedPairs.reverse();
+  selectedTurnIds.reverse();
+
+  return {
+    messages: selectedPairs.flat(),
+    tokens: usedTokens,
+    turnIds: selectedTurnIds,
+  };
 }
 
 function buildTurnSummaryEstimate(

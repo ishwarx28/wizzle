@@ -3,25 +3,41 @@ import { listen } from "@tauri-apps/api/event";
 
 import { frontendLogger } from "./logger";
 import { resolveMaxPromptSize } from "./env";
+import { resolveImageAttachmentHardFailError } from "./image-capability";
+import {
+  extractTitleFromCompletion,
+  sanitizeGeneratedSessionTitle,
+  type ChatCompletionJson,
+} from "./chat-completion-text";
+import { shouldManageSessionRuntimeForHelperCompletion } from "./session-runtime-helpers";
 import type { Message, ModelCapability, ModelId, PreviewFile } from "../types/workspace";
 import {
   createToolCallFromPart,
   getAssistantConversationContent,
   getMessageParts,
 } from "./message-parts";
+import titleSystemPrompt from "./prompts/title-system-prompt.txt?raw";
+import enhanceSystemPrompt from "./prompts/enhance-system-prompt.txt?raw";
+
+export {
+  extractMessageText,
+  extractTitleFromCompletion,
+  sanitizeGeneratedSessionTitle,
+} from "./chat-completion-text";
 
 type ReasoningLevel = string;
 export const INTERRUPTED_WORKSPACE_CHAT_ERROR = "__WIZZLE_PROVIDER_CHAT_INTERRUPTED__";
-const DEFAULT_REASONING_LEVELS = ["fast", "balanced", "max"] as const;
-const MAX_TITLE_INPUT_LENGTH = 1_000;
-const MAX_TITLE_OUTPUT_TOKENS = 256;
-const MAX_TITLE_RETRY_OUTPUT_TOKENS = 512;
+const DEFAULT_REASONING_LEVELS = ["low", "medium", "high", "max"] as const;
+const MAX_TITLE_INPUT_LENGTH = 1_200;
+// Reasoning models share max_tokens with hidden reasoning; leave headroom for a short content title.
+const MAX_TITLE_OUTPUT_TOKENS = 1_024;
+const MAX_TITLE_RETRY_OUTPUT_TOKENS = 2_048;
 const MAX_ENHANCEMENT_INPUT_LENGTH = 8_000;
 const MAX_ENHANCEMENT_OUTPUT_TOKENS = 4 * 1_024;
-const TITLE_SYSTEM_PROMPT =
-  "You are naming a chat, not replying to the user. Generate only a short chat title based on the first user message and attached file names. Do not answer the request. Do not explain. Do not add quotes, prefixes, markdown, bullets, or extra text. Return only the title, in 3 to 6 words.";
-const ENHANCEMENT_SYSTEM_PROMPT =
-  "You are rewriting a user's draft, not replying to it. Improve grammar, clarity, and specificity while preserving intent, constraints, technical meaning, and tone. Do not answer the request. Do not solve the task. Do not add markdown, bullets, greetings, explanations, or commentary. Return the rewritten draft wrapped in exactly one <enhanced_prompt>...</enhanced_prompt> block.";
+/** Loaded from `prompts/title-system-prompt.txt` (I-4). */
+const TITLE_SYSTEM_PROMPT = titleSystemPrompt.trim();
+/** Loaded from `prompts/enhance-system-prompt.txt` (I-4). */
+const ENHANCEMENT_SYSTEM_PROMPT = enhanceSystemPrompt.trim();
 
 export type OpenAIContentPart =
   | { type: "text"; text: string }
@@ -70,18 +86,13 @@ export type ProxyToolDefinition = {
   type: "function";
 };
 
-type ChatCompletionJson = {
-  choices?: Array<{
-    message?: {
-      content?: string | OpenAIContentPart[];
-    };
-  }>;
-};
-
-let activeStreamRequestId: string | null = null;
+/** Per-session stream request ids so interrupt targets the correct run (#17 / #27). */
+const activeStreamRequestIdBySession = new Map<string, string>();
+/** Last-started stream (prompt enhancement / title-less helpers without a session scope). */
+let activeGlobalStreamRequestId: string | null = null;
 
 function resolveFallbackReasoningLevel(modelId: ModelId): ReasoningLevel {
-  return modelId.includes("max") ? "max" : "balanced";
+  return modelId.includes("max") ? "max" : "medium";
 }
 
 function normalizeReasoningLevels(reasoningLevels?: string[]) {
@@ -126,22 +137,6 @@ function getErrorMessage(error: unknown, fallback: string) {
   }
 
   return fallback;
-}
-
-export function extractMessageText(payload: ChatCompletionJson) {
-  const content = payload.choices?.[0]?.message?.content;
-
-  if (typeof content === "string") {
-    return content;
-  }
-
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => ("text" in part && typeof part.text === "string" ? part.text : ""))
-      .join("");
-  }
-
-  return "";
 }
 
 function extractTaggedEnhancedPrompt(responseText: string) {
@@ -197,6 +192,21 @@ function truncateAtWordBoundary(text: string, maxLength: number) {
   return trimmedSlice.slice(0, lastWhitespaceIndex).trimEnd();
 }
 
+/** Keep start + end of long prompts so title input still sees the main topic (I-18). */
+export function summarizeTextForTitleInput(text: string, maxLength: number) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  const headBudget = Math.max(80, Math.floor(maxLength * 0.55));
+  const tailBudget = Math.max(60, maxLength - headBudget - 5);
+  const head = truncateAtWordBoundary(normalized, headBudget);
+  const tailSource = normalized.slice(Math.max(0, normalized.length - tailBudget * 2));
+  const tail = truncateAtWordBoundary(tailSource, tailBudget);
+  return `${head} … ${tail}`.trim();
+}
+
 export function resolvePromptEnhancementInputLimit() {
   return MAX_ENHANCEMENT_INPUT_LENGTH;
 }
@@ -234,7 +244,18 @@ function buildUserContentPartsForCapabilities(
   prompt: string,
   attachments: PreviewFile[],
   modelCapabilities: ModelCapability[],
+  options?: {
+    /** Fail instead of omitting images (new sends). History replay soft-skips. */
+    hardFailOnUnsupportedImages?: boolean;
+  },
 ): OpenAIContentPart[] {
+  const imageCapable = modelCapabilities.includes("image");
+  const imageFail = resolveImageAttachmentHardFailError(modelCapabilities, attachments);
+
+  if (imageFail && options?.hardFailOnUnsupportedImages) {
+    throw new Error(imageFail);
+  }
+
   const parts: OpenAIContentPart[] = [];
   const trimmedPrompt = prompt.trim();
   const attachmentBlock = buildTextAttachmentBlock(attachments);
@@ -245,11 +266,7 @@ function buildUserContentPartsForCapabilities(
   }
 
   for (const attachment of attachments) {
-    if (
-      attachment.kind !== "image" ||
-      !attachment.imageSrc ||
-      !modelCapabilities.includes("image")
-    ) {
+    if (attachment.kind !== "image" || !attachment.imageSrc || !imageCapable) {
       continue;
     }
 
@@ -771,7 +788,12 @@ export async function streamWorkspaceChat(options: {
   }
 
   const requestId = crypto.randomUUID();
-  activeStreamRequestId = requestId;
+  const sessionKey = options.chatId.trim();
+  if (sessionKey) {
+    activeStreamRequestIdBySession.set(sessionKey, requestId);
+  } else {
+    activeGlobalStreamRequestId = requestId;
+  }
   frontendLogger.info("frontend.chat-stream", "stream_started", {
     chatIdLength: options.chatId.length,
     historyCount: options.history.length,
@@ -857,8 +879,11 @@ export async function streamWorkspaceChat(options: {
     });
     throw new Error(getErrorMessage(error, "Wizzle could not complete the request."));
   } finally {
-    if (activeStreamRequestId === requestId) {
-      activeStreamRequestId = null;
+    if (sessionKey && activeStreamRequestIdBySession.get(sessionKey) === requestId) {
+      activeStreamRequestIdBySession.delete(sessionKey);
+    }
+    if (!sessionKey && activeGlobalStreamRequestId === requestId) {
+      activeGlobalStreamRequestId = null;
     }
 
     lastChunkKind = null;
@@ -868,26 +893,30 @@ export async function streamWorkspaceChat(options: {
 }
 
 export async function interruptWorkspaceChat(options: { sessionId?: string } = {}) {
-  if (!activeStreamRequestId) {
-    if (options.sessionId) {
-      await invoke("interrupt_session_run", {
-        input: {
-          sessionId: options.sessionId,
-        },
-      });
-    }
+  const sessionId = options.sessionId?.trim();
+  const requestId = sessionId
+    ? activeStreamRequestIdBySession.get(sessionId) ?? null
+    : activeGlobalStreamRequestId;
 
-    return;
+  if (requestId) {
+    frontendLogger.info("frontend.chat-stream", "interrupt_requested", {
+      requestIdLength: requestId.length,
+      sessionScoped: Boolean(sessionId),
+    });
+    await invoke("cancel_provider_chat", {
+      input: {
+        requestId,
+      },
+    });
   }
 
-  frontendLogger.info("frontend.chat-stream", "interrupt_requested", {
-    requestIdLength: activeStreamRequestId.length,
-  });
-  await invoke("cancel_provider_chat", {
-    input: {
-      requestId: activeStreamRequestId,
-    },
-  });
+  if (sessionId) {
+    await invoke("interrupt_session_run", {
+      input: {
+        sessionId,
+      },
+    });
+  }
 }
 
 export async function interruptWorkspacePromptEnhancement() {
@@ -911,15 +940,14 @@ export async function generateWorkspaceSessionTitle(options: {
   }
 
   const attachmentList = options.attachments.map((attachment) => attachment.name).join(", ");
-  const sourceText = truncateAtWordBoundary(
-    [
-      options.prompt.trim() ? `First user message:\n${options.prompt.trim()}` : "",
-      attachmentList ? `Attached files:\n${attachmentList}` : "",
-    ]
-      .filter(Boolean)
-      .join("\n\n"),
-    MAX_TITLE_INPUT_LENGTH,
-  );
+  // I-18: long prompts — keep head + tail so topic at either end is not lost.
+  const promptForTitle = summarizeTextForTitleInput(options.prompt.trim(), MAX_TITLE_INPUT_LENGTH);
+  const sourceText = [
+    promptForTitle ? `First user message:\n${promptForTitle}` : "",
+    attachmentList ? `Attached files:\n${attachmentList}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 
   frontendLogger.info("frontend.chat-stream", "title_generation_started", {
     attachmentCount: options.attachments.length,
@@ -934,6 +962,8 @@ export async function generateWorkspaceSessionTitle(options: {
       model: options.modelId,
       stream: false,
       max_tokens: maxTokens,
+      // Prefer short deterministic names when the provider honors temperature.
+      temperature: 0,
       messages: [
         {
           role: "system" as const,
@@ -942,12 +972,30 @@ export async function generateWorkspaceSessionTitle(options: {
         {
           role: "user" as const,
           content: [
-            "Generate a concise chat title in 3 to 6 words.",
+            "Return only ONE chat title.",
+            "Rules: exactly one line, 3–6 words, ≤50 characters.",
+            "No reasoning. No filler. No explanation. No quotes. No labels. No second line.",
+            "Output format: Title words here",
+            "",
             sourceText || "Generate a title for this chat.",
-          ].join("\n\n"),
+          ].join("\n"),
         },
       ],
     };
+  }
+
+  function parseTitleFromResponse(response: string) {
+    let payload: ChatCompletionJson;
+    try {
+      payload = JSON.parse(response) as ChatCompletionJson;
+    } catch {
+      // Some providers return bare text; never treat as a dump of reasoning prose.
+      const bare = sanitizeGeneratedSessionTitle(response);
+      return bare && bare.split(/\s+/).filter(Boolean).length <= 8 ? bare : "";
+    }
+
+    // Content only — never reasoning fields.
+    return extractTitleFromCompletion(payload);
   }
 
   async function requestTitle(maxTokens: number) {
@@ -956,6 +1004,8 @@ export async function generateWorkspaceSessionTitle(options: {
         modelUuid: options.modelId,
         projectId: options.projectId,
         chatId: options.chatId,
+        // Detached helper: must not flip session Busy/Idle during the agent run (#31/#32).
+        manageSessionRuntime: shouldManageSessionRuntimeForHelperCompletion(),
         reasoningLevel: resolveLowestReasoningLevel(options.reasoningLevels),
         body: buildTitleRequestBody(maxTokens),
       },
@@ -963,7 +1013,7 @@ export async function generateWorkspaceSessionTitle(options: {
 
     return {
       responseLength: response.length,
-      title: extractMessageText(JSON.parse(response) as ChatCompletionJson).trim(),
+      title: parseTitleFromResponse(response),
     };
   }
 
@@ -981,12 +1031,14 @@ export async function generateWorkspaceSessionTitle(options: {
     frontendLogger.info("frontend.chat-stream", "title_generation_finished", {
       responseLength: result.responseLength,
       titleLength: result.title.length,
+      titleEmpty: !result.title,
     });
     return result.title;
   } catch (error) {
     frontendLogger.error("frontend.chat-stream", "title_generation_failed", {
-      error,
+      error: getErrorMessage(error, "title generation failed"),
     });
+    // Surface empty string so caller keeps fallback title; do not throw past store.
     return "";
   }
 }

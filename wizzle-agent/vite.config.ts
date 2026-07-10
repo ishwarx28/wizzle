@@ -36,6 +36,7 @@ export default defineConfig(async ({ mode }) => ({
     __WIZZLE_ENV__: JSON.stringify(resolveClientEnv(mode)),
   },
   build: {
+    chunkSizeWarningLimit: 1250,
     sourcemap: false,
     target: "esnext",
   },

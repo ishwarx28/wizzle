@@ -4,11 +4,14 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  CircleAlert,
+  CircleX,
   Copy,
   Folder,
   FolderOpenDot,
   FolderPlus,
   Laptop,
+  LoaderCircle,
   Moon,
   MoreHorizontal,
   PanelLeftClose,
@@ -58,6 +61,11 @@ type MenuState = {
 export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
   const draftSessions = useWorkspaceStore((state) => state.draftSessions);
   const projects = useWorkspaceStore((state) => state.projects);
+  const pendingToolApprovalsBySessionId = useWorkspaceStore(
+    (state) => state.pendingToolApprovalsBySessionId,
+  );
+  const sendingSessionIds = useWorkspaceStore((state) => state.sendingSessionIds);
+  const sessionStreamErrors = useWorkspaceStore((state) => state.sessionStreamErrors);
   const hydrateWorkspace = useWorkspaceStore((state) => state.hydrateWorkspace);
   const selectedProjectId = useWorkspaceStore((state) => state.selectedProjectId);
   const selectedSessionId = useWorkspaceStore((state) => state.selectedSessionId);
@@ -503,6 +511,13 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
                           const isActive =
                             project.id === selectedProjectId && session.id === selectedSessionId;
                           const sessionMenuKey = `${project.id}:${session.id}`;
+                          const sessionTileState = sessionStreamErrors[session.id]
+                            ? "error"
+                            : pendingToolApprovalsBySessionId[session.id]
+                              ? "waiting_approval"
+                              : sendingSessionIds.includes(session.id)
+                                ? "running"
+                                : null;
 
                           return (
                             <div
@@ -540,20 +555,47 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
                                 </button>
                                 <div className="relative ml-auto mr-2 h-8 w-8 shrink-0">
                                   <span
+                                    aria-label={
+                                      sessionTileState === "error"
+                                        ? "Session failed"
+                                        : sessionTileState === "waiting_approval"
+                                          ? "Waiting for approval"
+                                          : sessionTileState === "running"
+                                            ? "Session running"
+                                            : undefined
+                                    }
                                     className={[
                                       "pointer-events-none absolute inset-0 flex items-center justify-center text-[13px] text-[var(--color-text-tertiary)] transition-opacity",
-                                      menuKey === sessionMenuKey || isActive
+                                      menuKey === sessionMenuKey || (isActive && !sessionTileState)
                                         ? "opacity-0"
                                         : "opacity-100 group-hover/session:opacity-0",
                                     ].join(" ")}
+                                    role={sessionTileState ? "status" : undefined}
+                                    title={
+                                      sessionTileState === "error"
+                                        ? "Session failed"
+                                        : sessionTileState === "waiting_approval"
+                                          ? "Waiting for approval"
+                                          : sessionTileState === "running"
+                                            ? "Session running"
+                                            : undefined
+                                    }
                                   >
-                                    {session.updatedAtLabel}
+                                    {sessionTileState === "error" ? (
+                                      <CircleX className="h-[13px] w-[13px] text-red-500" />
+                                    ) : sessionTileState === "waiting_approval" ? (
+                                      <CircleAlert className="h-[13px] w-[13px] text-red-500" />
+                                    ) : sessionTileState === "running" ? (
+                                      <LoaderCircle className="h-[13px] w-[13px] animate-spin" />
+                                    ) : (
+                                      session.updatedAtLabel
+                                    )}
                                   </span>
                                   <button
                                     aria-label="Session options"
                                     className={[
                                       "absolute inset-0 flex items-center justify-center rounded-lg text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]",
-                                      menuKey === sessionMenuKey || isActive
+                                      menuKey === sessionMenuKey || (isActive && !sessionTileState)
                                         ? "opacity-100"
                                         : "opacity-0 group-hover/session:opacity-100",
                                     ].join(" ")}
@@ -872,10 +914,12 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
 
       {dialog?.type === "remove-project" ? (
         <AppDialog
+          busy={isRemovingProject}
           actions={
             <>
               <button
                 className="h-10 rounded-full px-4 text-[14px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                disabled={isRemovingProject}
                 onClick={closeDialog}
               >
                 Cancel

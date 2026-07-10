@@ -3,7 +3,10 @@ import { Marked } from "marked";
 import markedKatex from "marked-katex-extension";
 import markedShiki from "marked-shiki";
 import remend from "remend";
-import { bundledLanguages, createHighlighter } from "shiki";
+import githubDarkDefault from "@shikijs/themes/github-dark-default";
+import githubLightDefault from "@shikijs/themes/github-light-default";
+import { createHighlighterCore } from "shiki/core";
+import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
 
 import type { EffectiveTheme } from "../utils/theme";
 
@@ -12,13 +15,45 @@ const SHIKI_THEME_BY_MODE: Record<EffectiveTheme, string> = {
   light: "github-light-default",
 };
 
-const SHIKI_LANGUAGE_SET = new Set<string>(Object.keys(bundledLanguages));
+const SHIKI_LANGUAGE_LOADERS = {
+  bash: () => import("@shikijs/langs/bash").then((module) => module.default),
+  c: () => import("@shikijs/langs/c").then((module) => module.default),
+  cpp: () => import("@shikijs/langs/cpp").then((module) => module.default),
+  csharp: () => import("@shikijs/langs/csharp").then((module) => module.default),
+  css: () => import("@shikijs/langs/css").then((module) => module.default),
+  diff: () => import("@shikijs/langs/diff").then((module) => module.default),
+  dockerfile: () => import("@shikijs/langs/dockerfile").then((module) => module.default),
+  go: () => import("@shikijs/langs/go").then((module) => module.default),
+  html: () => import("@shikijs/langs/html").then((module) => module.default),
+  java: () => import("@shikijs/langs/java").then((module) => module.default),
+  javascript: () => import("@shikijs/langs/javascript").then((module) => module.default),
+  json: () => import("@shikijs/langs/json").then((module) => module.default),
+  jsx: () => import("@shikijs/langs/jsx").then((module) => module.default),
+  kotlin: () => import("@shikijs/langs/kotlin").then((module) => module.default),
+  markdown: () => import("@shikijs/langs/markdown").then((module) => module.default),
+  "objective-c": () => import("@shikijs/langs/objective-c").then((module) => module.default),
+  "objective-cpp": () => import("@shikijs/langs/objective-cpp").then((module) => module.default),
+  powershell: () => import("@shikijs/langs/powershell").then((module) => module.default),
+  python: () => import("@shikijs/langs/python").then((module) => module.default),
+  ruby: () => import("@shikijs/langs/ruby").then((module) => module.default),
+  rust: () => import("@shikijs/langs/rust").then((module) => module.default),
+  sql: () => import("@shikijs/langs/sql").then((module) => module.default),
+  svelte: () => import("@shikijs/langs/svelte").then((module) => module.default),
+  swift: () => import("@shikijs/langs/swift").then((module) => module.default),
+  toml: () => import("@shikijs/langs/toml").then((module) => module.default),
+  tsx: () => import("@shikijs/langs/tsx").then((module) => module.default),
+  typescript: () => import("@shikijs/langs/typescript").then((module) => module.default),
+  vue: () => import("@shikijs/langs/vue").then((module) => module.default),
+  yaml: () => import("@shikijs/langs/yaml").then((module) => module.default),
+} as const;
 const markedCache = new Map<string, Marked>();
+const languageLoadPromises = new Map<string, Promise<void>>();
 const unsupportedLanguageSet = new Set<string>();
 
-const highlighterPromise = createHighlighter({
+const highlighterPromise = createHighlighterCore({
+  engine: createJavaScriptRegexEngine(),
   langs: [],
-  themes: Object.values(SHIKI_THEME_BY_MODE),
+  themes: [githubDarkDefault, githubLightDefault],
 });
 
 function escapeHtml(value: string) {
@@ -101,22 +136,28 @@ async function canHighlightLanguage(language: string) {
   }
 
   const highlighter = await highlighterPromise;
-  const resolvedLanguage = highlighter.resolveLangAlias(language);
   const loadedLanguages = highlighter.getLoadedLanguages();
-
-  if (loadedLanguages.includes(language) || loadedLanguages.includes(resolvedLanguage)) {
+  if (loadedLanguages.includes(language)) {
     return true;
   }
 
-  if (!SHIKI_LANGUAGE_SET.has(language) && !SHIKI_LANGUAGE_SET.has(resolvedLanguage)) {
+  const loader = SHIKI_LANGUAGE_LOADERS[language as keyof typeof SHIKI_LANGUAGE_LOADERS];
+  if (!loader) {
     unsupportedLanguageSet.add(language);
     return false;
   }
 
+  let loadPromise = languageLoadPromises.get(language);
+  if (!loadPromise) {
+    loadPromise = highlighter.loadLanguage(loader).then(() => undefined);
+    languageLoadPromises.set(language, loadPromise);
+  }
+
   try {
-    await highlighter.loadLanguage(resolvedLanguage as never);
+    await loadPromise;
     return true;
   } catch {
+    languageLoadPromises.delete(language);
     unsupportedLanguageSet.add(language);
     return false;
   }

@@ -6,12 +6,14 @@ use sha2::{Digest, Sha256};
 pub const MAX_COMMAND_OUTPUT_BYTES: usize = 120_000;
 pub const MAX_TOOL_FILE_CONTENT_BYTES: usize = 60_000;
 pub const MAX_READ_BYTES: usize = 200_000;
+pub const MAX_READ_SOURCE_BYTES: usize = 20 * 1024 * 1024;
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Default, Deserialize)]
 pub enum ToolTimeout {
     #[serde(rename = "15s")]
     Seconds15,
     #[serde(rename = "30s")]
+    #[default]
     Seconds30,
     #[serde(rename = "60s")]
     Seconds60,
@@ -19,12 +21,6 @@ pub enum ToolTimeout {
     Seconds120,
     #[serde(rename = "180s")]
     Seconds180,
-}
-
-impl Default for ToolTimeout {
-    fn default() -> Self {
-        Self::Seconds30
-    }
 }
 
 impl ToolTimeout {
@@ -68,21 +64,37 @@ pub fn content_hash(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-pub async fn run_blocking_with_timeout<T, F>(
-    timeout: ToolTimeout,
-    tool_name: &'static str,
-    operation: F,
-) -> Result<T, String>
+pub async fn run_blocking<T, F>(tool_name: &'static str, operation: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
 {
-    let operation = tokio::task::spawn_blocking(operation);
-    let join_result = tokio::time::timeout(timeout.duration(), operation)
+    let task_result = tokio::task::spawn_blocking(operation)
         .await
-        .map_err(|_| format!("The {tool_name} tool timed out after {}.", timeout.label()))?;
-    let task_result = join_result
         .map_err(|error| format!("The {tool_name} tool task failed unexpectedly. {error}"))?;
 
     task_result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use super::run_blocking;
+
+    #[tokio::test]
+    async fn blocking_operation_finishes_before_result_is_returned() {
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let operation_finished = finished.clone();
+        let result = run_blocking("test", move || {
+            std::thread::sleep(Duration::from_millis(10));
+            operation_finished.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok("finished")
+        })
+        .await
+        .expect("operation result");
+
+        assert_eq!(result, "finished");
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+    }
 }

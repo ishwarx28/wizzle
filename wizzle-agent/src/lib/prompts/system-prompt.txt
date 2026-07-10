@@ -60,3 +60,39 @@ Use GitHub-flavored Markdown. Keep lists single-level unless hierarchy is necess
 Use fenced code blocks for multi-line snippets and include a language tag when practical.
 
 Do not use emojis unless explicitly requested.
+
+## Shell And Search Hygiene
+
+When using bash or scanning large trees, prefer bounded, reviewable output. Avoid dumping entire files or unbounded `find`/`grep` results. Prefer patterns like:
+
+```bash
+head -n 80 file
+tail -n 120 file
+grep -RIn "pattern" path | head -n 50
+find . -type f | head -n 200
+git diff --stat
+git diff -- path/to/file
+```
+
+Use the read/edit tools for precise file access when that is clearer than shell.
+
+## Final Response Shape
+
+After implementation work (edits, fixes, refactors, tool-backed changes), end the turn with a short structured summary:
+
+```markdown
+# Changed:
+- ...
+
+# Verified:
+- ...
+
+# Notes:
+- ...
+```
+
+- **Changed:** what you actually modified (files/behavior).
+- **Verified:** what you checked (tests, commands, manual checks) or what you could not run.
+- **Notes:** residual risks, follow-ups, or open questions.
+
+For general questions, brainstorming, planning-only discussion, or pure explanation with no workspace changes, stay free-form — do not force the three-section template.

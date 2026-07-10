@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     path::Path,
+    process::Stdio,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -59,6 +60,13 @@ pub struct SessionRuntimeStatePayload {
 #[serde(rename_all = "camelCase")]
 pub struct SessionRuntimeInput {
     pub session_id: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetSessionRuntimeStateInput {
+    pub session_id: String,
+    pub state: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -137,6 +145,14 @@ impl RunCoordinator {
             slot.wake_requested = false;
         }
     }
+
+    fn is_running(&self, key: &str) -> bool {
+        self.slots
+            .lock()
+            .ok()
+            .and_then(|slots| slots.get(key).map(|slot| slot.running))
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Clone)]
@@ -190,27 +206,63 @@ fn lock_for_key(
         .clone())
 }
 
-async fn terminate_pid(pid: u32) -> Result<(), String> {
+/// Stop a background shell and its children (e.g. `sh -c "python -m http.server"`).
+/// Unix: kill process group first, then children by parent, then the pid itself.
+pub(crate) async fn terminate_pid(pid: u32) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let _ = tokio::process::Command::new("taskkill")
+        let status = tokio::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .status()
             .await
             .map_err(|error| format!("Could not stop process {pid}: {error}"))?;
+        if !status.success() {
+            return Err(format!("Could not stop process {pid} (taskkill failed)."));
+        }
         return Ok(());
     }
 
     #[cfg(not(target_os = "windows"))]
     {
+        // Negative PID = process group (requires spawn with process_group(0)).
+        let _ = tokio::process::Command::new("kill")
+            .args(["-TERM", &format!("-{pid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
         let _ = tokio::process::Command::new("kill")
             .args(["-TERM", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
-            .await
-            .map_err(|error| format!("Could not stop process {pid}: {error}"))?;
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            .await;
+        // Children of the shell that left the group (common for pipelines).
+        let _ = tokio::process::Command::new("pkill")
+            .args(["-TERM", "-P", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let _ = tokio::process::Command::new("kill")
+            .args(["-KILL", &format!("-{pid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+        let _ = tokio::process::Command::new("pkill")
+            .args(["-KILL", "-P", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
         let _ = tokio::process::Command::new("kill")
             .args(["-KILL", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .await;
         Ok(())
@@ -267,6 +319,36 @@ impl AgentRuntimeState {
 
     pub fn wake_session_run(&self, session_id: &str) {
         self.inner.coordinator.wake(session_id);
+    }
+
+    /// True while `begin_session_run` is outstanding (agent turn still active).
+    pub fn is_session_run_active(&self, session_id: &str) -> bool {
+        self.inner.coordinator.is_running(session_id)
+    }
+
+    /// Release provider-owned Busy → Idle only when no agent run still owns the session.
+    /// Prevents title/compaction/stream step completion from clearing Busy mid-turn (#31/#61).
+    pub fn release_provider_session_runtime(
+        &self,
+        window: &Window,
+        session_id: &str,
+        interrupted: bool,
+    ) -> Result<(), String> {
+        if self.is_session_run_active(session_id) {
+            // Agent run still owns runtime (busy / compacting / waiting_approval).
+            return Ok(());
+        }
+
+        if interrupted {
+            return self.set_state(
+                window,
+                session_id,
+                SessionRuntimeStateKind::Interrupted,
+                None,
+            );
+        }
+
+        self.set_state(window, session_id, SessionRuntimeStateKind::Idle, None)
     }
 
     pub fn set_state(
@@ -492,12 +574,20 @@ impl AgentRuntimeState {
             .get(process_id)
             .cloned();
 
-        if let Some(handle) = handle {
+        let pid = if let Some(handle) = handle {
             if handle.session_id != session_id {
                 return Err("That process belongs to a different session.".to_string());
             }
+            Some(handle.pid)
+        } else {
+            // App restart / map miss: still kill using the SQL-tracked pid when present.
+            sqlite_repository::read_process(session_id, process_id)
+                .ok()
+                .and_then(|process| process.pid.map(|value| value as u32))
+        };
 
-            terminate_pid(handle.pid).await?;
+        if let Some(pid) = pid {
+            terminate_pid(pid).await?;
             self.unregister_background_process(process_id);
         }
 
@@ -550,6 +640,11 @@ impl AgentRuntimeState {
         if let Some(pid) = foreground_pid {
             terminate_pid(pid).await?;
         }
+
+        // Background bash (dev servers, watchers) must stop on interrupt too (#36).
+        let _ = self
+            .stop_background_processes_for_session(window, session_id)
+            .await;
 
         self.set_state(
             window,
@@ -641,6 +736,31 @@ pub fn get_session_runtime_state(
     input: SessionRuntimeInput,
     runtime: tauri::State<'_, AgentRuntimeState>,
 ) -> Result<SessionRuntimeStatePayload, String> {
+    runtime.get_state(&input.session_id)
+}
+
+#[tauri::command]
+pub fn set_session_runtime_state(
+    window: Window,
+    input: SetSessionRuntimeStateInput,
+    runtime: tauri::State<'_, AgentRuntimeState>,
+) -> Result<SessionRuntimeStatePayload, String> {
+    let state = match input.state.as_str() {
+        "idle" => SessionRuntimeStateKind::Idle,
+        "busy" => SessionRuntimeStateKind::Busy,
+        "compacting" => SessionRuntimeStateKind::Compacting,
+        "waiting_approval" => SessionRuntimeStateKind::WaitingApproval,
+        "interrupted" => SessionRuntimeStateKind::Interrupted,
+        "error" => SessionRuntimeStateKind::Error,
+        _ => {
+            return Err(format!(
+                "Unsupported session runtime state: {}",
+                input.state
+            ))
+        }
+    };
+
+    runtime.set_state(&window, &input.session_id, state, None)?;
     runtime.get_state(&input.session_id)
 }
 
@@ -775,4 +895,5 @@ mod tests {
         assert!(!coordinator.finish("session-2"));
         assert!(coordinator.finish("session-1"));
     }
+
 }

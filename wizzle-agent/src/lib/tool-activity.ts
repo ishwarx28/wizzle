@@ -2,6 +2,7 @@ import type { MessagePart, ToolCall, ToolResult } from "../types/workspace";
 
 export type ParsedToolPayload = {
   afterContent?: string;
+  background?: boolean;
   beforeContent?: string;
   bytesWritten?: number;
   combinedOutput?: string;
@@ -17,6 +18,10 @@ export type ParsedToolPayload = {
   mimeType?: string;
   ok?: boolean;
   path?: string;
+  process?: {
+    id?: string;
+    status?: string;
+  } | null;
   replacements?: number;
   startLine?: number;
   status?: string;
@@ -74,6 +79,10 @@ export function parseToolPayload(value?: string) {
   }
 }
 
+function isLiveToolStatus(status?: string | null) {
+  return status === "pending" || status === "running" || status === "streaming";
+}
+
 function resolveWriteLabel(resultPayload: ParsedToolPayload | null) {
   return resultPayload?.created === false ? "Edited" : "Created";
 }
@@ -83,15 +92,34 @@ function buildRunDetailLabel(
   resultPayload: ParsedToolPayload | null,
   resourceLabel?: string,
 ) {
+  const live = isLiveToolStatus(toolCall.status) && !resultPayload;
+
   switch (toolCall.name) {
     case "read":
+      if (live) {
+        return resourceLabel ? `Reading ${resourceLabel}` : "Reading a file";
+      }
       return `Read ${resourceLabel ?? "resource"}`;
     case "write":
+      // I-17: mid-run label before path/result is known.
+      if (live) {
+        return "Creating a file";
+      }
       return `${resolveWriteLabel(resultPayload)} ${resourceLabel ?? "resource"}`;
     case "edit":
+      if (live) {
+        return "Editing a file";
+      }
       return `Edited ${resourceLabel ?? "resource"}`;
-    case "bash":
+    case "bash": {
+      if (resultPayload?.background === true || resultPayload?.process?.id) {
+        return "Started a background process";
+      }
+      if (live) {
+        return "Running a command";
+      }
       return "Ran a command";
+    }
     default:
       return toolCall.name;
   }

@@ -4,14 +4,22 @@ import { ChevronDown, ChevronRight, Copy, FileCode2, FileImage, FileText, Pencil
 import { MarkdownRenderer } from "../common/MarkdownRenderer";
 import { ToolActivityGroup } from "./ToolActivityGroup";
 import { useAutoDisclosure } from "../../hooks/use-auto-disclosure";
+import {
+  hasVisibleActivityBody,
+  resolveActiveToolGroupSegmentId,
+  shouldOpenWorkingSection,
+  shouldShowWorkingPlaceholder,
+} from "../../lib/activity-disclosure";
 import { buildActivitySegments } from "../../lib/tool-activity";
-import type { AssistantPhase, DisplayMessage, Message, MessagePart, PreviewFile } from "../../types/workspace";
+import type { DisplayMessage, MessagePart, PreviewFile } from "../../types/workspace";
 import { copyText } from "../../utils/clipboard";
 import { formatExactMessageTimestamp } from "../../utils/time";
 
 interface MessageBubbleProps {
   canEditUserMessage: boolean;
   fileMap: Map<string, PreviewFile>;
+  /** Stream/step failure for this turn (#19 C); cleared when user sends again. */
+  inlineStreamError?: string | null;
   isEditingUserMessage: boolean;
   isLatest: boolean;
   message: DisplayMessage;
@@ -50,22 +58,6 @@ function formatElapsedDuration(durationMs: number) {
   }
 
   return `${Math.round(totalMinutes / 60)}h`;
-}
-
-function resolveAssistantPhase(message: Message): AssistantPhase | null {
-  if (message.role !== "assistant") {
-    return null;
-  }
-
-  if (message.assistantPhase) {
-    return message.assistantPhase;
-  }
-
-  if ((message.toolCalls?.length ?? 0) > 0) {
-    return "working";
-  }
-
-  return message.status === "streaming" ? "pending" : "final";
 }
 
 function ReasoningStepItem({
@@ -162,6 +154,7 @@ function ActivityContentItem({
 export function MessageBubble({
   canEditUserMessage,
   fileMap,
+  inlineStreamError = null,
   isEditingUserMessage,
   isLatest,
   message,
@@ -174,22 +167,12 @@ export function MessageBubble({
     () => new Set<string>(),
   );
   const renderedContent = message.content;
-  const latestAssistantMessage = useMemo(
-    () =>
-      [...message.messages]
-        .reverse()
-        .find((entry) => entry.role === "assistant"),
-    [message.messages],
-  );
   const [elapsedMs, setElapsedMs] = useState(() =>
     message.startedAtMs ? Math.max(0, Date.now() - message.startedAtMs) : 0,
   );
   const parts = useMemo(() => message.parts, [message.parts]);
   const activityParts = useMemo(() => parts.filter((part) => part.type !== "content"), [parts]);
   const activitySegments = useMemo(() => buildActivitySegments(activityParts), [activityParts]);
-  const latestAssistantPhase = latestAssistantMessage
-    ? resolveAssistantPhase(latestAssistantMessage)
-    : null;
   const linkedFiles = useMemo(() => {
     const uniqueFiles = new Map<string, PreviewFile>();
 
@@ -244,16 +227,31 @@ export function MessageBubble({
     message.status === "streaming"
       ? `Working for ${formatElapsedDuration(workingDurationMs)}`
       : `Worked for ${formatElapsedDuration(workingDurationMs)}`;
-  const hasActivitySection = !isUser && (activityParts.length > 0 || message.status === "streaming");
-  const hasManualToolExpansion = manualToolExpansionSegmentIds.size > 0;
-  const activityDisclosure = useAutoDisclosure(
-    hasActivitySection && (latestAssistantPhase !== "final" || hasManualToolExpansion),
+  const isStreaming = message.status === "streaming";
+  const visibleActivityBody = useMemo(
+    () => hasVisibleActivityBody(activitySegments),
+    [activitySegments],
   );
-  const isStreamingAssistant =
-    !isUser &&
-    message.status === "streaming" &&
-    !renderedContent.trim() &&
-    activityParts.length === 0;
+  const hasManualToolExpansion = manualToolExpansionSegmentIds.size > 0;
+  // I-2: temporary placeholder until tools or final answer appear (reasoning stays hidden).
+  const showWorkingPlaceholder = shouldShowWorkingPlaceholder({
+    hasFinalContent: Boolean(renderedContent.trim()),
+    hasToolOrVisibleActivity: visibleActivityBody,
+    isAssistant: !isUser,
+    status: message.status,
+  });
+  const hasActivitySection = !isUser && !showWorkingPlaceholder && visibleActivityBody;
+  const activityDisclosure = useAutoDisclosure(
+    shouldOpenWorkingSection({
+      hasManualToolExpansion,
+      hasVisibleActivityBody: hasActivitySection,
+      isStreaming,
+    }),
+  );
+  const activeToolGroupSegmentId = useMemo(
+    () => (isStreaming ? resolveActiveToolGroupSegmentId(activitySegments) : null),
+    [activitySegments, isStreaming],
+  );
   const shouldShowLinkedFiles =
     linkedFiles.length > 0 && (isUser || message.status !== "streaming");
   const shouldShowFooter = message.status !== "streaming";
@@ -278,7 +276,7 @@ export function MessageBubble({
         >
           {isUser ? (
             <p className="whitespace-pre-wrap">{message.content}</p>
-          ) : isStreamingAssistant ? (
+          ) : showWorkingPlaceholder ? (
             <div className="flex items-center gap-2 py-1 text-[14px] text-[var(--color-text-secondary)]">
               <span>Working...</span>
               <div className="flex items-center gap-1.5">
@@ -318,6 +316,10 @@ export function MessageBubble({
                           if (segment.type === "tool_group") {
                             return (
                               <ToolActivityGroup
+                                isActiveGroup={
+                                  isStreaming && segment.id === activeToolGroupSegmentId
+                                }
+                                isStreamingTurn={isStreaming}
                                 key={segment.id}
                                 onManualExpandChange={(hasManualExpansion) => {
                                   setManualToolExpansionSegmentIds((current) => {
@@ -333,7 +335,6 @@ export function MessageBubble({
                                   });
                                 }}
                                 runs={segment.runs}
-                                turnStatus={message.status}
                               />
                             );
                           }
@@ -454,6 +455,18 @@ export function MessageBubble({
               </span>
             ) : null}
             <span>{timestampLabel}</span>
+          </div>
+        ) : null}
+
+        {inlineStreamError ? (
+          <div
+            className={[
+              "mt-2 rounded-xl border border-[color-mix(in_srgb,var(--color-danger)_35%,var(--color-border))] bg-[color-mix(in_srgb,var(--color-danger)_8%,var(--color-panel))] px-3 py-2 text-[13px] leading-5 text-[var(--color-danger)]",
+              isUser ? "text-right" : "",
+            ].join(" ")}
+            role="alert"
+          >
+            {inlineStreamError}
           </div>
         ) : null}
       </div>

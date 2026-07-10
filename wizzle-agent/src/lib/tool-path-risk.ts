@@ -613,10 +613,6 @@ export function createExternalPathWarning(input: {
     };
   }
 
-  if (input.permissionMode !== "manual-approve") {
-    return undefined;
-  }
-
   const hasExternalPath =
     input.toolName === "bash"
       ? collectBashPathCandidates(input.command ?? "").some((candidate) =>

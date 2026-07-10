@@ -27,6 +27,10 @@ export interface ProviderInfo {
   modelCount: number;
   name: string;
   providerType: string;
+  /** Configured path or URL for provider-level tokenizer.json */
+  tokenizerJson?: string | null;
+  /** Cached local path under ~/.wizzle/tokenizers when ready */
+  tokenizerLocalPath?: string | null;
   updatedAtMs: number;
 }
 
@@ -36,19 +40,26 @@ export interface ProviderModelInfo {
   id: ModelId;
   isPinned: boolean;
   lastUsedAtMs?: number | null;
-  maxContext: number;
+  /** Null when a remote catalog did not publish a trustworthy context limit. */
+  maxContext: number | null;
   maxOutputTokens?: number | null;
   modelId: string;
   providerId: string;
   providerName: string;
   providerType: string;
   reasoningLevels: string[];
+  /** Configured path or URL for model-level tokenizer.json (overrides provider) */
+  tokenizerJson?: string | null;
   tokenizerKind?: string | null;
+  /** Cached local path when model tokenizer is ready */
+  tokenizerLocalPath?: string | null;
 }
 
 export interface ToolApprovalRequest {
   command?: string;
   path?: string;
+  /** Session that owns this pending approval (survives UI session switches). */
+  sessionId: string;
   summary: string;
   timeout: string;
   toolCallId: string;
@@ -112,6 +123,10 @@ export interface WorkspaceProcess {
   status: "pending" | "running" | "done" | "error" | "interrupted" | string;
   stderrTail: string;
   stdoutTail: string;
+  /** Tool call that spawned this process (#75). */
+  toolCallId?: string | null;
+  /** Conversation turn that spawned this process (#75). */
+  turnId?: string | null;
 }
 
 export type MessagePartType =

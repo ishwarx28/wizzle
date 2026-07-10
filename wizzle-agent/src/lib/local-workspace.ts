@@ -3,6 +3,11 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 import { resolveToolDefinitionsMetadata } from "./agent/tool-definitions";
 import { frontendLogger } from "./logger";
+import {
+  sanitizeMessageContentForStorage,
+  sanitizeMessagePartForStorage,
+  sanitizeToolResultContentForStorage,
+} from "./tool-result-storage";
 import type {
   Message,
   MessagePart,
@@ -29,6 +34,18 @@ export async function getSessionRuntimeState(sessionId: string) {
   return invoke<SessionRuntimeState>("get_session_runtime_state", {
     input: {
       sessionId,
+    },
+  });
+}
+
+export async function setSessionRuntimeState(
+  sessionId: string,
+  state: SessionRuntimeState["state"],
+) {
+  return invoke<SessionRuntimeState>("set_session_runtime_state", {
+    input: {
+      sessionId,
+      state,
     },
   });
 }
@@ -115,11 +132,13 @@ export async function upsertProvider(input: {
     maxOutputTokens?: number;
     modelId: string;
     reasoningLevels?: string[];
+    tokenizerJson?: string;
     tokenizerKind?: string;
   }>;
   name: string;
   onlySpecifiedModels?: boolean;
   providerType: string;
+  tokenizerJson?: string;
 }) {
   return invoke<string>("upsert_provider", { input });
 }
@@ -132,10 +151,18 @@ export async function deleteProvider(providerId: string) {
   });
 }
 
-export async function refreshProviderModels(providerId: string) {
+export async function refreshProviderModels(
+  providerId: string,
+  options?: {
+    fetchAll?: boolean;
+    removeInvalid?: boolean;
+  },
+) {
   return invoke<ProviderModelInfo[]>("refresh_provider_models", {
     input: {
+      fetchAll: options?.fetchAll ?? false,
       providerId,
+      removeInvalid: options?.removeInvalid ?? false,
     },
   });
 }
@@ -250,51 +277,82 @@ export async function deleteWorkspaceSession(projectId: string, sessionId: strin
   });
 }
 
-function buildPersistedMessageParts(parts: MessagePart[] | undefined) {
+function buildPersistedMessageParts(parts: MessagePart[] | undefined, toolName?: string | null) {
   return (parts ?? [])
     .filter((part) => part.type !== "reasoning")
-    .map((part) => ({
-      content: part.content ?? null,
-      createdAtMs: part.createdAtMs ?? null,
-      durationMs: part.durationMs ?? null,
-      error: part.error ?? null,
-      id: part.id,
-      input: part.input ?? null,
-      metadata: part.metadata ?? null,
-      name: part.name ?? null,
-      output: part.output ?? null,
-      parentPartId: part.parentPartId ?? null,
-      pruned: part.pruned ?? false,
-      status: part.status ?? null,
-      tokens: part.tokens ?? null,
-      toolArguments: part.toolArguments ?? part.input ?? null,
-      toolCallId: part.toolCallId ?? null,
-      type: part.type,
-    }));
+    .map((part) => {
+      const sanitized =
+        part.type === "tool_result"
+          ? sanitizeMessagePartForStorage({
+              content: part.content,
+              name: part.name ?? toolName,
+              output: part.output,
+              type: part.type,
+            })
+          : part;
+
+      return {
+        content: sanitized.content ?? null,
+        createdAtMs: part.createdAtMs ?? null,
+        durationMs: part.durationMs ?? null,
+        error: part.error ?? null,
+        id: part.id,
+        input: part.input ?? null,
+        metadata: part.metadata ?? null,
+        name: part.name ?? null,
+        output: sanitized.output ?? null,
+        parentPartId: part.parentPartId ?? null,
+        pruned: part.pruned ?? false,
+        status: part.status ?? null,
+        tokens: part.tokens ?? null,
+        toolArguments: part.toolArguments ?? part.input ?? null,
+        toolCallId: part.toolCallId ?? null,
+        type: part.type,
+      };
+    });
 }
 
 function buildPersistedMessages(messages: Message[]) {
-  return messages.map((message) => ({
-    assistantPhase: message.assistantPhase ?? null,
-    completedAtMs: message.completedAtMs ?? null,
-    content: message.content,
-    createdAtMs: message.createdAtMs ?? Date.now(),
-    durationMs: message.durationMs ?? null,
-    editedAtMs: message.editedAtMs ?? null,
-    id: message.id,
-    linkedFileIds: message.linkedFileIds ?? [],
-    reasoning: null,
-    reasoningDurationMs: null,
-    role: message.role,
-    startedAtMs: message.startedAtMs ?? null,
-    status: message.status ?? "done",
-    toolCallId: message.toolCallId ?? null,
-    toolName: message.toolName ?? null,
-    turnId: message.turnId ?? null,
-    parts: buildPersistedMessageParts(message.parts),
-    toolCalls: message.toolCalls ?? [],
-    toolResults: message.toolResults ?? [],
-  }));
+  return messages.map((message) => {
+    const toolName = message.toolName ?? null;
+    const content =
+      message.role === "tool"
+        ? sanitizeMessageContentForStorage(message.content, {
+            role: message.role,
+            toolName,
+          })
+        : message.content;
+
+    const toolResults = (message.toolResults ?? []).map((result) => ({
+      ...result,
+      output:
+        result.output != null
+          ? sanitizeToolResultContentForStorage(result.output, { toolName })
+          : result.output,
+    }));
+
+    return {
+      assistantPhase: message.assistantPhase ?? null,
+      completedAtMs: message.completedAtMs ?? null,
+      content,
+      createdAtMs: message.createdAtMs ?? Date.now(),
+      durationMs: message.durationMs ?? null,
+      editedAtMs: message.editedAtMs ?? null,
+      id: message.id,
+      linkedFileIds: message.linkedFileIds ?? [],
+      reasoning: null,
+      reasoningDurationMs: null,
+      role: message.role,
+      startedAtMs: message.startedAtMs ?? null,
+      status: message.status ?? "done",
+      toolCallId: message.toolCallId ?? null,
+      toolName,
+      turnId: message.turnId ?? null,
+      parts: buildPersistedMessageParts(message.parts, toolName),
+      toolCalls: message.toolCalls ?? [],
+      toolResults,
+    };
+  });
 }
 
 function buildPersistedTurnSummaries(turnSummaries: PersistedTurnSummaryRecord[] | undefined) {
@@ -464,6 +522,23 @@ export async function finalizeTurn(input: {
       status: input.status,
       turnId: input.turnId,
       updatedAtMs: input.updatedAtMs ?? Date.now(),
+    },
+  });
+}
+
+/** Drop SQL turns not in keepTurnIds immediately after an in-memory edit (#3/#57). */
+export async function truncateSessionTranscriptToTurns(input: {
+  keepTurnIds: string[];
+  sessionId: string;
+}) {
+  frontendLogger.info("frontend.workspace-api", "truncate_session_transcript_requested", {
+    keepTurnCount: input.keepTurnIds.length,
+    sessionIdLength: input.sessionId.length,
+  });
+  return invoke<number>("truncate_session_transcript_to_turns", {
+    input: {
+      keepTurnIds: input.keepTurnIds,
+      sessionId: input.sessionId,
     },
   });
 }

@@ -14,7 +14,26 @@ const PROVIDER_RETRY_DELAYS_MS: [u64; MAX_PROVIDER_RETRY_ATTEMPTS] = [250, 1000]
 const OPENAI_API_PREFIX: &str = "/v1";
 const OPENAI_CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
 const OPENAI_MODELS_PATH: &str = "/models";
+const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const PROVIDER_COMPLETION_TIMEOUT: Duration = Duration::from_secs(300);
+const PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const PROVIDER_CATALOG_TIMEOUT: Duration = Duration::from_secs(30);
 pub const PROVIDER_CHAT_CHUNK_EVENT: &str = "provider-chat-chunk";
+
+pub fn completion_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(PROVIDER_CONNECT_TIMEOUT)
+        .timeout(PROVIDER_COMPLETION_TIMEOUT)
+        .build()
+        .map_err(|_| "Could not initialize the provider connection.".to_string())
+}
+
+pub fn stream_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(PROVIDER_CONNECT_TIMEOUT)
+        .build()
+        .map_err(|_| "Could not initialize the provider connection.".to_string())
+}
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -241,13 +260,52 @@ fn endpoint_with_path(endpoint: &str, path: &str) -> String {
     )
 }
 
-fn build_request_body(model: &ProviderResolvedModel, mut body: Value, stream: bool) -> Value {
+fn discovered_model(model_id: &str) -> ProviderModelRecord {
+    ProviderModelRecord {
+        capabilities: Vec::new(),
+        display_name: None,
+        max_context: None,
+        max_output_tokens: None,
+        model_id: model_id.to_string(),
+        reasoning_levels: Vec::new(),
+        tokenizer_json: None,
+        tokenizer_kind: None,
+    }
+}
+
+/// Normalize reasoning level labels into OpenAI-compatible `reasoning_effort` values.
+/// Accepted levels: low, medium, high, xhigh, max (and case/whitespace variants).
+pub fn resolve_reasoning_effort(level: &str) -> Option<String> {
+    let normalized = level.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "low" | "medium" | "high" | "xhigh" | "max" => Some(normalized),
+        _ => None,
+    }
+}
+
+fn model_supports_reasoning(model: &ProviderResolvedModel) -> bool {
+    !model.model.reasoning_levels.is_empty()
+}
+
+pub(crate) fn build_request_body(
+    model: &ProviderResolvedModel,
+    mut body: Value,
+    stream: bool,
+    reasoning_level: Option<&str>,
+) -> Value {
     if let Some(object) = body.as_object_mut() {
         object.insert(
             "model".to_string(),
             Value::String(model.model.model_id.clone()),
         );
         object.insert("stream".to_string(), Value::Bool(stream));
+
+        if model_supports_reasoning(model) {
+            if let Some(effort) = reasoning_level.and_then(resolve_reasoning_effort) {
+                // Prefer the desktop UI selection over any stale body field.
+                object.insert("reasoning_effort".to_string(), Value::String(effort));
+            }
+        }
     }
 
     body
@@ -258,6 +316,7 @@ async fn post_chat_completion(
     resolved_model: &ProviderResolvedModel,
     body: Value,
     stream: bool,
+    reasoning_level: Option<&str>,
 ) -> Result<reqwest::Response, ProviderRequestError> {
     if !matches!(
         resolved_model.provider.provider_type.as_str(),
@@ -275,7 +334,12 @@ async fn post_chat_completion(
             &format!("{OPENAI_API_PREFIX}{OPENAI_CHAT_COMPLETIONS_PATH}"),
         ))
         .header(CONTENT_TYPE, "application/json")
-        .json(&build_request_body(resolved_model, body, stream));
+        .json(&build_request_body(
+            resolved_model,
+            body,
+            stream,
+            reasoning_level,
+        ));
 
     if let Some(api_key) = resolved_model.provider.api_key.as_deref() {
         request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
@@ -295,12 +359,84 @@ async fn post_chat_completion(
     Ok(response)
 }
 
+#[derive(Clone, Debug, Default)]
+struct SseProcessResult {
+    emitted_chunk_count: usize,
+    error_message: Option<String>,
+    finish_reason: Option<String>,
+    saw_done: bool,
+}
+
+fn extract_finish_reason(payload: &Value) -> Option<String> {
+    payload
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn extract_stream_error_message(payload: &Value) -> Option<String> {
+    let error = payload.get("error")?;
+    if let Some(message) = error.get("message").and_then(Value::as_str) {
+        let trimmed = message.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Some(message) = error.as_str() {
+        let trimmed = message.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    Some("Provider stream returned an error.".to_string())
+}
+
+/// Decide whether a finished SSE stream is a successful terminal close (#18).
+fn resolve_stream_completion(
+    saw_done: bool,
+    finish_reason: Option<&str>,
+    emitted_any_chunks: bool,
+) -> Result<(), String> {
+    if let Some(reason) = finish_reason {
+        match reason {
+            "stop" | "tool_calls" | "function_call" | "end_turn" | "length" => Ok(()),
+            "content_filter" => {
+                Err("The provider blocked the response (content filter).".to_string())
+            }
+            other => {
+                if saw_done {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "Provider stream ended abnormally (finish_reason={other})."
+                    ))
+                }
+            }
+        }
+    } else if saw_done {
+        // Some proxies only emit [DONE] without finish_reason.
+        Ok(())
+    } else if !emitted_any_chunks {
+        Err("Provider stream closed without returning any content.".to_string())
+    } else {
+        Err(
+            "Provider stream closed before the response finished. The reply may be incomplete."
+                .to_string(),
+        )
+    }
+}
+
 fn process_sse_events(
     request_id: &str,
     window: &Window,
     buffer: &mut String,
     keep_tail: bool,
-) -> Result<usize, String> {
+) -> Result<SseProcessResult, String> {
     let normalized = buffer.replace("\r\n", "\n").replace('\r', "\n");
     let mut events = normalized.split("\n\n").collect::<Vec<_>>();
 
@@ -310,7 +446,7 @@ fn process_sse_events(
         String::new()
     };
 
-    let mut emitted_chunk_count = 0;
+    let mut result = SseProcessResult::default();
 
     for event in events {
         let data_lines = event
@@ -325,13 +461,28 @@ fn process_sse_events(
         }
 
         let data = data_lines.join("\n");
+        let trimmed = data.trim();
 
-        if data.trim().is_empty() || data.trim() == "[DONE]" {
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed == "[DONE]" {
+            result.saw_done = true;
             continue;
         }
 
         let payload = serde_json::from_str::<Value>(&data)
             .map_err(|_| "Provider stream returned an invalid response.".to_string())?;
+
+        if let Some(error_message) = extract_stream_error_message(&payload) {
+            result.error_message = Some(error_message);
+            continue;
+        }
+
+        if let Some(finish_reason) = extract_finish_reason(&payload) {
+            result.finish_reason = Some(finish_reason);
+        }
 
         for (kind, chunk, tool_call_index) in extract_delta_chunks(&payload) {
             window
@@ -345,22 +496,25 @@ fn process_sse_events(
                     },
                 )
                 .map_err(|_| "Could not deliver the provider stream chunk.".to_string())?;
-            emitted_chunk_count += 1;
+            result.emitted_chunk_count += 1;
         }
     }
 
-    Ok(emitted_chunk_count)
+    Ok(result)
 }
 
 pub async fn complete_chat(
     client: &reqwest::Client,
     resolved_model: &ProviderResolvedModel,
     body: Value,
+    reasoning_level: Option<&str>,
 ) -> Result<String, String> {
     let mut attempt = 0;
 
     loop {
-        match post_chat_completion(client, resolved_model, body.clone(), false).await {
+        match post_chat_completion(client, resolved_model, body.clone(), false, reasoning_level)
+            .await
+        {
             Ok(response) => {
                 return response
                     .text()
@@ -382,30 +536,41 @@ pub async fn stream_chat(
     request_id: &str,
     resolved_model: &ProviderResolvedModel,
     body: Value,
+    reasoning_level: Option<&str>,
 ) -> Result<(), String> {
     let mut attempt = 0;
     let mut emitted_any_chunks = false;
 
     'retry: loop {
-        let response = match post_chat_completion(client, resolved_model, body.clone(), true).await
-        {
-            Ok(response) => response,
-            Err(error)
-                if error.retryable
-                    && attempt < MAX_PROVIDER_RETRY_ATTEMPTS
-                    && !emitted_any_chunks =>
+        let response =
+            match post_chat_completion(client, resolved_model, body.clone(), true, reasoning_level)
+                .await
             {
-                attempt += 1;
-                wait_before_retry(attempt).await;
-                continue 'retry;
-            }
-            Err(error) => return Err(error.message),
-        };
+                Ok(response) => response,
+                Err(error)
+                    if error.retryable
+                        && attempt < MAX_PROVIDER_RETRY_ATTEMPTS
+                        && !emitted_any_chunks =>
+                {
+                    attempt += 1;
+                    wait_before_retry(attempt).await;
+                    continue 'retry;
+                }
+                Err(error) => return Err(error.message),
+            };
 
         let mut buffer = String::new();
         let mut stream = response.bytes_stream();
+        let mut saw_done = false;
+        let mut finish_reason: Option<String> = None;
 
-        while let Some(item) = stream.next().await {
+        loop {
+            let item = tokio::time::timeout(PROVIDER_STREAM_IDLE_TIMEOUT, stream.next())
+                .await
+                .map_err(|_| "Provider stream timed out while waiting for data.".to_string())?;
+            let Some(item) = item else {
+                break;
+            };
             let bytes = match item {
                 Ok(bytes) => bytes,
                 Err(error)
@@ -426,13 +591,30 @@ pub async fn stream_chat(
                 return Err("Provider stream exceeded the 10 MB safety limit.".to_string());
             }
 
-            emitted_any_chunks |= process_sse_events(request_id, &window, &mut buffer, true)? > 0;
+            let parsed = process_sse_events(request_id, &window, &mut buffer, true)?;
+            if let Some(error_message) = parsed.error_message {
+                return Err(error_message);
+            }
+            emitted_any_chunks |= parsed.emitted_chunk_count > 0;
+            saw_done |= parsed.saw_done;
+            if parsed.finish_reason.is_some() {
+                finish_reason = parsed.finish_reason;
+            }
         }
 
         if !buffer.trim().is_empty() {
-            let _ = process_sse_events(request_id, &window, &mut buffer, false)?;
+            let parsed = process_sse_events(request_id, &window, &mut buffer, false)?;
+            if let Some(error_message) = parsed.error_message {
+                return Err(error_message);
+            }
+            emitted_any_chunks |= parsed.emitted_chunk_count > 0;
+            saw_done |= parsed.saw_done;
+            if parsed.finish_reason.is_some() {
+                finish_reason = parsed.finish_reason;
+            }
         }
 
+        resolve_stream_completion(saw_done, finish_reason.as_deref(), emitted_any_chunks)?;
         return Ok(());
     }
 }
@@ -440,7 +622,11 @@ pub async fn stream_chat(
 pub async fn fetch_models(
     provider: &ProviderSecretRecord,
 ) -> Result<Vec<ProviderModelRecord>, String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .connect_timeout(PROVIDER_CONNECT_TIMEOUT)
+        .timeout(PROVIDER_CATALOG_TIMEOUT)
+        .build()
+        .map_err(|_| "Could not initialize the provider connection.".to_string())?;
     let mut request = client.get(endpoint_with_path(
         &provider.endpoint,
         &format!("{OPENAI_API_PREFIX}{OPENAI_MODELS_PATH}"),
@@ -481,19 +667,7 @@ pub async fn fetch_models(
             continue;
         }
 
-        models.push(ProviderModelRecord {
-            capabilities: vec!["text".to_string()],
-            display_name: None,
-            max_context: 128_000,
-            max_output_tokens: None,
-            model_id: model_id.to_string(),
-            reasoning_levels: vec![
-                "fast".to_string(),
-                "balanced".to_string(),
-                "max".to_string(),
-            ],
-            tokenizer_kind: Some("heuristic".to_string()),
-        });
+        models.push(discovered_model(model_id));
     }
 
     if models.is_empty() {
@@ -516,7 +690,37 @@ pub async fn fetch_models(
 
 #[cfg(test)]
 mod tests {
-    use super::map_provider_error;
+    use super::{
+        build_request_body, discovered_model, extract_finish_reason, map_provider_error,
+        resolve_reasoning_effort, resolve_stream_completion,
+    };
+    use crate::providers::types::{
+        ProviderModelRecord, ProviderResolvedModel, ProviderSecretRecord,
+    };
+    use serde_json::{json, Value};
+
+    fn sample_model(reasoning_levels: Vec<String>) -> ProviderResolvedModel {
+        ProviderResolvedModel {
+            model: ProviderModelRecord {
+                capabilities: vec!["text".to_string()],
+                display_name: None,
+                max_context: Some(128_000),
+                max_output_tokens: None,
+                model_id: "test-model".to_string(),
+                reasoning_levels,
+                tokenizer_json: None,
+                tokenizer_kind: Some("heuristic".to_string()),
+            },
+            model_uuid: "uuid-1".to_string(),
+            provider: ProviderSecretRecord {
+                api_key: Some("key".to_string()),
+                endpoint: "https://example.com".to_string(),
+                id: "provider-1".to_string(),
+                name: "Example".to_string(),
+                provider_type: "openai_compatible".to_string(),
+            },
+        }
+    }
 
     #[test]
     fn maps_authentication_errors() {
@@ -530,6 +734,17 @@ mod tests {
     }
 
     #[test]
+    fn catalog_model_keeps_unpublished_metadata_unknown() {
+        let model = discovered_model("catalog-id");
+
+        assert!(model.capabilities.is_empty());
+        assert!(model.reasoning_levels.is_empty());
+        assert_eq!(model.max_context, None);
+        assert_eq!(model.max_output_tokens, None);
+        assert_eq!(model.tokenizer_kind, None);
+    }
+
+    #[test]
     fn maps_context_overflow_errors() {
         let error = map_provider_error(
             Some(400),
@@ -539,5 +754,92 @@ mod tests {
 
         assert_eq!(error.message, "Prompt is too long for the selected model.");
         assert!(!error.retryable);
+    }
+
+    #[test]
+    fn resolves_standard_reasoning_levels() {
+        assert_eq!(resolve_reasoning_effort("low").as_deref(), Some("low"));
+        assert_eq!(
+            resolve_reasoning_effort("medium").as_deref(),
+            Some("medium")
+        );
+        assert_eq!(resolve_reasoning_effort("high").as_deref(), Some("high"));
+        assert_eq!(resolve_reasoning_effort("xhigh").as_deref(), Some("xhigh"));
+        assert_eq!(resolve_reasoning_effort("max").as_deref(), Some("max"));
+        assert_eq!(resolve_reasoning_effort("MAX").as_deref(), Some("max"));
+        assert_eq!(resolve_reasoning_effort("fast").as_deref(), None);
+        assert_eq!(resolve_reasoning_effort("balanced").as_deref(), None);
+        assert_eq!(resolve_reasoning_effort("  ").as_deref(), None);
+    }
+
+    #[test]
+    fn injects_reasoning_effort_when_model_supports_reasoning() {
+        let model = sample_model(vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "max".to_string(),
+        ]);
+        let body = build_request_body(
+            &model,
+            json!({
+                "messages": [],
+                "model": "ignored",
+            }),
+            true,
+            Some("medium"),
+        );
+
+        assert_eq!(
+            body.get("reasoning_effort").and_then(Value::as_str),
+            Some("medium")
+        );
+        assert_eq!(
+            body.get("model").and_then(Value::as_str),
+            Some("test-model")
+        );
+        assert_eq!(body.get("stream").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn skips_reasoning_effort_when_model_has_no_levels() {
+        let model = sample_model(vec![]);
+        let body = build_request_body(&model, json!({ "messages": [] }), false, Some("max"));
+
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn stream_completion_accepts_done_or_normal_finish_reason() {
+        assert!(resolve_stream_completion(true, None, true).is_ok());
+        assert!(resolve_stream_completion(false, Some("stop"), true).is_ok());
+        assert!(resolve_stream_completion(false, Some("tool_calls"), true).is_ok());
+        assert!(resolve_stream_completion(false, Some("length"), true).is_ok());
+        assert!(resolve_stream_completion(true, Some("stop"), false).is_ok());
+    }
+
+    #[test]
+    fn stream_completion_rejects_incomplete_close() {
+        let err = resolve_stream_completion(false, None, true).expect_err("incomplete");
+        assert!(err.contains("incomplete") || err.contains("before the response finished"));
+
+        let empty = resolve_stream_completion(false, None, false).expect_err("empty");
+        assert!(empty.contains("without returning any content"));
+
+        let filtered =
+            resolve_stream_completion(false, Some("content_filter"), true).expect_err("filter");
+        assert!(filtered.contains("content filter"));
+    }
+
+    #[test]
+    fn extract_finish_reason_from_choice() {
+        let payload = json!({
+            "choices": [{ "delta": {}, "finish_reason": "tool_calls" }]
+        });
+        assert_eq!(
+            extract_finish_reason(&payload).as_deref(),
+            Some("tool_calls")
+        );
+        assert!(extract_finish_reason(&json!({"choices":[{"delta":{}}]})).is_none());
     }
 }
