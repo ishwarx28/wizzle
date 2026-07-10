@@ -254,6 +254,9 @@ pub struct StoredMessagesFile {
 }
 
 #[allow(dead_code)]
+// This legacy JSONL boundary mirrors the on-disk schema; boxing would add churn to every reader
+// for a type that is used only during migration and import/export.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StoredSessionHistoryRecord {

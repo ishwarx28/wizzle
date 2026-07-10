@@ -16,38 +16,16 @@ pub fn validate_storage_id(kind: &str, value: &str) -> Result<(), String> {
 
     // Allow underscores so provider tool-call ids (e.g. call_00_…) can be embedded in
     // message / part ids without failing targeted persistence.
-    if value.chars().all(|character| {
-        character.is_ascii_alphanumeric() || character == '-' || character == '_'
-    }) {
+    if value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
+    {
         return Ok(());
     }
 
     Err(format!(
         "The {kind} id contains unsupported characters. Use only letters, numbers, hyphens, and underscores."
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validate_storage_id;
-
-    #[test]
-    fn storage_ids_allow_provider_tool_call_shapes() {
-        validate_storage_id("message", "message-tool-call_00_ABzCHrM8TDY9yQ6gWYME8154")
-            .expect("underscore tool message ids must be accepted");
-        validate_storage_id("message", "message-assistant-2fc8bdd8-067a-4cb0-863b-dce69787e1d4")
-            .expect("hyphen uuid message ids must be accepted");
-        validate_storage_id("process", "process-bd1fa083-e8cc-4100-80e6-6a3292cde6ab")
-            .expect("process ids must be accepted");
-    }
-
-    #[test]
-    fn storage_ids_reject_path_separators() {
-        let error = validate_storage_id("message", "message/tool").expect_err("slash invalid");
-        assert!(error.contains("unsupported characters"));
-        let error = validate_storage_id("message", "message tool").expect_err("space invalid");
-        assert!(error.contains("unsupported characters"));
-    }
 }
 
 pub fn wizzle_root_dir() -> Result<PathBuf, String> {
@@ -284,4 +262,30 @@ pub fn ensure_workspace_storage() -> Result<PathBuf, String> {
     }
 
     Ok(root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_storage_id;
+
+    #[test]
+    fn storage_ids_allow_provider_tool_call_shapes() {
+        validate_storage_id("message", "message-tool-call_00_ABzCHrM8TDY9yQ6gWYME8154")
+            .expect("underscore tool message ids must be accepted");
+        validate_storage_id(
+            "message",
+            "message-assistant-2fc8bdd8-067a-4cb0-863b-dce69787e1d4",
+        )
+        .expect("hyphen uuid message ids must be accepted");
+        validate_storage_id("process", "process-bd1fa083-e8cc-4100-80e6-6a3292cde6ab")
+            .expect("process ids must be accepted");
+    }
+
+    #[test]
+    fn storage_ids_reject_path_separators() {
+        let error = validate_storage_id("message", "message/tool").expect_err("slash invalid");
+        assert!(error.contains("unsupported characters"));
+        let error = validate_storage_id("message", "message tool").expect_err("space invalid");
+        assert!(error.contains("unsupported characters"));
+    }
 }

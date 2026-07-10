@@ -7,8 +7,10 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
+use uuid::Uuid;
 
 use crate::logging::log_desktop_event;
 
@@ -28,17 +30,18 @@ use super::{
         StoredMessageStepRecord, StoredProjectRecord, StoredSessionMetadata, StoredSettingsFile,
         StoredToolCallRecord, StoredToolResultRecord, StoredTurnSummaryRecord,
         TruncateSessionTranscriptInput, UpdateSessionSelectionInput, UpdateSessionTitleInput,
-        UpsertTurnSummaryInput,
-        WorkspaceCompactedContextPayload, WorkspaceComposerStatePayload, WorkspaceMessagePayload,
-        WorkspaceMessageStepPayload, WorkspaceProjectPayload, WorkspaceQueuedMessagePayload,
-        WorkspaceSessionLoadPayload, WorkspaceSessionPayload, WorkspaceSnapshotPayload,
-        WorkspaceToolCallPayload, WorkspaceToolResultPayload, WorkspaceTurnSummaryPayload,
+        UpsertTurnSummaryInput, WorkspaceCompactedContextPayload, WorkspaceComposerStatePayload,
+        WorkspaceMessagePayload, WorkspaceMessageStepPayload, WorkspaceProjectPayload,
+        WorkspaceQueuedMessagePayload, WorkspaceSessionLoadPayload, WorkspaceSessionPayload,
+        WorkspaceSnapshotPayload, WorkspaceToolCallPayload, WorkspaceToolResultPayload,
+        WorkspaceTurnSummaryPayload,
     },
     MAX_ATTACHMENT_BYTES,
 };
 
 const MIGRATION_VERSION: i64 = 1;
 const PROCESS_TAIL_BYTES: usize = 60_000;
+static MIGRATED_DATABASES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,6 +144,10 @@ fn compact_time_label(timestamp_ms: u64) -> String {
     }
 
     format!("{}y", delta_days / 365)
+}
+
+fn new_project_id() -> String {
+    format!("project-{}", Uuid::new_v4())
 }
 
 fn read_compacted_context_from_row(
@@ -272,9 +279,39 @@ pub(crate) fn open_database() -> Result<Connection, String> {
         ",
     )
     .map_err(|error| db_error("Could not configure the Wizzle SQLite database", error))?;
-    run_migrations(&mut conn)?;
+    ensure_database_migrated(&mut conn, &db_path)?;
 
     Ok(conn)
+}
+
+fn ensure_database_migrated(conn: &mut Connection, db_path: &Path) -> Result<(), String> {
+    let migrated_databases = MIGRATED_DATABASES.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut migrated_databases = migrated_databases
+        .lock()
+        .map_err(|_| "Could not coordinate Wizzle database migrations.".to_string())?;
+
+    if migrated_databases.contains(db_path) {
+        return Ok(());
+    }
+
+    run_migrations(conn)?;
+    migrated_databases.insert(db_path.to_path_buf());
+    Ok(())
+}
+
+pub(crate) fn resolve_session_tool_permission(
+    session_id: &str,
+    project_id: &str,
+) -> Result<String, String> {
+    let conn = open_database()?;
+    conn.query_row(
+        "SELECT permission_mode FROM sessions WHERE id = ?1 AND project_id = ?2",
+        params![session_id, project_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|error| db_error("Could not verify the tool permission mode", error))?
+    .ok_or_else(|| "The tool request does not belong to a stored project session.".to_string())
 }
 
 fn run_migrations(conn: &mut Connection) -> Result<(), String> {
@@ -574,10 +611,7 @@ fn ensure_tokenizer_json_columns(conn: &Connection) -> Result<(), String> {
 
 /// Link background processes to the turn/tool that spawned them (#75).
 fn ensure_process_link_columns(conn: &Connection) -> Result<(), String> {
-    for (column_name, column_type) in [
-        ("turn_id", "TEXT NULL"),
-        ("tool_call_id", "TEXT NULL"),
-    ] {
+    for (column_name, column_type) in [("turn_id", "TEXT NULL"), ("tool_call_id", "TEXT NULL")] {
         if !table_has_column(conn, "processes", column_name)? {
             conn.execute(
                 &format!("ALTER TABLE processes ADD COLUMN {column_name} {column_type}"),
@@ -1360,20 +1394,19 @@ fn recover_incomplete_message(mut record: StoredMessageRecord) -> StoredMessageR
     }
 
     for tool_call in &mut record.tool_calls {
-        if is_incomplete_lifecycle_status(tool_call.status.as_deref())
-            || (message_incomplete && tool_call.status.is_none())
+        if (is_incomplete_lifecycle_status(tool_call.status.as_deref())
+            || (message_incomplete && tool_call.status.is_none()))
+            && tool_call.status.as_deref() != Some("error")
         {
-            if tool_call.status.as_deref() != Some("error") {
-                tool_call.status = Some("interrupted".to_string());
-            }
+            tool_call.status = Some("interrupted".to_string());
         }
     }
 
     for tool_result in &mut record.tool_results {
-        if is_incomplete_lifecycle_status(tool_result.status.as_deref()) {
-            if tool_result.status.as_deref() != Some("error") {
-                tool_result.status = Some("interrupted".to_string());
-            }
+        if is_incomplete_lifecycle_status(tool_result.status.as_deref())
+            && tool_result.status.as_deref() != Some("error")
+        {
+            tool_result.status = Some("interrupted".to_string());
         }
     }
 
@@ -2177,9 +2210,8 @@ fn load_turn_budget_summaries(
             completed_at_ms: summary_completed_at
                 .map(|value| value.max(0) as u64)
                 .unwrap_or_else(|| updated_at.max(0) as u64),
-            estimated_tokens_image_capable: estimated_tokens_image_capable
-                .unwrap_or(0)
-                .max(0) as u64,
+            estimated_tokens_image_capable: estimated_tokens_image_capable.unwrap_or(0).max(0)
+                as u64,
             estimated_tokens_text_only: estimated_tokens_text_only.unwrap_or(0).max(0) as u64,
             estimator_version: estimator_version.max(0) as u32,
             message_ids,
@@ -2556,7 +2588,7 @@ pub fn add_project_from_path(root_path: &str) -> Result<WorkspaceSnapshotPayload
     }
 
     let timestamp = now_unix_ms();
-    let project_id = format!("project-{timestamp}");
+    let project_id = new_project_id();
     let project_name = Path::new(&normalized_root_path)
         .file_name()
         .and_then(|value| value.to_str())
@@ -2590,17 +2622,24 @@ pub fn remove_project_by_id(project_id: &str) -> Result<WorkspaceSnapshotPayload
     validate_storage_id("project", project_id)?;
     let mut conn = open_database()?;
     let session_ids = read_session_ids_for_project(&conn, project_id)?;
-    let tx = conn
-        .transaction()
-        .map_err(|error| db_error("Could not start project removal", error))?;
+    let quarantined = quarantine_session_directories(&session_ids)?;
+    let deletion_result = (|| {
+        let tx = conn
+            .transaction()
+            .map_err(|error| db_error("Could not start project removal", error))?;
 
-    tx.execute("DELETE FROM projects WHERE id = ?1", params![project_id])
-        .map_err(|error| db_error("Could not remove the Wizzle project", error))?;
-    update_settings_after_project_delete(&tx, project_id)?;
-    tx.commit()
-        .map_err(|error| db_error("Could not finish project removal", error))?;
+        tx.execute("DELETE FROM projects WHERE id = ?1", params![project_id])
+            .map_err(|error| db_error("Could not remove the Wizzle project", error))?;
+        update_settings_after_project_delete(&tx, project_id)?;
+        tx.commit()
+            .map_err(|error| db_error("Could not finish project removal", error))
+    })();
 
-    remove_session_directories(&session_ids)?;
+    if let Err(error) = deletion_result {
+        return Err(restore_after_failed_deletion(error, &quarantined));
+    }
+
+    finalize_quarantined_deletion(&quarantined);
     build_workspace_snapshot()
 }
 
@@ -2649,22 +2688,80 @@ fn update_settings_after_project_delete(
     Ok(())
 }
 
-fn remove_session_directories(session_ids: &[String]) -> Result<(), String> {
+struct QuarantinedSessionDirectory {
+    original: PathBuf,
+    quarantined: PathBuf,
+    session_id: String,
+}
+
+fn quarantine_session_directories(
+    session_ids: &[String],
+) -> Result<Vec<QuarantinedSessionDirectory>, String> {
     let root = ensure_workspace_storage()?;
+    let trash_root = root.join("sessions").join(".trash");
+    let mut quarantined = Vec::new();
 
     for session_id in session_ids {
         let session_dir = sqlite_session_dir(&root, session_id)?;
-        if session_dir.exists() {
-            fs::remove_dir_all(&session_dir).map_err(|error| {
-                io_error(
-                    &format!("Could not remove local files for session {session_id}"),
-                    error,
-                )
-            })?;
+        if !session_dir.exists() {
+            continue;
+        }
+
+        ensure_dir(&trash_root)?;
+        let trash_dir = trash_root.join(format!("{session_id}-{}", Uuid::new_v4()));
+        if let Err(error) = fs::rename(&session_dir, &trash_dir) {
+            let message = io_error(
+                &format!("Could not prepare local files for deleting session {session_id}"),
+                error,
+            );
+            return Err(restore_after_failed_deletion(message, &quarantined));
+        }
+
+        quarantined.push(QuarantinedSessionDirectory {
+            original: session_dir,
+            quarantined: trash_dir,
+            session_id: session_id.clone(),
+        });
+    }
+
+    Ok(quarantined)
+}
+
+fn restore_after_failed_deletion(
+    error: String,
+    quarantined: &[QuarantinedSessionDirectory],
+) -> String {
+    let mut restore_failures = Vec::new();
+    for entry in quarantined.iter().rev() {
+        if let Err(restore_error) = fs::rename(&entry.quarantined, &entry.original) {
+            restore_failures.push(format!("{}: {restore_error}", entry.session_id));
         }
     }
 
-    Ok(())
+    if restore_failures.is_empty() {
+        error
+    } else {
+        format!(
+            "{error} Local files could not be restored for: {}.",
+            restore_failures.join(", ")
+        )
+    }
+}
+
+fn finalize_quarantined_deletion(quarantined: &[QuarantinedSessionDirectory]) {
+    for entry in quarantined {
+        if let Err(error) = fs::remove_dir_all(&entry.quarantined) {
+            log_desktop_event(
+                "error",
+                "desktop.workspace",
+                "session_file_cleanup_failed",
+                json!({
+                    "errorKind": error.kind().to_string(),
+                    "sessionIdLength": entry.session_id.len(),
+                }),
+            );
+        }
+    }
 }
 
 pub fn save_workspace_settings(input: SaveWorkspaceSettingsInput) -> Result<(), String> {
@@ -2735,36 +2832,56 @@ pub fn delete_session(input: DeleteSessionInput) -> Result<WorkspaceSnapshotPayl
     validate_storage_id("project", &input.project_id)?;
     validate_storage_id("session", &input.session_id)?;
     let mut conn = open_database()?;
+    let session_exists = conn
+        .query_row(
+            "SELECT 1 FROM sessions WHERE id = ?1 AND project_id = ?2",
+            params![input.session_id, input.project_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| db_error("Could not verify the Wizzle session", error))?
+        .is_some();
+    if !session_exists {
+        return build_workspace_snapshot();
+    }
+
+    let quarantined = quarantine_session_directories(std::slice::from_ref(&input.session_id))?;
     let timestamp = now_unix_ms();
-    let tx = conn
-        .transaction()
-        .map_err(|error| db_error("Could not start session deletion", error))?;
+    let deletion_result = (|| {
+        let tx = conn
+            .transaction()
+            .map_err(|error| db_error("Could not start session deletion", error))?;
 
-    tx.execute(
-        "DELETE FROM sessions WHERE id = ?1 AND project_id = ?2",
-        params![input.session_id, input.project_id],
-    )
-    .map_err(|error| db_error("Could not delete the Wizzle session", error))?;
-    tx.execute(
-        "UPDATE projects SET updated_at = ?1 WHERE id = ?2",
-        params![timestamp as i64, input.project_id],
-    )
-    .map_err(|error| db_error("Could not update the Wizzle project", error))?;
-    tx.execute(
-        "
-        UPDATE workspace_settings
-        SET selected_session_id = NULL
-        WHERE id = 1
-          AND selected_project_id = ?1
-          AND selected_session_id = ?2
-        ",
-        params![input.project_id, input.session_id],
-    )
-    .map_err(|error| db_error("Could not clear Wizzle selection", error))?;
-    tx.commit()
-        .map_err(|error| db_error("Could not finish session deletion", error))?;
+        tx.execute(
+            "DELETE FROM sessions WHERE id = ?1 AND project_id = ?2",
+            params![input.session_id, input.project_id],
+        )
+        .map_err(|error| db_error("Could not delete the Wizzle session", error))?;
+        tx.execute(
+            "UPDATE projects SET updated_at = ?1 WHERE id = ?2",
+            params![timestamp as i64, input.project_id],
+        )
+        .map_err(|error| db_error("Could not update the Wizzle project", error))?;
+        tx.execute(
+            "
+            UPDATE workspace_settings
+            SET selected_session_id = NULL
+            WHERE id = 1
+              AND selected_project_id = ?1
+              AND selected_session_id = ?2
+            ",
+            params![input.project_id, input.session_id],
+        )
+        .map_err(|error| db_error("Could not clear Wizzle selection", error))?;
+        tx.commit()
+            .map_err(|error| db_error("Could not finish session deletion", error))
+    })();
 
-    remove_session_directories(&[input.session_id])?;
+    if let Err(error) = deletion_result {
+        return Err(restore_after_failed_deletion(error, &quarantined));
+    }
+
+    finalize_quarantined_deletion(&quarantined);
     build_workspace_snapshot()
 }
 
@@ -3693,7 +3810,9 @@ fn delete_stale_transcript_rows(
         let existing_turns = {
             let mut statement = tx
                 .prepare("SELECT COUNT(*) FROM turns WHERE session_id = ?1")
-                .map_err(|error| db_error("Could not count Wizzle turns for safety check", error))?;
+                .map_err(|error| {
+                    db_error("Could not count Wizzle turns for safety check", error)
+                })?;
             statement
                 .query_row(params![session_id], |row| row.get::<_, i64>(0))
                 .map_err(|error| db_error("Could not count Wizzle turns for safety check", error))?
@@ -3794,8 +3913,11 @@ pub fn truncate_session_transcript_to_turns(
         }
 
         // turn_parts cascade via FK ON DELETE CASCADE.
-        tx.execute("DELETE FROM turns WHERE id = ?1 AND session_id = ?2", params![turn_id, input.session_id])
-            .map_err(|error| db_error("Could not truncate Wizzle turn", error))?;
+        tx.execute(
+            "DELETE FROM turns WHERE id = ?1 AND session_id = ?2",
+            params![turn_id, input.session_id],
+        )
+        .map_err(|error| db_error("Could not truncate Wizzle turn", error))?;
         deleted = deleted.saturating_add(1);
     }
 
@@ -4177,12 +4299,7 @@ pub fn finalize_turn(input: FinalizeTurnInput) -> Result<(), String> {
         .optional()
         .map_err(|error| db_error("Could not read Wizzle turn status after finalize", error))?;
 
-    resolve_finalize_turn_result(
-        &input.turn_id,
-        status,
-        updated,
-        current_status.as_deref(),
-    )
+    resolve_finalize_turn_result(&input.turn_id, status, updated, current_status.as_deref())
 }
 
 pub fn persist_session(input: PersistWorkspaceSessionInput) -> Result<(), String> {
@@ -4424,6 +4541,10 @@ pub fn resolve_project_root(project_id: &str) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
+    fn unique_temp_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("wizzle-{label}-{}", Uuid::new_v4()))
+    }
+
     fn migrated_memory_db() -> Connection {
         let mut conn = Connection::open_in_memory().expect("open in-memory db");
         conn.execute_batch("PRAGMA foreign_keys=ON;")
@@ -4492,6 +4613,62 @@ mod tests {
         assert!(settings.is_sidebar_open);
         assert_eq!(settings.model_id, "wizzle-1-thinking");
         assert_eq!(settings.permission_mode, "manual-approve");
+    }
+
+    #[test]
+    fn completed_migrations_are_cached_for_the_database_path() {
+        let db_path = unique_temp_path("migration-cache").with_extension("db");
+        let mut conn = Connection::open(&db_path).expect("open database");
+        ensure_database_migrated(&mut conn, &db_path).expect("migrate database");
+        conn.execute("DROP TABLE schema_migrations", [])
+            .expect("remove migration marker");
+        drop(conn);
+
+        let mut reopened = Connection::open(&db_path).expect("reopen database");
+        ensure_database_migrated(&mut reopened, &db_path).expect("use cached migration");
+        assert!(!table_exists(&reopened, "schema_migrations"));
+        drop(reopened);
+        fs::remove_file(db_path).expect("remove test database");
+    }
+
+    #[test]
+    fn project_ids_are_uuid_backed_and_unique() {
+        let mut project_ids = (0..32)
+            .map(|_| std::thread::spawn(new_project_id))
+            .map(|handle| handle.join().expect("generate project ID"))
+            .collect::<Vec<_>>();
+        project_ids.sort();
+        project_ids.dedup();
+
+        assert_eq!(project_ids.len(), 32);
+        for project_id in project_ids {
+            assert!(project_id.starts_with("project-"));
+            Uuid::parse_str(project_id.trim_start_matches("project-")).expect("parse project UUID");
+        }
+    }
+
+    #[test]
+    fn failed_deletion_restores_quarantined_session_directory() {
+        let root = unique_temp_path("deletion-restore");
+        let original = root.join("session-1");
+        let quarantined = root.join("trash-session-1");
+        fs::create_dir_all(&original).expect("create original directory");
+        fs::write(original.join("attachment.txt"), "private").expect("write attachment");
+        fs::rename(&original, &quarantined).expect("quarantine directory");
+        let entries = vec![QuarantinedSessionDirectory {
+            original: original.clone(),
+            quarantined,
+            session_id: "session-1".to_string(),
+        }];
+
+        let error = restore_after_failed_deletion("database failed".to_string(), &entries);
+
+        assert_eq!(error, "database failed");
+        assert_eq!(
+            fs::read_to_string(original.join("attachment.txt")).expect("read restored attachment"),
+            "private"
+        );
+        fs::remove_dir_all(root).expect("remove test directory");
     }
 
     #[test]
@@ -5415,9 +5592,11 @@ mod tests {
         tx.commit().unwrap();
 
         let remaining: i64 = conn
-            .query_row("SELECT COUNT(*) FROM turns WHERE session_id = 'session-1'", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM turns WHERE session_id = 'session-1'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(remaining, 1);
         let parts: i64 = conn
@@ -5770,6 +5949,9 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].turn_id, "turn-real");
         assert_eq!(loaded[0].estimated_tokens_text_only, 100);
-        assert_eq!(loaded[0].message_ids, vec!["m1".to_string(), "m2".to_string()]);
+        assert_eq!(
+            loaded[0].message_ids,
+            vec!["m1".to_string(), "m2".to_string()]
+        );
     }
 }

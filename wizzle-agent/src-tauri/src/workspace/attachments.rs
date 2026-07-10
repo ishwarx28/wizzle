@@ -229,7 +229,6 @@ fn build_attachment_preview(
             real_path: Some(resolved_path.to_string_lossy().to_string()),
             size_bytes: Some(size_bytes),
             summary: "Markdown attachment".to_string(),
-            ..AttachmentPreviewPayload::default()
         }));
     }
 
@@ -263,7 +262,6 @@ fn build_attachment_preview(
             real_path: Some(resolved_path.to_string_lossy().to_string()),
             size_bytes: Some(size_bytes),
             summary: "Text attachment".to_string(),
-            ..AttachmentPreviewPayload::default()
         }));
     }
 
@@ -338,7 +336,6 @@ fn build_attachment_preview_from_bytes_impl(
             real_path: None,
             size_bytes: Some(bytes.len() as u64),
             summary: "Markdown attachment".to_string(),
-            ..AttachmentPreviewPayload::default()
         }));
     }
 
@@ -366,7 +363,6 @@ fn build_attachment_preview_from_bytes_impl(
             real_path: None,
             size_bytes: Some(bytes.len() as u64),
             summary: "Text attachment".to_string(),
-            ..AttachmentPreviewPayload::default()
         }));
     }
 
@@ -401,7 +397,6 @@ fn build_attachment_preview_from_bytes_impl(
             real_path: None,
             size_bytes: Some(bytes.len() as u64),
             summary: "Image attachment".to_string(),
-            ..AttachmentPreviewPayload::default()
         }));
     }
 
@@ -441,7 +436,6 @@ fn build_attachment_error_preview(
         real_path: resolved_path.map(|value| value.to_string_lossy().to_string()),
         size_bytes: None,
         summary: message,
-        ..AttachmentPreviewPayload::default()
     }
 }
 
