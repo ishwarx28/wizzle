@@ -895,5 +895,4 @@ mod tests {
         assert!(!coordinator.finish("session-2"));
         assert!(coordinator.finish("session-1"));
     }
-
 }

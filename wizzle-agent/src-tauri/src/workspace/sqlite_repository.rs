@@ -74,10 +74,7 @@ impl Drop for ManagedConnection {
         let Some(connection) = self.connection.take() else {
             return;
         };
-        let Ok(pool) = CONNECTION_POOL
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-        else {
+        let Ok(pool) = CONNECTION_POOL.get_or_init(|| Mutex::new(None)).lock() else {
             return;
         };
         let mut pool = pool;

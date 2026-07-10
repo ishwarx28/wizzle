@@ -41,10 +41,7 @@ pub async fn run_agent_tool(
         session_id,
         &input.project_id,
     )?;
-    if !matches!(
-        permission_mode.as_str(),
-        "full-access" | "manual-approve"
-    ) {
+    if !matches!(permission_mode.as_str(), "full-access" | "manual-approve") {
         return Err("The session has an unsupported tool permission mode.".to_string());
     }
 
