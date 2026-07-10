@@ -14,6 +14,7 @@ const {
   removeComposerQueueItem,
   resetComposerSessionQueuesForTests,
   selectNextQueuedComposerItem,
+  selectVisibleComposerQueueItems,
   setComposerSessionQueue,
   getComposerSessionQueue,
 } = await import("./composer-session-queue.ts");
@@ -34,6 +35,14 @@ function main() {
   assert(selectNextQueuedComposerItem([a, b])?.id === a.id, "select first queued");
   const withSending = markComposerQueueItemStatus([a, b], a.id, "sending");
   assert(selectNextQueuedComposerItem(withSending)?.id === b.id, "skip sending");
+  assert(
+    selectVisibleComposerQueueItems(withSending).map((item) => item.id).join(",") === b.id,
+    "sending item is hidden after its user message is represented in chat",
+  );
+  assert(
+    selectVisibleComposerQueueItems([{ ...a, status: "failed" }, b]).length === 2,
+    "queued and failed items remain visible",
+  );
 
   assert(
     applyComposerQueueSendResult([a, b], a.id, { accepted: true, ok: true }).length === 1,
@@ -91,6 +100,8 @@ function main() {
   const next = selectNextQueuedComposerItem(getComposerSessionQueue("s-continue"));
   assert(next?.id === cont.id, "continue selected ahead of user queue");
   assert(getComposerSessionQueue("s-continue")[0]?.id === cont.id, "continue at front");
+  assert(cont.attachments.length === 0, "continue never carries attachments");
+  assert(cont.prompt === "Continue previous task", "continue prompt is not modified");
 
   enqueueContextContinue("s-continue", "Continue previous task again");
   assert(

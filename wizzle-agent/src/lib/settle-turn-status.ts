@@ -80,6 +80,14 @@ export function settleAssistantMessageFields(
       return part;
     }
 
+    if (
+      turnStatus === "done" &&
+      part.type === "tool_call" &&
+      !isTerminalMessageStatus(part.status)
+    ) {
+      return { ...part, status: "error" };
+    }
+
     return {
       ...part,
       status:

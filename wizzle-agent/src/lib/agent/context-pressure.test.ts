@@ -8,12 +8,11 @@ import type { Message } from "../../types/workspace.ts";
 
 const {
   CONTEXT_CONTINUE_PROMPT,
-  CONTEXT_PRESSURE_FINAL_NUDGE,
   CONTEXT_PRESSURE_SYSTEM_PROMPT,
+  containsRawToolSyntax,
   extractUserAndFinalMessages,
   pickFinalAssistantMessage,
   shouldEnterContextPressure,
-  stripToolRoleMessages,
 } = await import("./context-pressure.ts");
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -24,10 +23,8 @@ function assert(condition: unknown, message: string): asserts condition {
 
 function main() {
   assert(CONTEXT_PRESSURE_SYSTEM_PROMPT.split("\n").length <= 5, "short system ≤5 lines");
-  assert(
-    CONTEXT_PRESSURE_FINAL_NUDGE.includes("last user request / task"),
-    "nudge wording",
-  );
+  assert(CONTEXT_PRESSURE_SYSTEM_PROMPT.includes("brief status"), "brief request is in system prompt");
+  assert(CONTEXT_PRESSURE_SYSTEM_PROMPT.includes("Do not call tools"), "tools disabled by prompt");
   assert(CONTEXT_CONTINUE_PROMPT.includes("Continue previous task"), "continue prompt");
 
   assert(
@@ -89,9 +86,32 @@ function main() {
   assert(pair[1]?.id === "a2" && !pair[1]?.toolCalls, "final only, no tools");
   assert(pickFinalAssistantMessage(messages)?.id === "a2", "picks final phase");
 
-  const slim = stripToolRoleMessages(messages);
-  assert(slim.every((message) => message.role !== "tool"), "strip tools");
-  assert(slim.length === 3, "three non-tool messages");
+  assert(
+    containsRawToolSyntax(
+      '<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="read"><｜｜DSML｜｜parameter name="path">x</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>',
+    ),
+    "detect DSML tool syntax",
+  );
+  assert(containsRawToolSyntax("<tool_call>read</tool_call>"), "detect generic tool syntax");
+  assert(!containsRawToolSyntax("Completed the requested review."), "allow normal brief text");
+
+  const invalidFinalMessages: Message[] = [
+    messages[0]!,
+    messages[1]!,
+    {
+      assistantPhase: "final",
+      content: "<tool_call>read</tool_call>",
+      createdAtLabel: "now",
+      id: "raw-final",
+      role: "assistant",
+      status: "done",
+      turnId: "t1",
+    },
+  ];
+  assert(
+    pickFinalAssistantMessage(invalidFinalMessages) === null,
+    "invalid explicit final does not fall back to working narration",
+  );
 
   assert(
     extractUserAndFinalMessages([

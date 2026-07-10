@@ -12,6 +12,7 @@ import {
 import { interleaveContextStatus } from "../../lib/context-status";
 import { buildDisplayMessages } from "../../lib/message-parts";
 import { useWorkspaceStore } from "../../store/workspace-store";
+import type { DisplayMessage, SessionEvent } from "../../types/workspace";
 import { Composer } from "./Composer";
 import { ContextStatusDivider } from "./ContextStatusDivider";
 import { MessageBubble } from "./MessageBubble";
@@ -27,9 +28,46 @@ function isNearBottom(container: HTMLDivElement, threshold = BOTTOM_SNAP_THRESHO
   return distanceFromBottom <= threshold;
 }
 
+function displayIndexForRawBoundary(messages: DisplayMessage[], rawBoundary: number) {
+  const boundary = Math.max(0, rawBoundary);
+  let consumedRawMessages = 0;
+
+  for (let index = 0; index < messages.length; index += 1) {
+    if (consumedRawMessages >= boundary) {
+      return index;
+    }
+
+    consumedRawMessages += messages[index]?.messages.length ?? 0;
+    if (consumedRawMessages >= boundary) {
+      return index + 1;
+    }
+  }
+
+  return messages.length;
+}
+
+function collapseContextEvents(events: SessionEvent[]) {
+  const eventByPosition = new Map<number, SessionEvent>();
+
+  for (const event of events) {
+    const existing = eventByPosition.get(event.afterMessageCount);
+    if (
+      !existing ||
+      event.updatedAtMs > existing.updatedAtMs ||
+      (event.updatedAtMs === existing.updatedAtMs && event.phase === "compacted")
+    ) {
+      eventByPosition.set(event.afterMessageCount, event);
+    }
+  }
+
+  return Array.from(eventByPosition.values()).sort(
+    (left, right) =>
+      left.afterMessageCount - right.afterMessageCount || left.createdAtMs - right.createdAtMs,
+  );
+}
+
 export function ChatView() {
   const activeMessageEdit = useWorkspaceStore((state) => state.activeMessageEdit);
-  const sessionContextStatus = useWorkspaceStore((state) => state.sessionContextStatus);
   const sessionStreamErrors = useWorkspaceStore((state) => state.sessionStreamErrors);
   const loadingSessionId = useWorkspaceStore((state) => state.loadingSessionId);
   const previewFiles = useWorkspaceStore((state) => state.previewFiles);
@@ -91,37 +129,26 @@ export function ChatView() {
   );
   const displayMessages = useMemo(() => buildDisplayMessages(visibleRawMessages), [visibleRawMessages]);
   const visibleMessages = displayMessages;
-  const contextStatus = useMemo(() => {
-    const sessionId = currentSession?.id ?? selectedSessionId;
-    if (!sessionId) {
-      return null;
-    }
-
-    const status = sessionContextStatus[sessionId];
-    if (!status) {
-      return null;
-    }
-
-    // Map absolute session message index onto the currently visible window.
-    const relativeAfter = Math.min(
-      visibleMessages.length,
-      Math.max(0, status.afterMessageCount - visibleRawStartIndex),
-    );
-
-    return {
-      ...status,
-      afterMessageCount: relativeAfter,
-    };
-  }, [
-    currentSession?.id,
-    selectedSessionId,
-    sessionContextStatus,
-    visibleMessages.length,
-    visibleRawStartIndex,
-  ]);
+  const contextEvents = useMemo<Array<Pick<SessionEvent, "afterMessageCount" | "id" | "phase">>>(
+    () =>
+      collapseContextEvents(currentSession?.events ?? [])
+        .filter(
+          (event) =>
+            event.afterMessageCount >= visibleRawStartIndex &&
+            event.afterMessageCount <= currentMessages.length,
+        )
+        .map((event) => ({
+          ...event,
+          afterMessageCount: displayIndexForRawBoundary(
+            visibleMessages,
+            event.afterMessageCount - visibleRawStartIndex,
+          ),
+        })),
+    [currentMessages.length, currentSession?.events, visibleMessages, visibleRawStartIndex],
+  );
   const chatItems = useMemo(
-    () => interleaveContextStatus(visibleMessages, contextStatus),
-    [contextStatus, visibleMessages],
+    () => interleaveContextStatus(visibleMessages, contextEvents),
+    [contextEvents, visibleMessages],
   );
   const hasMessages = displayMessages.length > 0;
   const hasEarlierTurns = hasEarlierUserTurns(totalTurnCount, visibleTurnCount);
@@ -470,7 +497,7 @@ export function ChatView() {
               if (item.type === "context-status") {
                 return (
                   <ContextStatusDivider
-                    key={`context-status-${item.phase}-${index}`}
+                    key={`context-status-${item.eventId}-${index}`}
                     phase={item.phase}
                   />
                 );

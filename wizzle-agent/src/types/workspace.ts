@@ -206,6 +206,17 @@ export interface CompactedContextRecord {
   updatedAtMs: number;
 }
 
+export type ContextCompactionPhase = "compacting" | "compacted";
+
+export interface SessionEvent {
+  afterMessageCount: number;
+  createdAtMs: number;
+  id: string;
+  phase: ContextCompactionPhase;
+  type: "context_status";
+  updatedAtMs: number;
+}
+
 export type SessionHistoryRecord =
   | {
       kind: "message";
@@ -241,6 +252,7 @@ export interface Session {
   modelId?: ModelId;
   permissionMode?: PermissionMode;
   compactedContext?: CompactedContextRecord | null;
+  events?: SessionEvent[];
   messages: Message[];
   replayTurnSummaries?: PersistedTurnSummaryRecord[];
   selectedModelUuid?: string | null;

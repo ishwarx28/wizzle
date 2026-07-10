@@ -92,6 +92,11 @@ export function selectNextQueuedComposerItem(items: readonly ComposerQueueItem[]
   return items.find((item) => (item.status ?? "queued") === "queued") ?? null;
 }
 
+/** A sending item is already represented by its accepted user message in chat. */
+export function selectVisibleComposerQueueItems(items: readonly ComposerQueueItem[]) {
+  return items.filter((item) => item.status !== "sending");
+}
+
 export function markComposerQueueItemStatus(
   items: readonly ComposerQueueItem[],
   itemId: string,

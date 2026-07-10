@@ -24,7 +24,7 @@ use workspace::{
     persist_workspace_session, read_attachment_previews, remove_project_by_id,
     rename_workspace_session, save_composer_state, save_workspace_settings, set_project_expanded,
     truncate_session_transcript_to_turns, update_session_selection, update_session_title,
-    upsert_turn_summary, WorkspaceStorageLock,
+    upsert_session_event, upsert_turn_summary, WorkspaceStorageLock,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -84,6 +84,7 @@ pub fn run() {
             update_session_selection,
             append_or_update_message,
             upsert_turn_summary,
+            upsert_session_event,
             truncate_session_transcript_to_turns,
             finalize_turn,
             read_attachment_previews,

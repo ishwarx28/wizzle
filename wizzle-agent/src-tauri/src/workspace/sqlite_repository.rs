@@ -31,11 +31,11 @@ use super::{
         StoredMessageStepRecord, StoredProjectRecord, StoredSessionMetadata, StoredSettingsFile,
         StoredToolCallRecord, StoredToolResultRecord, StoredTurnSummaryRecord,
         TruncateSessionTranscriptInput, UpdateSessionSelectionInput, UpdateSessionTitleInput,
-        UpsertTurnSummaryInput, WorkspaceCompactedContextPayload, WorkspaceComposerStatePayload,
-        WorkspaceMessagePayload, WorkspaceMessageStepPayload, WorkspaceProjectPayload,
-        WorkspaceQueuedMessagePayload, WorkspaceSessionLoadPayload, WorkspaceSessionPayload,
-        WorkspaceSnapshotPayload, WorkspaceToolCallPayload, WorkspaceToolResultPayload,
-        WorkspaceTurnSummaryPayload,
+        UpsertSessionEventInput, UpsertTurnSummaryInput, WorkspaceCompactedContextPayload,
+        WorkspaceComposerStatePayload, WorkspaceMessagePayload, WorkspaceMessageStepPayload,
+        WorkspaceProjectPayload, WorkspaceQueuedMessagePayload, WorkspaceSessionEventPayload,
+        WorkspaceSessionLoadPayload, WorkspaceSessionPayload, WorkspaceSnapshotPayload,
+        WorkspaceToolCallPayload, WorkspaceToolResultPayload, WorkspaceTurnSummaryPayload,
     },
     MAX_ATTACHMENT_BYTES,
 };
@@ -404,6 +404,7 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
         ensure_session_metadata_columns(conn)?;
         ensure_process_link_columns(conn)?;
         ensure_tokenizer_json_columns(conn)?;
+        ensure_session_events_table(conn)?;
         repair_self_parent_tool_calls(conn)?;
         return Ok(());
     }
@@ -496,6 +497,16 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
           attachments_json TEXT NOT NULL,
           queue_index INTEGER NOT NULL,
           status TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS session_events (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          event_type TEXT NOT NULL,
+          phase TEXT NOT NULL,
+          after_message_count INTEGER NOT NULL,
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL
         );
@@ -597,6 +608,9 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_turns_session_index
         ON turns(session_id, turn_index);
 
+        CREATE INDEX IF NOT EXISTS idx_session_events_session_position
+        ON session_events(session_id, after_message_count, created_at);
+
         CREATE INDEX IF NOT EXISTS idx_turns_session_compacted_status
         ON turns(session_id, compacted, status, turn_index);
 
@@ -651,6 +665,7 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
     ensure_turn_budget_columns(conn)?;
     ensure_process_link_columns(conn)?;
     ensure_tokenizer_json_columns(conn)?;
+    ensure_session_events_table(conn)?;
     repair_self_parent_tool_calls(conn)?;
     Ok(())
 }
@@ -671,6 +686,26 @@ fn ensure_tokenizer_json_columns(conn: &Connection) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn ensure_session_events_table(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS session_events (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          event_type TEXT NOT NULL,
+          phase TEXT NOT NULL,
+          after_message_count INTEGER NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_session_events_session_position
+        ON session_events(session_id, after_message_count, created_at);
+        ",
+    )
+    .map_err(|error| db_error("Could not initialize Wizzle session events", error))
 }
 
 /// Link background processes to the turn/tool that spawned them (#75).
@@ -1680,6 +1715,7 @@ fn build_workspace_session_summary(metadata: StoredSessionMetadata) -> Workspace
         model_id: metadata.model_id,
         permission_mode: metadata.permission_mode,
         compacted_context: metadata.compacted_context,
+        events: Vec::new(),
         replay_turn_summaries: Vec::new(),
         selected_model_uuid: metadata.selected_model_uuid,
         system_prompt_hash: metadata.system_prompt_hash,
@@ -1690,6 +1726,83 @@ fn build_workspace_session_summary(metadata: StoredSessionMetadata) -> Workspace
         updated_at_label: compact_time_label(metadata.updated_at),
         updated_at_ms: metadata.updated_at,
     }
+}
+
+fn validate_session_event(event: &WorkspaceSessionEventPayload) -> Result<(), String> {
+    validate_storage_id("session event", &event.id)?;
+
+    if event.r#type != "context_status" {
+        return Err("Could not save an unsupported session event type.".to_string());
+    }
+
+    match event.phase.as_str() {
+        "compacting" | "compacted" => Ok(()),
+        _ => Err("Could not save a session event with an unsupported phase.".to_string()),
+    }
+}
+
+fn load_session_events(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<WorkspaceSessionEventPayload>, String> {
+    let mut statement = conn
+        .prepare(
+            "
+            SELECT id, event_type, phase, after_message_count, created_at, updated_at
+            FROM session_events
+            WHERE session_id = ?1
+            ORDER BY after_message_count ASC, created_at ASC, id ASC
+            ",
+        )
+        .map_err(|error| db_error("Could not prepare Wizzle session event loading", error))?;
+    let rows = statement
+        .query_map(params![session_id], |row| {
+            Ok(WorkspaceSessionEventPayload {
+                id: row.get(0)?,
+                r#type: row.get(1)?,
+                phase: row.get(2)?,
+                after_message_count: row.get::<_, i64>(3)?.max(0) as u64,
+                created_at_ms: row.get::<_, i64>(4)?.max(0) as u64,
+                updated_at_ms: row.get::<_, i64>(5)?.max(0) as u64,
+            })
+        })
+        .map_err(|error| db_error("Could not read Wizzle session events", error))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| db_error("Could not parse Wizzle session events", error))
+}
+
+fn upsert_session_event_tx(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    event: &WorkspaceSessionEventPayload,
+) -> Result<(), String> {
+    validate_session_event(event)?;
+    tx.execute(
+        "
+        INSERT INTO session_events (
+          id, session_id, event_type, phase, after_message_count, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        ON CONFLICT(id) DO UPDATE SET
+          session_id = excluded.session_id,
+          event_type = excluded.event_type,
+          phase = excluded.phase,
+          after_message_count = excluded.after_message_count,
+          created_at = MIN(session_events.created_at, excluded.created_at),
+          updated_at = excluded.updated_at
+        ",
+        params![
+            event.id,
+            session_id,
+            event.r#type,
+            event.phase,
+            event.after_message_count as i64,
+            event.created_at_ms as i64,
+            event.updated_at_ms as i64
+        ],
+    )
+    .map_err(|error| db_error("Could not save a Wizzle session event", error))?;
+    Ok(())
 }
 
 fn read_project(
@@ -2314,6 +2427,7 @@ fn load_workspace_session_payload(
     // Cold load: in-flight agent state is gone — close stuck running turns (#68).
     interrupt_running_turns_on_load(conn, session_id)?;
     let (messages, summaries) = load_session_history(conn, session_id)?;
+    let events = load_session_events(conn, session_id)?;
     let root = ensure_workspace_storage()?;
     let session_root = sqlite_session_dir(&root, session_id)?;
 
@@ -2330,6 +2444,7 @@ fn load_workspace_session_payload(
         model_id: metadata.model_id,
         permission_mode: metadata.permission_mode,
         compacted_context: metadata.compacted_context,
+        events,
         replay_turn_summaries: summaries
             .into_iter()
             .map(to_workspace_turn_summary)
@@ -4295,6 +4410,28 @@ pub fn upsert_turn_summary(input: UpsertTurnSummaryInput) -> Result<(), String> 
         .map_err(|error| db_error("Could not finish turn summary persistence", error))
 }
 
+pub fn upsert_session_event(input: UpsertSessionEventInput) -> Result<(), String> {
+    validate_storage_id("session", &input.session_id)?;
+    validate_session_event(&input.event)?;
+    ensure_workspace_storage()?;
+    let mut conn = open_database()?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| db_error("Could not start session event persistence", error))?;
+    upsert_session_event_tx(&tx, &input.session_id, &input.event)?;
+    tx.execute(
+        "
+        UPDATE sessions
+        SET updated_at = MAX(updated_at, ?1)
+        WHERE id = ?2
+        ",
+        params![input.event.updated_at_ms as i64, input.session_id],
+    )
+    .map_err(|error| db_error("Could not update the Wizzle session event timestamp", error))?;
+    tx.commit()
+        .map_err(|error| db_error("Could not finish session event persistence", error))
+}
+
 fn resolve_finalize_turn_result(
     turn_id: &str,
     desired_status: &str,
@@ -4408,6 +4545,7 @@ pub fn persist_session(input: PersistWorkspaceSessionInput) -> Result<(), String
         .into_iter()
         .map(build_stored_turn_summary)
         .collect::<Vec<_>>();
+    let events = session_input.events;
     let messages = session_input
         .messages
         .into_iter()
@@ -4507,6 +4645,9 @@ pub fn persist_session(input: PersistWorkspaceSessionInput) -> Result<(), String
             ],
         )
         .map_err(|error| db_error("Could not save the Wizzle session", error))?;
+        for event in &events {
+            upsert_session_event_tx(&tx, &session_id, event)?;
+        }
         // Real conversation turns only — budget metadata is columns on those rows (#71).
         let expected_turn_ids = messages.iter().map(message_turn_id).collect::<HashSet<_>>();
         let expected_part_ids = messages

@@ -25,6 +25,9 @@ pub struct UpsertProviderInput {
     pub models: Option<Vec<ProviderModelDefinitionInput>>,
     pub name: String,
     pub only_specified_models: Option<bool>,
+    /// Treat `models` as the complete local set, deleting omitted entries.
+    /// Kept separate from catalog discovery so edits never trigger network sync implicitly.
+    pub replace_models: Option<bool>,
     pub provider_type: String,
     /// Provider-level HuggingFace `tokenizer.json` path or HTTPS URL.
     pub tokenizer_json: Option<String>,

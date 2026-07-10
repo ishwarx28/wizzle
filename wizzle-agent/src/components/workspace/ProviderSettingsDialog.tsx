@@ -125,15 +125,19 @@ function parseList(value: string) {
     .filter(Boolean);
 }
 
-function parseOptionalInteger(value: string) {
+function parseOptionalInteger(value: string, fieldName: string, modelId: string) {
   const trimmed = value.trim();
 
   if (!trimmed) {
     return undefined;
   }
 
-  const parsed = Number.parseInt(trimmed, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${fieldName} for ${modelId || "the model"} must be a positive whole number.`);
+  }
+
+  return parsed;
 }
 
 /** Empty capabilities string is safe; backend re-defaults to `text` if omitted. */
@@ -148,12 +152,16 @@ function toModelInput(row: ProviderModelFormRow) {
   const isCustomTokenizer = row.tokenizerMode === "custom";
   const tokenizerJson = isCustomTokenizer ? row.tokenizerJson.trim() || undefined : undefined;
 
+  if (isCustomTokenizer && !tokenizerJson) {
+    throw new Error(`Choose a tokenizer.json path or URL for ${modelId}.`);
+  }
+
   return {
     // Prefer explicit list; empty means "use server default (text)" without crashing.
     capabilities: capabilities.length > 0 ? capabilities : ["text"],
     displayName: row.displayName.trim() || undefined,
-    maxContext: parseOptionalInteger(row.maxContext),
-    maxOutputTokens: parseOptionalInteger(row.maxOutputTokens),
+    maxContext: parseOptionalInteger(row.maxContext, "Max context", modelId),
+    maxOutputTokens: parseOptionalInteger(row.maxOutputTokens, "Max output tokens", modelId),
     modelId,
     reasoningLevels: row.reasoningLevels,
     tokenizerJson,
@@ -254,7 +262,7 @@ function ReasoningLevelsMultiSelect({
       return;
     }
 
-    function handlePointerDown(event: MouseEvent) {
+    function handlePointerDown(event: PointerEvent) {
       const target = event.target as Node | null;
       if (buttonRef.current?.contains(target) || menuRef.current?.contains(target)) {
         return;
@@ -280,12 +288,12 @@ function ReasoningLevelsMultiSelect({
       });
     }
 
-    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("pointerdown", handlePointerDown, true);
     window.addEventListener("keydown", handleEscape);
     window.addEventListener("resize", handleReposition);
     window.addEventListener("scroll", handleReposition, true);
     return () => {
-      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("pointerdown", handlePointerDown, true);
       window.removeEventListener("keydown", handleEscape);
       window.removeEventListener("resize", handleReposition);
       window.removeEventListener("scroll", handleReposition, true);
@@ -480,10 +488,13 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
   const setProviderConfig = useWorkspaceStore((state) => state.setProviderConfig);
   const [apiKey, setApiKey] = useState("");
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
+  const [clearApiKey, setClearApiKey] = useState(false);
+  const [hasStoredApiKey, setHasStoredApiKey] = useState(false);
   const [defaultModelId, setDefaultModelId] = useState("");
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [endpoint, setEndpoint] = useState("https://api.openai.com");
   const [error, setError] = useState<string | null>(null);
+  const [providerFormError, setProviderFormError] = useState<string | null>(null);
   const [importMenuOpen, setImportMenuOpen] = useState(false);
   const [importMenuPosition, setImportMenuPosition] = useState<{ x: number; y: number } | null>(null);
   const [isBusy, setIsBusy] = useState(false);
@@ -566,9 +577,12 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
   function resetProviderForm() {
     setApiKey("");
     setApiKeyVisible(false);
+    setClearApiKey(false);
+    setHasStoredApiKey(false);
     setDefaultModelId("");
     setEndpoint("https://api.openai.com");
     setError(null);
+    setProviderFormError(null);
     setModelRows([{ ...emptyModelRow }]);
     setName("OpenAI");
     setOnlySpecifiedModels(false);
@@ -587,9 +601,12 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
 
     setApiKey("");
     setApiKeyVisible(false);
+    setClearApiKey(false);
+    setHasStoredApiKey(provider.hasApiKey);
     setDefaultModelId(provider.defaultModelId ?? "");
     setEndpoint(provider.endpoint);
     setError(null);
+    setProviderFormError(null);
     setModelRows(
       models.length > 0
         ? models.map((model) => ({
@@ -625,50 +642,79 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
     }
 
     const editingProviderId = dialog.mode === "edit" ? dialog.providerId : undefined;
-    const models = modelRows
-      .map(toModelInput)
-      .filter((model): model is NonNullable<typeof model> => Boolean(model));
-
     setError(null);
+    setProviderFormError(null);
     setIsBusy(true);
 
     let providerId: string;
     try {
+      if (providerTokenizerMode === "custom" && !tokenizerJson.trim()) {
+        throw new Error("Choose a provider tokenizer.json path or URL.");
+      }
+
+      const models = modelRows
+        .map(toModelInput)
+        .filter((model): model is NonNullable<typeof model> => Boolean(model));
+      const duplicateModelId = models.find(
+        (model, index) => models.findIndex((entry) => entry.modelId === model.modelId) !== index,
+      )?.modelId;
+
+      if (duplicateModelId) {
+        throw new Error(`Model ID ${duplicateModelId} is listed more than once.`);
+      }
+
+      if (onlySpecifiedModels && models.length === 0) {
+        throw new Error("Add at least one model when using only manually specified models.");
+      }
+
       providerId = await upsertProvider({
-        apiKey: apiKey.trim() || undefined,
+        apiKey: clearApiKey ? "" : apiKey.trim() || undefined,
         defaultModelId: defaultModelId.trim() || undefined,
         endpoint,
         id: editingProviderId,
-        models: models.length > 0 ? models : undefined,
+        models,
         name,
         onlySpecifiedModels,
+        replaceModels: Boolean(editingProviderId) || onlySpecifiedModels,
         providerType,
         tokenizerJson:
           providerTokenizerMode === "custom" ? tokenizerJson.trim() || undefined : undefined,
       });
-
-      await reloadProviderConfig();
-      resetProviderForm();
-      closeDialog();
-      showToast(editingProviderId ? "Provider saved." : "Provider added.");
     } catch (caughtError) {
-      setError(normalizeError(caughtError, "Provider could not be saved."));
+      const message = normalizeError(caughtError, "Provider could not be saved.");
+      setError(message);
+      setProviderFormError(message);
       setIsBusy(false);
       return;
     }
 
-    if (!onlySpecifiedModels) {
+    let refreshError: string | null = null;
+    if (!editingProviderId && !onlySpecifiedModels) {
       try {
         await refreshProviderModels(providerId, { fetchAll: true, removeInvalid: false });
-        await reloadProviderConfig();
       } catch (caughtError) {
-        const refreshError = normalizeError(caughtError, "Unknown refresh error.");
-        setError(`Provider saved, but its model catalog could not be refreshed: ${refreshError}`);
-        showToast(`Provider saved, but catalog refresh failed: ${refreshError}`);
+        refreshError = normalizeError(caughtError, "Unknown refresh error.");
       }
     }
 
-    setIsBusy(false);
+    try {
+      await reloadProviderConfig();
+      resetProviderForm();
+      closeDialog();
+      if (refreshError) {
+        const message = `Provider saved, but catalog refresh failed: ${refreshError}`;
+        setError(message);
+        showToast(message);
+      } else {
+        showToast(editingProviderId ? "Provider saved." : "Provider added.");
+      }
+    } catch (caughtError) {
+      const message = normalizeError(caughtError, "Provider saved, but the provider list could not be reloaded.");
+      setError(message);
+      setProviderFormError(message);
+    } finally {
+      setIsBusy(false);
+    }
   }
 
   async function handleConfirmRefresh() {
@@ -911,11 +957,12 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                   <button
                     className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--color-border)] px-3 text-[13px] font-normal leading-none tracking-normal text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                     onClick={() => {
+                      setError(null);
                       setDialog({
                         type: "refresh-models",
                         providerId: provider.id,
                         providerName: provider.name,
-                        fetchAll: false,
+                        fetchAll: true,
                         removeInvalid: false,
                       });
                     }}
@@ -927,14 +974,15 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                   <button
                     className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[color-mix(in_srgb,var(--color-danger)_45%,transparent)] px-3 text-[13px] font-normal leading-none tracking-normal text-[var(--color-danger)] transition hover:bg-[var(--color-panel-hover)] disabled:opacity-50"
                     disabled={deletingProviderId !== null}
-                    onClick={() =>
+                    onClick={() => {
+                      setError(null);
                       setDialog({
                         type: "delete-provider",
                         providerId: provider.id,
                         providerName: provider.name,
                         modelCount: providerModelCounts.get(provider.id) ?? provider.modelCount,
-                      })
-                    }
+                      });
+                    }}
                     type="button"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
@@ -972,6 +1020,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                 className="flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-[var(--color-text)] transition hover:bg-[var(--color-panel-hover)]"
                 onClick={() => {
                   setImportMenuOpen(false);
+                  setError(null);
                   setDialog({ type: "import-url", value: "" });
                 }}
                 type="button"
@@ -1025,6 +1074,11 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
             placeholder="https://example.com/providers.yaml"
             value={dialog.value}
           />
+          {error ? (
+            <p className="mt-3 rounded-2xl border border-[var(--color-danger)] px-3 py-2 text-[12px] text-[var(--color-danger)]">
+              {error}
+            </p>
+          ) : null}
         </AppDialog>
       ) : null}
 
@@ -1070,7 +1124,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
               <span>
                 <span className="font-medium text-[var(--color-text)]">Fetch all models</span>
                 <span className="mt-0.5 block text-[12px] text-[var(--color-text-tertiary)]">
-                  Upsert every model returned by the provider catalog.
+                  Add models that are missing locally. Existing custom metadata is preserved.
                 </span>
               </span>
             </label>
@@ -1086,11 +1140,16 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
               <span>
                 <span className="font-medium text-[var(--color-text)]">Remove invalid models</span>
                 <span className="mt-0.5 block text-[12px] text-[var(--color-text-tertiary)]">
-                  Drop local models that are not present on the remote catalog.
+                  Drop local models, including manual ones, that are not present on the remote catalog.
                 </span>
               </span>
             </label>
           </div>
+          {error ? (
+            <p className="mt-3 rounded-2xl border border-[var(--color-danger)] px-3 py-2 text-[12px] text-[var(--color-danger)]">
+              {error}
+            </p>
+          ) : null}
         </AppDialog>
       ) : null}
 
@@ -1122,7 +1181,13 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
             if (!deletingProviderId) closeDialog();
           }}
           title="Delete provider?"
-        />
+        >
+          {error ? (
+            <p className="rounded-2xl border border-[var(--color-danger)] px-3 py-2 text-[12px] text-[var(--color-danger)]">
+              {error}
+            </p>
+          ) : null}
+        </AppDialog>
       ) : null}
 
       {dialog?.type === "provider-form" ? (
@@ -1211,7 +1276,11 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
               <div className="relative">
                 <input
                   className={`${fieldClassName} pr-11`}
-                  onChange={(event) => setApiKey(event.currentTarget.value)}
+                  disabled={clearApiKey}
+                  onChange={(event) => {
+                    setApiKey(event.currentTarget.value);
+                    setClearApiKey(false);
+                  }}
                   placeholder={
                     dialog.mode === "edit" ? "New API key (blank keeps current)" : "API key"
                   }
@@ -1227,6 +1296,19 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                   {apiKeyVisible ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
                 </button>
               </div>
+              {dialog.mode === "edit" && hasStoredApiKey ? (
+                <label className="mt-2 flex items-center gap-2 text-[11px] text-[var(--color-text-tertiary)]">
+                  <input
+                    checked={clearApiKey}
+                    onChange={(event) => {
+                      setClearApiKey(event.currentTarget.checked);
+                      if (event.currentTarget.checked) setApiKey("");
+                    }}
+                    type="checkbox"
+                  />
+                  Remove the stored API key
+                </label>
+              ) : null}
             </div>
             <div>
               <FieldLabel>Tokenizer kind</FieldLabel>
@@ -1264,14 +1346,20 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
             )}
           </div>
 
-          <label className="mt-4 flex items-center gap-2 text-[13px] text-[var(--color-text-secondary)]">
-            <input
-              checked={onlySpecifiedModels}
-              onChange={(event) => setOnlySpecifiedModels(event.currentTarget.checked)}
-              type="checkbox"
-            />
-            Use only the manually specified models below
-          </label>
+          {dialog.mode === "add" ? (
+            <label className="mt-4 flex items-center gap-2 text-[13px] text-[var(--color-text-secondary)]">
+              <input
+                checked={onlySpecifiedModels}
+                onChange={(event) => setOnlySpecifiedModels(event.currentTarget.checked)}
+                type="checkbox"
+              />
+              Use only the manually specified models below (skip catalog discovery)
+            </label>
+          ) : (
+            <p className="mt-4 text-[12px] text-[var(--color-text-tertiary)]">
+              Saving keeps exactly the models listed below. Use Refresh to sync the remote catalog.
+            </p>
+          )}
 
           <div className="mt-4 space-y-3">
             <div className="flex items-center justify-between">
@@ -1322,8 +1410,12 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                   <FieldLabel>Max context</FieldLabel>
                   <input
                     className={modelFieldClassName}
+                    inputMode="numeric"
+                    min={1}
                     onChange={(event) => patchModelRow({ maxContext: event.currentTarget.value })}
                     placeholder="Max context"
+                    step={1}
+                    type="number"
                     value={row.maxContext}
                   />
                 </div>
@@ -1331,10 +1423,14 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                   <FieldLabel>Max output tokens</FieldLabel>
                   <input
                     className={modelFieldClassName}
+                    inputMode="numeric"
+                    min={1}
                     onChange={(event) =>
                       patchModelRow({ maxOutputTokens: event.currentTarget.value })
                     }
                     placeholder="Max output tokens"
+                    step={1}
+                    type="number"
                     value={row.maxOutputTokens}
                   />
                 </div>
@@ -1405,9 +1501,9 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
             })}
           </div>
 
-          {error && dialog.type === "provider-form" ? (
+          {providerFormError ? (
             <p className="mt-3 rounded-2xl border border-[var(--color-danger)] px-3 py-2 text-[12px] text-[var(--color-danger)]">
-              {error}
+              {providerFormError}
             </p>
           ) : null}
         </AppDialog>

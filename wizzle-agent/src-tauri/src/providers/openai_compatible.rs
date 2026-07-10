@@ -18,6 +18,7 @@ const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const PROVIDER_COMPLETION_TIMEOUT: Duration = Duration::from_secs(300);
 const PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const PROVIDER_CATALOG_TIMEOUT: Duration = Duration::from_secs(30);
+const PROVIDER_CATALOG_MAX_BYTES: usize = 10 * 1024 * 1024;
 pub const PROVIDER_CHAT_CHUNK_EVENT: &str = "provider-chat-chunk";
 
 pub fn completion_client() -> Result<reqwest::Client, String> {
@@ -253,11 +254,13 @@ async fn wait_before_retry(attempt: usize) {
 }
 
 fn endpoint_with_path(endpoint: &str, path: &str) -> String {
-    format!(
-        "{}/{}",
-        endpoint.trim_end_matches('/'),
-        path.trim_start_matches('/')
-    )
+    let endpoint = endpoint.trim_end_matches('/');
+    let mut path = path.trim_start_matches('/');
+    if endpoint.to_ascii_lowercase().ends_with("/v1") {
+        path = path.strip_prefix("v1/").unwrap_or(path);
+    }
+
+    format!("{}/{}", endpoint, path)
 }
 
 fn discovered_model(model_id: &str) -> ProviderModelRecord {
@@ -647,9 +650,24 @@ pub async fn fetch_models(
         return Err(map_provider_error(Some(status_code), &body, None).message);
     }
 
-    let payload = response
-        .json::<Value>()
-        .await
+    if response
+        .content_length()
+        .is_some_and(|length| length > PROVIDER_CATALOG_MAX_BYTES as u64)
+    {
+        return Err("Provider model list exceeded the 10 MB safety limit.".to_string());
+    }
+
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| map_provider_error(None, "", Some(&error)).message)?;
+        if body.len().saturating_add(chunk.len()) > PROVIDER_CATALOG_MAX_BYTES {
+            return Err("Provider model list exceeded the 10 MB safety limit.".to_string());
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let payload = serde_json::from_slice::<Value>(&body)
         .map_err(|_| "Provider returned an invalid model list.".to_string())?;
     let data = payload
         .get("data")
@@ -657,13 +675,15 @@ pub async fn fetch_models(
         .ok_or_else(|| "Provider returned an invalid model list.".to_string())?;
 
     let mut models = Vec::new();
+    let mut seen_model_ids = std::collections::HashSet::new();
 
     for entry in data {
         let Some(model_id) = entry.get("id").and_then(Value::as_str) else {
             continue;
         };
 
-        if model_id.trim().is_empty() {
+        let model_id = model_id.trim();
+        if model_id.is_empty() || !seen_model_ids.insert(model_id.to_string()) {
             continue;
         }
 
@@ -691,8 +711,8 @@ pub async fn fetch_models(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_request_body, discovered_model, extract_finish_reason, map_provider_error,
-        resolve_reasoning_effort, resolve_stream_completion,
+        build_request_body, discovered_model, endpoint_with_path, extract_finish_reason,
+        map_provider_error, resolve_reasoning_effort, resolve_stream_completion,
     };
     use crate::providers::types::{
         ProviderModelRecord, ProviderResolvedModel, ProviderSecretRecord,
@@ -720,6 +740,22 @@ mod tests {
                 provider_type: "openai_compatible".to_string(),
             },
         }
+    }
+
+    #[test]
+    fn provider_endpoint_accepts_hosts_and_v1_api_bases() {
+        assert_eq!(
+            endpoint_with_path("https://api.example.test", "/v1/models"),
+            "https://api.example.test/v1/models"
+        );
+        assert_eq!(
+            endpoint_with_path("https://api.example.test/v1/", "/v1/models"),
+            "https://api.example.test/v1/models"
+        );
+        assert_eq!(
+            endpoint_with_path("https://api.example.test/api/v1", "/v1/chat/completions"),
+            "https://api.example.test/api/v1/chat/completions"
+        );
     }
 
     #[test]

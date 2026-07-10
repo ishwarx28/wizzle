@@ -26,6 +26,7 @@ import {
   updateSessionTitle,
   setSessionRuntimeState,
   wakeSessionRun,
+  upsertSessionEvent,
   upsertTurnSummary as persistTurnSummary,
 } from "../lib/local-workspace";
 import {
@@ -60,6 +61,7 @@ import { buildTurnReplaySummary } from "../lib/context-budget";
 import {
   beginContextCompaction,
   completeContextCompaction,
+  createContextCompactionEvent,
   type ContextCompactionStatus,
 } from "../lib/context-status";
 import { formatPromptTooLargeError, isPromptOverLimit, resolvePromptMaxChars } from "../lib/prompt-size";
@@ -105,6 +107,7 @@ import type {
   ProviderInfo,
   ProviderModelInfo,
   Session,
+  SessionEvent,
   ToolApprovalRequest,
   WorkspaceSnapshot,
 } from "../types/workspace";
@@ -293,8 +296,18 @@ function mergeHydratedSession(local: Session | undefined, loaded: Session): Sess
 
   const loadedIds = new Set(loaded.messages.map((message) => message.id));
   const extras = local.messages.filter((message) => !loadedIds.has(message.id));
+  const loadedEventIds = new Set((loaded.events ?? []).map((event) => event.id));
+  const extraEvents = (local.events ?? []).filter((event) => !loadedEventIds.has(event.id));
   if (extras.length === 0) {
-    return { ...loaded, messagesLoaded: true };
+    return {
+      ...loaded,
+      events: [...(loaded.events ?? []), ...extraEvents].sort(
+        (left, right) =>
+          left.afterMessageCount - right.afterMessageCount ||
+          left.createdAtMs - right.createdAtMs,
+      ),
+      messagesLoaded: true,
+    };
   }
 
   const mergedMessages = [...loaded.messages, ...extras].sort(
@@ -303,6 +316,11 @@ function mergeHydratedSession(local: Session | undefined, loaded: Session): Sess
 
   return {
     ...loaded,
+    events: [...(loaded.events ?? []), ...extraEvents].sort(
+      (left, right) =>
+        left.afterMessageCount - right.afterMessageCount ||
+        left.createdAtMs - right.createdAtMs,
+    ),
     messages: mergedMessages,
     messagesLoaded: true,
   };
@@ -416,6 +434,7 @@ function buildDraftSession(projectId: string): Session {
 
   return {
     createdAtMs: timestamp,
+    events: [],
     id: `draft-${projectId}`,
     messagesLoaded: true,
     messages: [],
@@ -581,6 +600,26 @@ function mergeLinkedFileIds(...groups: Array<string[] | undefined>) {
   }
 
   return Array.from(mergedIds);
+}
+
+function upsertSessionEventInList(events: SessionEvent[] | undefined, event: SessionEvent) {
+  const nextEvents = [...(events ?? [])];
+  const existingIndex = nextEvents.findIndex((entry) => entry.id === event.id);
+  if (existingIndex >= 0) {
+    nextEvents[existingIndex] = event;
+  } else {
+    nextEvents.push(event);
+  }
+
+  return nextEvents.sort(
+    (left, right) =>
+      left.afterMessageCount - right.afterMessageCount || left.createdAtMs - right.createdAtMs,
+  );
+}
+
+function compactionAnchorMessageCount(messages: Message[], turnId: string) {
+  const turnStartIndex = messages.findIndex((message) => message.turnId === turnId);
+  return turnStartIndex >= 0 ? turnStartIndex : messages.length;
 }
 
 function getTurnMessageRange(messages: Message[], target: Pick<MessageEditState, "messageId" | "turnId">) {
@@ -1428,6 +1467,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         const timestamp = Date.now();
         const nextProjects = prependPersistedSession(state.projects, targetProjectId, {
           createdAtMs: timestamp,
+          events: [],
           id: targetSessionId,
           messages: [userMessage, createPendingAssistantPlaceholder(turnId)],
           messagesLoaded: true,
@@ -2649,60 +2689,67 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
               }
             }
 
-            if (status === "interrupted") {
-              const toolMessagesByCallId = new Set(
-                sessionEntry.messages
-                  .filter((message) => message.turnId === turnId && message.role === "tool")
-                  .map((message) => message.toolCallId)
-                  .filter((toolCallId): toolCallId is string => Boolean(toolCallId)),
-              );
+            const toolMessagesByCallId = new Set(
+              sessionEntry.messages
+                .filter((message) => message.turnId === turnId && message.role === "tool")
+                .map((message) => message.toolCallId)
+                .filter((toolCallId): toolCallId is string => Boolean(toolCallId)),
+            );
+            const missingToolStatus = status === "interrupted" ? "interrupted" : "error";
+            const missingToolReason =
+              status === "interrupted"
+                ? "User interrupted"
+                : status === "error"
+                  ? "Tool was not executed because the turn failed."
+                  : "Tool was not executed before the turn completed.";
 
-              for (const assistantMessage of assistantMessages) {
-                for (const toolCall of assistantMessage.toolCalls ?? []) {
-                  if (toolMessagesByCallId.has(toolCall.id)) {
-                    continue;
-                  }
-
-                  const toolMessageId = `message-tool-${toolCall.id}`;
-                  sessionEntry.messages.push({
-                    content: "User interrupted",
-                    completedAtMs,
-                    createdAtLabel: formatExactMessageTimestamp(completedAtMs),
-                    createdAtMs: completedAtMs,
-                    id: toolMessageId,
-                    parts: [
-                      {
-                        createdAtMs: completedAtMs,
-                        error: "User interrupted",
-                        id: `${toolMessageId}-result`,
-                        metadata: {
-                          arguments: toolCall.input,
-                          finishedAtMs: completedAtMs,
-                          projectId: targetProjectId,
-                          startedAtMs:
-                            assistantToolCallMetadata.get(toolCall.id)?.startedAtMs ?? completedAtMs,
-                          status: "interrupted",
-                          toolName: toolCall.name,
-                        },
-                        name: toolCall.name,
-                        output: "User interrupted",
-                        parentPartId:
-                          assistantToolCallMetadata.get(toolCall.id)?.parentPartId ??
-                          `${assistantMessage.id}-tool-call-${toolCall.id}`,
-                        status: "interrupted",
-                        toolCallId: toolCall.id,
-                        type: "tool_result",
-                      },
-                    ],
-                    role: "tool",
-                    startedAtMs: completedAtMs,
-                    status: "interrupted",
-                    toolCallId: toolCall.id,
-                    toolName: toolCall.name,
-                    turnId,
-                  });
-                  toolMessagesByCallId.add(toolCall.id);
+            // Defensive repair: a terminal turn must never persist an assistant tool call
+            // without a matching tool message, even if an earlier callback failed.
+            for (const assistantMessage of assistantMessages) {
+              for (const toolCall of assistantMessage.toolCalls ?? []) {
+                if (toolMessagesByCallId.has(toolCall.id)) {
+                  continue;
                 }
+
+                const toolMessageId = `message-tool-${toolCall.id}`;
+                sessionEntry.messages.push({
+                  content: missingToolReason,
+                  completedAtMs,
+                  createdAtLabel: formatExactMessageTimestamp(completedAtMs),
+                  createdAtMs: completedAtMs,
+                  id: toolMessageId,
+                  parts: [
+                    {
+                      createdAtMs: completedAtMs,
+                      error: missingToolReason,
+                      id: `${toolMessageId}-result`,
+                      metadata: {
+                        arguments: toolCall.input,
+                        finishedAtMs: completedAtMs,
+                        projectId: targetProjectId,
+                        startedAtMs:
+                          assistantToolCallMetadata.get(toolCall.id)?.startedAtMs ?? completedAtMs,
+                        status: missingToolStatus,
+                        toolName: toolCall.name,
+                      },
+                      name: toolCall.name,
+                      output: missingToolReason,
+                      parentPartId:
+                        assistantToolCallMetadata.get(toolCall.id)?.parentPartId ??
+                        `${assistantMessage.id}-tool-call-${toolCall.id}`,
+                      status: missingToolStatus,
+                      toolCallId: toolCall.id,
+                      type: "tool_result",
+                    },
+                  ],
+                  role: "tool",
+                  startedAtMs: completedAtMs,
+                  status: missingToolStatus,
+                  toolCallId: toolCall.id,
+                  toolName: toolCall.name,
+                  turnId,
+                });
+                toolMessagesByCallId.add(toolCall.id);
               }
             }
 
@@ -3070,20 +3117,58 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
             targetProjectId,
             targetSessionId as string,
           );
-          const messageCount = session?.messages.length ?? 0;
+          const anchorMessageCount = compactionAnchorMessageCount(session?.messages ?? [], turnId);
+          const event = createContextCompactionEvent("compacting", anchorMessageCount);
           set((current) => ({
+            projects: updatePersistedSession(
+              current.projects,
+              targetProjectId,
+              targetSessionId as string,
+              (sessionEntry) => {
+                sessionEntry.events = upsertSessionEventInList(sessionEntry.events, event);
+              },
+            ) ?? current.projects,
             sessionContextStatus: {
               ...current.sessionContextStatus,
               [targetSessionId as string]: beginContextCompaction(
                 current.sessionContextStatus[targetSessionId as string],
-                messageCount,
+                anchorMessageCount,
+                event.createdAtMs,
+                event.id,
               ),
             },
           }));
+          void upsertSessionEvent({
+            event,
+            sessionId: targetSessionId as string,
+          }).catch((error) => {
+            frontendLogger.error("frontend.workspace", "context_event_persist_failed", {
+              error,
+              phase: event.phase,
+              sessionIdLength: (targetSessionId as string).length,
+            });
+          });
           void setSessionRuntimeState(targetSessionId as string, "compacting").catch(() => undefined);
         },
         onCompactedContext: async (compactedContext) => {
           let compactedSession: Session | null = null;
+          const latestState = useWorkspaceStore.getState();
+          const previousStatus = latestState.sessionContextStatus[targetSessionId as string];
+          const latestSession = resolvePersistedSession(
+            latestState.projects,
+            targetProjectId,
+            targetSessionId as string,
+          );
+          const existingEvent = previousStatus?.eventId
+            ? latestSession?.events?.find((entry) => entry.id === previousStatus.eventId)
+            : null;
+          const event = existingEvent
+            ? { ...existingEvent, phase: "compacted" as const, updatedAtMs: Date.now() }
+            : createContextCompactionEvent(
+                "compacted",
+                previousStatus?.afterMessageCount ??
+                  compactionAnchorMessageCount(latestSession?.messages ?? [], turnId),
+              );
           set((state) => {
             const nextProjects = updatePersistedSession(
               state.projects,
@@ -3091,6 +3176,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
               targetSessionId as string,
               (sessionEntry) => {
                 sessionEntry.compactedContext = compactedContext;
+                sessionEntry.events = upsertSessionEventInList(sessionEntry.events, event);
                 sessionEntry.updatedAtLabel = nowLabel();
                 sessionEntry.updatedAtMs = Date.now();
                 compactedSession = sessionEntry;
@@ -3106,6 +3192,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
                 ),
               },
             };
+          });
+
+          void upsertSessionEvent({
+            event,
+            sessionId: targetSessionId as string,
+          }).catch((error) => {
+            frontendLogger.error("frontend.workspace", "context_event_persist_failed", {
+              error,
+              phase: event.phase,
+              sessionIdLength: (targetSessionId as string).length,
+            });
           });
 
           if (compactedSession) {

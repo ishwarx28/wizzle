@@ -43,8 +43,8 @@ export function formatEnvironmentImageSupportLine(imageCapable: boolean) {
 
 export function resolveReadToolDescription(imageCapable: boolean) {
   if (imageCapable) {
-    return "Read a text or image file from the selected project, or a markdown skill file from ~/.wizzle/skills/. You can request a specific line range for text files. If the file is an image (png, jpg, jpeg, gif, webp, bmp, svg, avif), the result includes the image data you can view and analyze.";
+    return "Read a text or image file from the selected project, or a markdown skill file from ~/.wizzle/skills/. Text files are returned as full content when small, or as paged text pages for large files. Use offset and limit to page through large files. If the file is an image (png, jpg, jpeg, gif, webp, bmp, svg, avif), the result includes the image data you can view and analyze.";
   }
 
-  return "Read a text file from the selected project, or a markdown skill file from ~/.wizzle/skills/. You can request a specific line range. Image support is disabled for this model (see environment: image: disabled). Do not use read on image files (png, jpg, jpeg, gif, webp, bmp, svg, avif, etc.).";
+  return "Read a text file from the selected project, or a markdown skill file from ~/.wizzle/skills/. Text files are returned as full content when small, or as paged text pages for large files. Use offset and limit to page through large files. Image support is disabled for this model (see environment: image: disabled). Do not use read on image files (png, jpg, jpeg, gif, webp, bmp, svg, avif, etc.).";
 }

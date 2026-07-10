@@ -8,15 +8,11 @@ import type { Message } from "../../types/workspace";
 /** Short identity system prompt for the pressure forced-final call only. */
 export const CONTEXT_PRESSURE_SYSTEM_PROMPT = [
   "You are Wizzle, a desktop coding agent.",
-  "Help the user based on the conversation so far.",
-  "Be concise and direct.",
+  "Give a brief status based on the current findings for the latest user task.",
+  "Be concise, direct, and distinguish completed work from remaining work.",
   "Do not call tools.",
   "Do not restate the entire history.",
 ].join("\n");
-
-/** Nudge appended for the pressure forced-final model call. */
-export const CONTEXT_PRESSURE_FINAL_NUDGE =
-  "Give a brief response based on current findings of last user request / task";
 
 /** Auto-continue user prompt after pressure settle + compaction opportunity. */
 export const CONTEXT_CONTINUE_PROMPT =
@@ -73,8 +69,8 @@ export function pickFinalAssistantMessage(messages: readonly Message[]): Message
     .reverse()
     .find((message) => message.assistantPhase === "final");
 
-  if (withFinalPhase && hasUsableAssistantText(withFinalPhase)) {
-    return stripToolActivity(withFinalPhase);
+  if (withFinalPhase) {
+    return hasUsableAssistantText(withFinalPhase) ? stripToolActivity(withFinalPhase) : null;
   }
 
   const withContent = [...assistants]
@@ -96,7 +92,13 @@ export function extractUserAndFinalMessages(messages: readonly Message[]): Messa
 }
 
 function hasUsableAssistantText(message: Message) {
-  return Boolean(message.content?.trim());
+  const content = message.content?.trim() ?? "";
+
+  return Boolean(
+    content &&
+      !containsRawToolSyntax(content) &&
+      !content.startsWith("Context filled up during this turn."),
+  );
 }
 
 function stripToolActivity(message: Message): Message {
@@ -108,10 +110,13 @@ function stripToolActivity(message: Message): Message {
   };
 }
 
-/**
- * History for pressure final when full active turn (with tools) is too large:
- * drop tool-role messages so the model still sees user + assistant text.
- */
-export function stripToolRoleMessages(history: readonly Message[]): Message[] {
-  return history.filter((message) => message.role !== "tool");
+/** Provider-native tool markup must never be accepted as a user-facing final. */
+export function containsRawToolSyntax(content: string) {
+  const normalized = content.trim();
+
+  return (
+    /<[^>]*DSML[^>]*tool_calls[^>]*>/iu.test(normalized) ||
+    /<tool_calls?>/iu.test(normalized) ||
+    (/<invoke\s+name=/iu.test(normalized) && /<parameter\s+name=/iu.test(normalized))
+  );
 }

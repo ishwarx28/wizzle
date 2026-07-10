@@ -102,11 +102,32 @@ function testNonToolRouter() {
   assert(assistant.status === "interrupted", "streaming assistant interrupted");
 }
 
+function testDoneTurnDoesNotPromotePendingToolCall() {
+  const assistant = baseAssistant({
+    parts: [
+      {
+        createdAtMs: 1,
+        id: "tool-call-pending",
+        name: "read",
+        status: "pending",
+        toolCallId: "call-pending",
+        type: "tool_call",
+      },
+    ],
+    status: "done",
+    toolCalls: [{ id: "call-pending", name: "read", status: "pending" }],
+  });
+
+  settleAssistantMessageFields(assistant, "done", 100);
+  assert(assistant.parts?.[0]?.status === "error", "pending tool call cannot settle as done");
+}
+
 async function main() {
   testUserKeepsDoneAndDropsAssistantPhase();
   testCompletedAssistantNotRewrittenOnTurnError();
   testStreamingAssistantInheritsTurnError();
   testNonToolRouter();
+  testDoneTurnDoesNotPromotePendingToolCall();
   console.log("settle-turn-status tests passed");
 }
 

@@ -52,7 +52,18 @@ export function buildReadToolDefinition(imageCapable: boolean): WizzleToolDefini
     parameters: {
       additionalProperties: false,
       properties: {
-        endLine: {
+        limit: {
+          default: 2000,
+          description:
+            "Maximum number of lines to return. Capped at 2000.",
+          maximum: 2000,
+          minimum: 1,
+          type: "integer",
+        },
+        offset: {
+          default: 1,
+          description:
+            "1-based line number to start reading from when paging through a text file.",
           minimum: 1,
           type: "integer",
         },
@@ -60,10 +71,6 @@ export function buildReadToolDefinition(imageCapable: boolean): WizzleToolDefini
           description:
             "Path to read, relative to the selected project root unless absolute. Global skill files under ~/.wizzle/skills/ are also allowed.",
           type: "string",
-        },
-        startLine: {
-          minimum: 1,
-          type: "integer",
         },
       },
       required: ["path"],

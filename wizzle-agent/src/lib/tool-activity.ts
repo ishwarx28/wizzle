@@ -11,25 +11,27 @@ export type ParsedToolPayload = {
   created?: boolean;
   cwd?: string;
   diffTruncated?: boolean;
-  endLine?: number;
   error?: string;
   exitCode?: number | null;
   imageSrc?: string;
+  limit?: number;
+  mime?: string;
   mimeType?: string;
+  next?: number;
   ok?: boolean;
+  offset?: number;
   path?: string;
   process?: {
     id?: string;
     status?: string;
   } | null;
   replacements?: number;
-  startLine?: number;
   status?: string;
   stderr?: string;
   stdout?: string;
   timedOut?: boolean;
   timeout?: string;
-  totalLines?: number;
+  type?: string;
   truncated?: boolean;
 };
 
@@ -195,6 +197,25 @@ function buildToolCallMap(parts: MessagePart[]) {
   return toolCallsById;
 }
 
+function resolveToolBatchKey(
+  part: MessagePart,
+  toolCallsById: Map<string, MessagePart>,
+) {
+  const toolCallId = part.toolCallId ?? part.id;
+
+  if (part.type === "tool_call") {
+    return part.parentPartId ?? part.id;
+  }
+
+  const toolCallPart = toolCallsById.get(toolCallId);
+
+  if (toolCallPart) {
+    return toolCallPart.parentPartId ?? toolCallPart.id;
+  }
+
+  return `orphan-${part.parentPartId ?? toolCallId}`;
+}
+
 function createToolRunEntry(
   toolCallPart: MessagePart | undefined,
   toolResult: ToolResult | undefined,
@@ -273,11 +294,16 @@ export function buildActivitySegments(parts: MessagePart[]): ActivitySegment[] {
 
     const runs: ToolRunEntry[] = [];
     const blockRunIds = new Set<string>();
+    const blockBatchKey = resolveToolBatchKey(part, toolCallsById);
 
     while (index < parts.length) {
       const currentPart = parts[index]!;
 
       if (currentPart.type !== "tool_call" && currentPart.type !== "tool_result") {
+        break;
+      }
+
+      if (resolveToolBatchKey(currentPart, toolCallsById) !== blockBatchKey) {
         break;
       }
 

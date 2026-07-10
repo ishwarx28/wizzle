@@ -23,10 +23,9 @@ import {
   type ForcedFinalOutcome,
 } from "./agent/forced-final";
 import {
-  CONTEXT_PRESSURE_FINAL_NUDGE,
   CONTEXT_PRESSURE_SYSTEM_PROMPT,
+  containsRawToolSyntax,
   shouldEnterContextPressure,
-  stripToolRoleMessages,
   type WorkspaceAgentRunResult,
 } from "./agent/context-pressure";
 import {
@@ -38,6 +37,7 @@ import {
 } from "./agent/compaction-failure";
 import { createRejectedToolPayload, createToolApprovalRequest } from "./tool-approval";
 import { resolvePostStreamAssistantAction } from "./agent/assistant-stream-finish";
+import { findIncompleteToolCallIds } from "./agent/tool-batch";
 import { normalizeStreamedToolCalls, streamAgentTurn } from "./agent/stream-turn";
 import {
   buildCompactedContextMessage,
@@ -48,6 +48,7 @@ import {
   buildChatMessages,
   INTERRUPTED_WORKSPACE_CHAT_ERROR,
   type ChatRequestMessage,
+  type ProxyToolDefinition,
 } from "./chat-stream";
 import {
   buildReplayBlocks,
@@ -210,9 +211,10 @@ async function requestForcedFinalResponse(options: {
   onReasoningFinished?: (messageId: string) => void;
   onAssistantStreamFinished: (messageId: string, phase: AssistantPhase) => void;
   projectId: string;
-  prompt: string;
+  prompt?: string;
   reasoningLevel?: string | null;
   step: number;
+  tools: ProxyToolDefinition[];
   turnId: string;
 }): Promise<ForcedFinalOutcome> {
   const finalAssistantMessage = createAssistantMessage(options.turnId);
@@ -224,31 +226,34 @@ async function requestForcedFinalResponse(options: {
   try {
     const finalTurn = await streamAgentTurn({
       chatId: options.chatId,
-      conversation: [
-        ...options.conversation,
-        {
-          content: options.prompt,
-          role: "system",
-        },
-      ],
+      conversation: options.prompt
+        ? [
+            ...options.conversation,
+            {
+              content: options.prompt,
+              role: "system",
+            },
+          ]
+        : options.conversation,
       modelId: options.modelId,
       onChunk: (chunk) => {
         if (chunk.kind === "content") {
           streamedContent += chunk.text;
         }
-        options.onAssistantChunk({
-          ...chunk,
-          messageId: finalAssistantMessage.id,
-        });
       },
       onReasoningFinished: () => options.onReasoningFinished?.(finalAssistantMessage.id),
       projectId: options.projectId,
       reasoningLevel: options.reasoningLevel,
-      tools: [],
+      toolChoice: "none",
+      tools: options.tools,
       turnIndex: options.step,
       toToolCallState: createToolCallState,
     });
     streamedContent = finalTurn.content || streamedContent;
+    if (finalTurn.toolCalls.length > 0 || containsRawToolSyntax(streamedContent)) {
+      streamedContent = "";
+      throw new Error("The model returned tool syntax instead of a user-facing final response.");
+    }
   } catch (error) {
     streamError = error;
     frontendLogger.error("frontend.agent", "forced_final_response_failed", {
@@ -264,8 +269,8 @@ async function requestForcedFinalResponse(options: {
     streamedContent,
   });
 
-  // Inject fallback only when the stream left the assistant empty.
-  if (outcome.kind !== "ok" && !streamedContent.trim()) {
+  // Forced finals are buffered until validated so raw provider tool syntax is never persisted.
+  if (outcome.content.trim()) {
     options.onAssistantChunk({
       kind: "content",
       messageId: finalAssistantMessage.id,
@@ -566,53 +571,19 @@ export async function runWorkspaceAgent(options: {
 
   const buildContextPressureConversation = async (): Promise<ChatRequestMessage[]> => {
     const shortSystem = CONTEXT_PRESSURE_SYSTEM_PROMPT;
-
-    const tryBuild = async (history: Message[]) => {
-      const selectOptions = {
-        history,
-        systemPrompt: shortSystem,
-        tools: [] as typeof tools,
-      };
-      let selection = selectConversation(selectOptions);
-      if (selection.droppedTurnIds.length > 0) {
-        selection = await compactDroppedTurns(selection, history, selectOptions);
-      }
-      return buildConversation({
-        compactedContext,
-        history: selection.messages,
-        modelCapabilities: options.modelCapabilities,
-        previewFileMap: options.previewFileMap,
-        systemPrompt: shortSystem,
-      });
+    const selectOptions = {
+      history: conversationHistory,
+      systemPrompt: shortSystem,
+      tools,
     };
-
-    try {
-      return await tryBuild(conversationHistory);
-    } catch (error) {
-      if (!isReplayBudgetError(error) && !isCompactionFailureError(error)) {
-        throw error;
-      }
-      frontendLogger.info("frontend.agent", "context_pressure_retry_without_tools", {
-        turnIdLength: options.turnId.length,
-      });
+    let selection = selectConversation(selectOptions);
+    if (selection.droppedTurnIds.length > 0) {
+      selection = await compactDroppedTurns(selection, conversationHistory, selectOptions);
     }
 
-    const slimHistory = stripToolRoleMessages(conversationHistory);
-    try {
-      return await tryBuild(slimHistory);
-    } catch (error) {
-      if (!isReplayBudgetError(error) && !isCompactionFailureError(error)) {
-        throw error;
-      }
-      frontendLogger.info("frontend.agent", "context_pressure_retry_active_only", {
-        turnIdLength: options.turnId.length,
-      });
-    }
-
-    const activeOnly = slimHistory.filter((message) => message.turnId === options.turnId);
     return buildConversation({
       compactedContext,
-      history: activeOnly.length > 0 ? activeOnly : slimHistory.slice(-6),
+      history: selection.messages,
       modelCapabilities: options.modelCapabilities,
       previewFileMap: options.previewFileMap,
       systemPrompt: shortSystem,
@@ -664,9 +635,9 @@ export async function runWorkspaceAgent(options: {
       onReasoningFinished: options.onReasoningFinished,
       onAssistantStreamFinished: options.onAssistantStreamFinished,
       projectId: options.projectId,
-      prompt: CONTEXT_PRESSURE_FINAL_NUDGE,
       reasoningLevel: options.reasoningLevel,
       step: 0,
+      tools,
       turnId: options.turnId,
     });
 
@@ -837,6 +808,7 @@ export async function runWorkspaceAgent(options: {
           prompt: FINAL_RESPONSE_SYSTEM_PROMPT,
           reasoningLevel: options.reasoningLevel,
           step: step + 1,
+          tools,
           turnId: options.turnId,
         });
         frontendLogger.info("frontend.agent", "forced_final_response_finished", {
@@ -877,17 +849,7 @@ export async function runWorkspaceAgent(options: {
         status: "pending",
       })),
     });
-    {
-      const rebuiltAfterToolsIntent = await rebuildConversationForTurn();
-      if (rebuiltAfterToolsIntent.kind === "context_pressure") {
-        return runContextPressureFinal();
-      }
-      if (rebuiltAfterToolsIntent.kind === "settled") {
-        return { finishReason: "done" };
-      }
-      conversation = rebuiltAfterToolsIntent.conversation;
-    }
-
+    let batchInterrupted = false;
     for (const item of toolCallItems) {
       const toolCall = item.toolCall;
       frontendLogger.info("frontend.agent", "tool_started", {
@@ -915,7 +877,17 @@ export async function runWorkspaceAgent(options: {
 
       let toolPayload: ToolExecutionPayload;
 
-      if (item.kind === "invalid") {
+      if (batchInterrupted) {
+        toolPayload = {
+          error: "Skipped because an earlier tool in this batch was interrupted.",
+          output: JSON.stringify({
+            error: "Skipped because an earlier tool in this batch was interrupted.",
+            interrupted: true,
+            ok: false,
+          }),
+          status: "interrupted",
+        };
+      } else if (item.kind === "invalid") {
         // #21 / #38: never execute invalid args/names as empty tools.
         frontendLogger.error("frontend.agent", "tool_call_rejected_before_run", {
           error: item.error,
@@ -1019,6 +991,9 @@ export async function runWorkspaceAgent(options: {
           : entry,
       );
       options.onAssistantToolCalls(assistantMessage.id, toolCallState);
+      if (toolPayload.status === "interrupted") {
+        batchInterrupted = true;
+      }
       conversationHistory.push(
         createToolMessage({
           parentPartId,
@@ -1029,25 +1004,34 @@ export async function runWorkspaceAgent(options: {
           turnId: options.turnId,
         }),
       );
-      {
-        const rebuiltAfterTool = await rebuildConversationForTurn();
-        if (rebuiltAfterTool.kind === "context_pressure") {
-          return runContextPressureFinal();
-        }
-        if (rebuiltAfterTool.kind === "settled") {
-          return { finishReason: "done" };
-        }
-        conversation = rebuiltAfterTool.conversation;
-      }
+    }
 
-      if (toolPayload.status === "interrupted") {
-        options.onTurnFinished({
-          finishReason: "interrupted",
-          status: "interrupted",
-          turnId: options.turnId,
-        });
-        throw new Error(INTERRUPTED_WORKSPACE_CHAT_ERROR);
+    if (batchInterrupted) {
+      options.onTurnFinished({
+        finishReason: "interrupted",
+        status: "interrupted",
+        turnId: options.turnId,
+      });
+      throw new Error(INTERRUPTED_WORKSPACE_CHAT_ERROR);
+    }
+
+    const incompleteToolCallIds = findIncompleteToolCallIds(toolCallState);
+    if (incompleteToolCallIds.length > 0) {
+      options.onTurnFinished({ finishReason: "error", status: "error", turnId: options.turnId });
+      throw new Error("The tool batch ended before every tool call received a terminal result.");
+    }
+
+    // Tool batches are context-atomic: every call receives a terminal result before
+    // replay selection can compact or enter current-turn pressure.
+    {
+      const rebuiltAfterToolBatch = await rebuildConversationForTurn();
+      if (rebuiltAfterToolBatch.kind === "context_pressure") {
+        return runContextPressureFinal();
       }
+      if (rebuiltAfterToolBatch.kind === "settled") {
+        return { finishReason: "done" };
+      }
+      conversation = rebuiltAfterToolBatch.conversation;
     }
   }
 
@@ -1070,6 +1054,7 @@ export async function runWorkspaceAgent(options: {
       prompt: FINAL_RESPONSE_AFTER_LIMIT_SYSTEM_PROMPT,
       reasoningLevel: options.reasoningLevel,
       step: maxAgentSteps,
+      tools,
       turnId: options.turnId,
     });
 

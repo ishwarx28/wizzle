@@ -289,11 +289,11 @@ type ReadToolImageContext = {
 type ReadReplayMetadata = {
   binary: boolean | null;
   contentLength: number;
-  endLine: number | null;
   fingerprint: string;
+  next: number | null;
+  offset: number | null;
   path: string;
-  startLine: number | null;
-  totalLines: number | null;
+  truncated: boolean;
 };
 
 const REDACTED_DATA_URL_MIN_LENGTH = 128;
@@ -402,15 +402,15 @@ function parseReadReplayMetadata(content: string): ReadReplayMetadata | null {
     return null;
   }
 
-  const startLine = getNumberField(parsed, "startLine");
-  const endLine = getNumberField(parsed, "endLine");
-  const totalLines = getNumberField(parsed, "totalLines");
+  const isTextPage = parsed.type === "text-page";
+  const offset = isTextPage ? getNumberField(parsed, "offset") : null;
+  const next = isTextPage ? getNumberField(parsed, "next") : null;
+  const truncated = isTextPage && parsed.truncated === true;
   const binary = typeof parsed.binary === "boolean" ? parsed.binary : null;
   const normalizedPath = path.replace(/\\/g, "/");
   const fingerprint = [
     normalizedPath,
-    startLine ?? "all-start",
-    endLine ?? "all-end",
+    offset ?? "full",
     contentForHash.length,
     hashString(contentForHash),
   ].join(":");
@@ -418,11 +418,11 @@ function parseReadReplayMetadata(content: string): ReadReplayMetadata | null {
   return {
     binary,
     contentLength: contentForHash.length,
-    endLine,
     fingerprint,
+    next,
+    offset,
     path,
-    startLine,
-    totalLines,
+    truncated,
   };
 }
 
@@ -465,9 +465,9 @@ function buildDuplicateReadReplayContent(content: string) {
 
   if (metadata) {
     payload.path = metadata.path;
-    payload.startLine = metadata.startLine;
-    payload.endLine = metadata.endLine;
-    payload.totalLines = metadata.totalLines;
+    payload.offset = metadata.offset;
+    payload.next = metadata.next;
+    payload.truncated = metadata.truncated;
     payload.binary = metadata.binary;
     payload.omittedContentLength = metadata.contentLength;
   }

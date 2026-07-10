@@ -19,6 +19,7 @@ import type {
   ProviderModelInfo,
   SessionRuntimeState,
   Session,
+  SessionEvent,
   WorkspaceProcess,
   WorkspaceComposerState,
   WorkspaceSessionLoad,
@@ -137,6 +138,7 @@ export async function upsertProvider(input: {
   }>;
   name: string;
   onlySpecifiedModels?: boolean;
+  replaceModels?: boolean;
   providerType: string;
   tokenizerJson?: string;
 }) {
@@ -368,6 +370,17 @@ function buildPersistedTurnSummaries(turnSummaries: PersistedTurnSummaryRecord[]
   }));
 }
 
+function buildPersistedSessionEvents(events: SessionEvent[] | undefined) {
+  return (events ?? []).map((event) => ({
+    afterMessageCount: event.afterMessageCount,
+    createdAtMs: event.createdAtMs,
+    id: event.id,
+    phase: event.phase,
+    type: event.type,
+    updatedAtMs: event.updatedAtMs,
+  }));
+}
+
 export async function reconcileEntireSessionForExplicitEditOrRepair(input: {
   previewFiles: PreviewFile[];
   projectId: string;
@@ -396,6 +409,7 @@ export async function reconcileEntireSessionForExplicitEditOrRepair(input: {
         modelId: input.session.modelId ?? null,
         permissionMode: input.session.permissionMode ?? null,
         compactedContext: input.session.compactedContext ?? null,
+        events: buildPersistedSessionEvents(input.session.events),
         replayTurnSummaries: buildPersistedTurnSummaries(input.session.replayTurnSummaries),
         selectedModelUuid: input.session.selectedModelUuid ?? input.session.modelId ?? null,
         systemPromptHash: input.session.systemPromptHash ?? null,
@@ -506,6 +520,18 @@ export async function upsertTurnSummary(input: {
     input: {
       sessionId: input.sessionId,
       summary: buildPersistedTurnSummaries([input.summary])[0],
+    },
+  });
+}
+
+export async function upsertSessionEvent(input: {
+  event: SessionEvent;
+  sessionId: string;
+}) {
+  return invoke("upsert_session_event", {
+    input: {
+      event: buildPersistedSessionEvents([input.event])[0],
+      sessionId: input.sessionId,
     },
   });
 }

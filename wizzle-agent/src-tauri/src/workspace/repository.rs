@@ -788,6 +788,8 @@ fn build_workspace_session_summary(metadata: StoredSessionMetadata) -> Workspace
         messages_loaded: false,
         model_id: metadata.model_id,
         permission_mode: metadata.permission_mode,
+        compacted_context: metadata.compacted_context,
+        events: Vec::new(),
         replay_turn_summaries: Vec::new(),
         selected_model_uuid: metadata.selected_model_uuid,
         system_prompt_hash: metadata.system_prompt_hash,
@@ -825,6 +827,8 @@ fn load_workspace_session_payload(
         messages_loaded: true,
         model_id: metadata.model_id,
         permission_mode: metadata.permission_mode,
+        compacted_context: metadata.compacted_context,
+        events: Vec::new(),
         replay_turn_summaries: history
             .turn_summaries
             .into_iter()

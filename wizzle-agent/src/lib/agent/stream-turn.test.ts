@@ -9,6 +9,7 @@ const {
   mergeStreamedToolNameFragment,
   normalizeStreamedToolArguments,
   normalizeStreamedToolCalls,
+  resolveAgentTurnToolChoice,
 } = await import("./stream-turn.ts");
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -33,6 +34,15 @@ function toolCall(partial: {
 }
 
 function main() {
+  assert(resolveAgentTurnToolChoice([]) === "none", "no definitions disables tools");
+  assert(
+    resolveAgentTurnToolChoice(
+      [{ type: "function", function: { description: "x", name: "read", parameters: {} } }],
+      "none",
+    ) === "none",
+    "definitions can remain declared while new calls are disabled",
+  );
+
   // --- #22 name merge ---
   assert(mergeStreamedToolNameFragment("", "ba") === "ba", "empty + delta");
   assert(mergeStreamedToolNameFragment("ba", "sh") === "bash", "token deltas");

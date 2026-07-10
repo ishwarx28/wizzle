@@ -34,6 +34,7 @@ import {
   drainComposerSessionQueue,
   getComposerSessionQueue,
   hydrateComposerSessionQueue,
+  selectVisibleComposerQueueItems,
   setComposerSessionQueue,
   subscribeComposerSessionQueue,
   type ComposerQueueItem,
@@ -397,6 +398,10 @@ export function Composer({
       queueSessionId ? subscribeComposerSessionQueue(queueSessionId, onStoreChange) : () => undefined,
     () => (queueSessionId ? getComposerSessionQueue(queueSessionId) : EMPTY_QUEUE),
     () => EMPTY_QUEUE,
+  );
+  const visibleQueuedSubmissions = useMemo(
+    () => selectVisibleComposerQueueItems(queuedSubmissions),
+    [queuedSubmissions],
   );
 
   const setQueuedSubmissions = useCallback(
@@ -1443,10 +1448,10 @@ export function Composer({
 
   return (
     <>
-      {queuedSubmissions.length > 0 ? (
+      {visibleQueuedSubmissions.length > 0 ? (
         <div className="mb-3 overflow-hidden rounded-[22px] border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-panel)_88%,transparent)] shadow-[0_10px_30px_rgba(0,0,0,0.16)] backdrop-blur-xl">
           <div className="flex flex-col">
-            {queuedSubmissions.map((submission, index) => (
+            {visibleQueuedSubmissions.map((submission, index) => (
               <div
                 className={[
                   "flex items-center gap-2.5 px-3.5 py-2.5 text-[12px] text-[var(--color-text-secondary)]",
@@ -1460,11 +1465,6 @@ export function Composer({
                   <CornerDownLeft className="h-3.5 w-3.5" />
                 </span>
                 <span className="min-w-0 flex-1 truncate">{queueLabel(submission)}</span>
-                {submission.status === "sending" ? (
-                  <span className="shrink-0 rounded-full border border-[var(--color-border)] px-2 py-1 text-[11px] text-[var(--color-text-tertiary)]">
-                    Sending
-                  </span>
-                ) : null}
                 {submission.status === "failed" ? (
                   <span className="shrink-0 rounded-full border border-[color-mix(in_srgb,var(--color-danger)_45%,transparent)] px-2 py-1 text-[11px] text-[var(--color-danger)]">
                     Failed
@@ -1509,7 +1509,6 @@ export function Composer({
                   ) : null}
                   <button
                     className="flex items-center gap-1 rounded-md px-1.5 py-0.75 text-[12px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)] disabled:cursor-not-allowed disabled:opacity-50"
-                    disabled={submission.status === "sending"}
                     onClick={() => {
                       setQueuedSubmissions((current) =>
                         current.filter((currentSubmission) => currentSubmission.id !== submission.id),

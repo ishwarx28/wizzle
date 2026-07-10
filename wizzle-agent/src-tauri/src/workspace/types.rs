@@ -68,6 +68,17 @@ pub struct WorkspaceCompactedContextPayload {
     pub updated_at_ms: u64,
 }
 
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSessionEventPayload {
+    pub after_message_count: u64,
+    pub created_at_ms: u64,
+    pub id: String,
+    pub phase: String,
+    pub r#type: String,
+    pub updated_at_ms: u64,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSessionPayload {
@@ -78,6 +89,7 @@ pub struct WorkspaceSessionPayload {
     pub model_id: Option<String>,
     pub permission_mode: Option<String>,
     pub compacted_context: Option<WorkspaceCompactedContextPayload>,
+    pub events: Vec<WorkspaceSessionEventPayload>,
     pub replay_turn_summaries: Vec<WorkspaceTurnSummaryPayload>,
     #[serde(default)]
     pub selected_model_uuid: Option<String>,
@@ -503,6 +515,8 @@ pub struct PersistedSessionInput {
     pub permission_mode: Option<String>,
     #[serde(default)]
     pub compacted_context: Option<WorkspaceCompactedContextPayload>,
+    #[serde(default)]
+    pub events: Vec<WorkspaceSessionEventPayload>,
     pub replay_turn_summaries: Option<Vec<PersistedTurnSummaryInput>>,
     #[serde(default)]
     pub selected_model_uuid: Option<String>,
@@ -541,6 +555,13 @@ pub struct PersistedMessageInput {
     pub parts: Option<Vec<PersistedMessageStepInput>>,
     pub tool_calls: Option<Vec<PersistedToolCallInput>>,
     pub tool_results: Option<Vec<PersistedToolResultInput>>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertSessionEventInput {
+    pub event: WorkspaceSessionEventPayload,
+    pub session_id: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]

@@ -194,6 +194,13 @@ export function countReadyToolCalls(result: NormalizeStreamedToolCallsResult) {
   return result.items.filter((item) => item.kind === "ready").length;
 }
 
+export function resolveAgentTurnToolChoice(
+  tools: readonly ProxyToolDefinition[],
+  override?: "auto" | "none",
+) {
+  return override ?? (tools.length > 0 ? "auto" : "none");
+}
+
 export async function streamAgentTurn(options: {
   chatId: string;
   conversation: ChatRequestMessage[];
@@ -203,6 +210,7 @@ export async function streamAgentTurn(options: {
   onToolCalls?: (toolCalls: ToolCall[]) => void;
   projectId: string;
   reasoningLevel?: string | null;
+  toolChoice?: "auto" | "none";
   tools: ProxyToolDefinition[];
   turnIndex: number;
   toToolCallState: (toolCall: OpenAIChatToolCall) => ToolCall;
@@ -257,7 +265,7 @@ export async function streamAgentTurn(options: {
     onReasoningFinished: options.onReasoningFinished,
     projectId: options.projectId,
     reasoningLevel: options.reasoningLevel ?? undefined,
-    toolChoice: options.tools.length > 0 ? "auto" : "none",
+    toolChoice: resolveAgentTurnToolChoice(options.tools, options.toolChoice),
     tools: options.tools,
   });
 
