@@ -1,4 +1,4 @@
-import { ArrowDown, FolderOpenDot } from "lucide-react";
+import { AlertTriangle, ArrowDown, FolderOpenDot, Trash2 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { useScrollActivity } from "../../hooks/use-scroll-activity";
@@ -11,13 +11,16 @@ import {
 } from "../../lib/chat-turn-pagination";
 import { interleaveContextStatus } from "../../lib/context-status";
 import { buildDisplayMessages } from "../../lib/message-parts";
-import { useWorkspaceStore } from "../../store/workspace-store";
+import { removeProjectById } from "../../lib/local-workspace";
+import { useWorkspaceStore, type ChatErrorDetail } from "../../store/workspace-store";
 import type { DisplayMessage, SessionEvent } from "../../types/workspace";
 import { Composer } from "./Composer";
 import { ContextStatusDivider } from "./ContextStatusDivider";
 import { MessageBubble } from "./MessageBubble";
 
 import { ToolApprovalPrompt } from "./ToolApprovalPrompt";
+import { ClarifyPrompt } from "./ClarifyPrompt";
+import { SessionTodoOverlay } from "./SessionTodoOverlay";
 
 const AUTO_SCROLL_RESUME_DELAY_MS = 420;
 const BOTTOM_SNAP_THRESHOLD_PX = 80;
@@ -68,6 +71,8 @@ function collapseContextEvents(events: SessionEvent[]) {
 
 export function ChatView() {
   const activeMessageEdit = useWorkspaceStore((state) => state.activeMessageEdit);
+  const chatError = useWorkspaceStore((state) => state.chatError);
+  const chatErrorDetail = useWorkspaceStore((state) => state.chatErrorDetail);
   const sessionStreamErrors = useWorkspaceStore((state) => state.sessionStreamErrors);
   const loadingSessionId = useWorkspaceStore((state) => state.loadingSessionId);
   const previewFiles = useWorkspaceStore((state) => state.previewFiles);
@@ -76,11 +81,15 @@ export function ChatView() {
   const selectedProjectId = useWorkspaceStore((state) => state.selectedProjectId);
   const selectedSessionId = useWorkspaceStore((state) => state.selectedSessionId);
   const sendingSessionIds = useWorkspaceStore((state) => state.sendingSessionIds);
+  const pendingToolApproval = useWorkspaceStore((state) => state.pendingToolApproval);
+  const pendingClarification = useWorkspaceStore((state) => state.pendingWorkflowQuestion);
+  const hasBlockingPrompt = Boolean(pendingToolApproval || pendingClarification);
   // Per selected session only — background runs on other sessions must not block edit UI.
   const isSendingMessage = Boolean(
     selectedSessionId && sendingSessionIds.includes(selectedSessionId),
   );
   const openFile = useWorkspaceStore((state) => state.openFile);
+  const hydrateWorkspace = useWorkspaceStore((state) => state.hydrateWorkspace);
   const startMessageEdit = useWorkspaceStore((state) => state.startMessageEdit);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const bottomAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -93,8 +102,15 @@ export function ChatView() {
   const previousMessageCountRef = useRef(0);
   const prependRestoreRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [isRemovingMissingProject, setIsRemovingMissingProject] = useState(false);
   const [visibleTurnCount, setVisibleTurnCount] = useState(() => initialVisibleTurnCount());
   const { handleScrollActivity, isScrolling } = useScrollActivity();
+
+  useEffect(() => {
+    if (!hasBlockingPrompt) return;
+    setShowScrollToBottom(false);
+    window.requestAnimationFrame(() => bottomAnchorRef.current?.scrollIntoView({ block: "end" }));
+  }, [hasBlockingPrompt, pendingClarification?.toolCallId, pendingToolApproval?.toolCallId]);
 
   const currentProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0];
   const currentDraftSession = currentProject ? draftSessions[currentProject.id] ?? null : null;
@@ -191,6 +207,54 @@ export function ChatView() {
     }
     return sessionStreamErrors[sessionId] ?? null;
   }, [currentSession?.id, selectedSessionId, sessionStreamErrors]);
+  const missingProjectError: ChatErrorDetail | null =
+    chatError && chatErrorDetail?.kind === "missing-project-root" && chatErrorDetail.message === chatError
+      ? chatErrorDetail
+      : null;
+
+  async function handleRemoveMissingProject() {
+    if (!missingProjectError || isRemovingMissingProject) {
+      return;
+    }
+
+    setIsRemovingMissingProject(true);
+    try {
+      const snapshot = await removeProjectById(missingProjectError.projectId);
+      hydrateWorkspace(snapshot);
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message.trim()
+          ? error.message
+          : "Wizzle could not remove that project.";
+      useWorkspaceStore.setState({ chatError: message, chatErrorDetail: null });
+    } finally {
+      setIsRemovingMissingProject(false);
+    }
+  }
+
+  const inlineChatError = chatError ? (
+    <div
+      className="mb-2 flex items-start justify-between gap-3 rounded-xl border border-[color-mix(in_srgb,var(--color-danger)_35%,var(--color-border))] bg-[color-mix(in_srgb,var(--color-danger)_8%,var(--color-panel))] px-3 py-2 text-ui text-[var(--color-danger)]"
+      role="alert"
+    >
+      <div className="flex min-w-0 items-start gap-2">
+        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0 break-words">{chatError}</span>
+      </div>
+      {missingProjectError ? (
+        <button
+          className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg border border-[color-mix(in_srgb,var(--color-danger)_40%,var(--color-border))] px-2 text-[12px] font-medium text-[var(--color-danger)] transition hover:bg-[color-mix(in_srgb,var(--color-danger)_10%,transparent)] disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={isRemovingMissingProject}
+          onClick={() => void handleRemoveMissingProject()}
+          title={`Remove ${missingProjectError.projectName} from Wizzle`}
+          type="button"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+          {isRemovingMissingProject ? "Removing" : "Remove project"}
+        </button>
+      ) : null}
+    </div>
+  ) : null;
 
   useEffect(() => {
     function handleComposerSend() {
@@ -411,10 +475,10 @@ export function ChatView() {
             <div className="mb-6 flex h-24 w-24 items-center justify-center rounded-[32px] bg-[var(--color-panel-muted)] ring-1 ring-[var(--color-border)]">
               <FolderOpenDot className="h-11 w-11 text-[var(--color-text)]" />
             </div>
-            <h1 className="text-[2rem] font-semibold tracking-[-0.05em] text-[var(--color-text)]">
+            <h1 className="text-[2.0625rem] font-semibold tracking-[-0.05em] text-[var(--color-text)]">
               Add a project to get started
             </h1>
-            <p className="mt-3 max-w-[460px] text-[14px] leading-7 text-[var(--color-text-secondary)]">
+            <p className="mt-3 max-w-[460px] text-ui text-[var(--color-text-secondary)]">
               Choose a local folder from the left sidebar and Wizzle will create its local project state inside your home directory.
             </p>
           </div>
@@ -431,10 +495,10 @@ export function ChatView() {
             <div className="mb-6 flex h-24 w-24 items-center justify-center rounded-[32px] bg-[var(--color-panel-muted)] ring-1 ring-[var(--color-border)]">
               <FolderOpenDot className="h-11 w-11 text-[var(--color-text)]" />
             </div>
-            <h1 className="text-[2rem] font-semibold tracking-[-0.05em] text-[var(--color-text)]">
+            <h1 className="text-[2.0625rem] font-semibold tracking-[-0.05em] text-[var(--color-text)]">
               Choose a session to start
             </h1>
-            <p className="mt-3 max-w-[460px] text-[14px] leading-7 text-[var(--color-text-secondary)]">
+            <p className="mt-3 max-w-[460px] text-ui text-[var(--color-text-secondary)]">
               Create a new session from the sidebar, then Wizzle will open the chat workspace here.
             </p>
           </div>
@@ -451,10 +515,10 @@ export function ChatView() {
             <div className="mb-6 flex h-24 w-24 items-center justify-center rounded-[32px] bg-[var(--color-panel-muted)] ring-1 ring-[var(--color-border)]">
               <FolderOpenDot className="h-11 w-11 text-[var(--color-text)]" />
             </div>
-            <h1 className="text-[2rem] font-semibold tracking-[-0.05em] text-[var(--color-text)]">
+            <h1 className="text-[2.0625rem] font-semibold tracking-[-0.05em] text-[var(--color-text)]">
               Loading session
             </h1>
-            <p className="mt-3 max-w-[460px] text-[14px] leading-7 text-[var(--color-text-secondary)]">
+            <p className="mt-3 max-w-[460px] text-ui text-[var(--color-text-secondary)]">
               Wizzle is loading the selected chat history before we continue.
             </p>
           </div>
@@ -485,7 +549,7 @@ export function ChatView() {
             {hasEarlierTurns ? (
               <div className="flex justify-center pb-2">
                 <button
-                  className="rounded-full border border-[var(--color-border)] bg-[var(--color-panel)] px-3.5 py-1.5 text-[12px] text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-strong)] hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                  className="rounded-full border border-[var(--color-border)] bg-[var(--color-panel)] px-3.5 py-1.5 text-[13px] text-[var(--color-text-secondary)] transition hover:border-[var(--color-border-strong)] hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                   onClick={loadPreviousMessages}
                   type="button"
                 >
@@ -559,23 +623,29 @@ export function ChatView() {
             <div aria-hidden className="h-px w-full shrink-0" ref={bottomAnchorRef} />
           </div>
         </div>
-        {showScrollToBottom ? (
-          <button
-            aria-label="Scroll to latest message"
-            className="absolute bottom-5 left-1/2 z-10 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-[var(--color-border-strong)] bg-[var(--color-panel)] text-[var(--color-text-secondary)] shadow-[0_8px_24px_rgba(0,0,0,0.18)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
-            onClick={scrollToBottom}
-          >
-            <ArrowDown className="h-4 w-4" />
-          </button>
+        {showScrollToBottom && !hasBlockingPrompt ? (
+          <div className="absolute bottom-5 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1.5">
+            <button
+              aria-label="Scroll to latest message"
+              className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--color-border-strong)] bg-[var(--color-panel)] text-[var(--color-text-secondary)] shadow-[0_8px_24px_rgba(0,0,0,0.18)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+              onClick={scrollToBottom}
+            >
+              <ArrowDown className="h-4 w-4" />
+            </button>
+            <SessionTodoOverlay />
+          </div>
         ) : null}
       </div>
       <div className="px-8 pb-[14px]">
         <div className="mx-auto max-w-[920px]">
-          <ToolApprovalPrompt />
-          <Composer
-            placeholder="Ask Wizzle to inspect, edit, or debug this project"
-            showFloatingEnhanceAction={!showScrollToBottom}
-          />
+          {inlineChatError}
+          {pendingClarification ? <ClarifyPrompt /> : pendingToolApproval ? <ToolApprovalPrompt /> : (
+            <Composer
+              placeholder="Ask Wizzle to inspect, edit, or debug this project"
+              showFloatingEnhanceAction={!showScrollToBottom}
+              showFloatingTodoAction={!showScrollToBottom}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -586,16 +656,18 @@ export function ChatView() {
           <div className="mb-6 flex h-24 w-24 items-center justify-center rounded-[32px] bg-[var(--color-panel-muted)] ring-1 ring-[var(--color-border)]">
             <FolderOpenDot className="h-11 w-11 text-[var(--color-text)]" />
           </div>
-          <h1 className="text-[2.3rem] font-semibold tracking-[-0.05em] text-[var(--color-text)]">
+          <h1 className="text-[2.3625rem] font-semibold tracking-[-0.05em] text-[var(--color-text)]">
             What should we work on?
           </h1>
         </div>
-        <ToolApprovalPrompt />
-        <Composer
-          expanded
-          placeholder="Ask Wizzle what to build, fix, or explain"
-          showFloatingEnhanceAction
-        />
+        {inlineChatError}
+        {pendingClarification ? <ClarifyPrompt /> : pendingToolApproval ? <ToolApprovalPrompt /> : (
+          <Composer
+            expanded
+            placeholder="Ask Wizzle what to build, fix, or explain"
+            showFloatingEnhanceAction
+          />
+        )}
       </div>
     </div>
   );

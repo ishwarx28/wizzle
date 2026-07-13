@@ -56,10 +56,18 @@ export interface ProviderModelInfo {
 }
 
 export interface ToolApprovalRequest {
+  arguments?: string;
+  /** Approval-requiring calls emitted in the same model tool batch. */
+  batchRequests?: ToolApprovalRequest[];
   command?: string;
+  description?: string;
   path?: string;
   /** Session that owns this pending approval (survives UI session switches). */
   sessionId: string;
+  /** Hidden subagent that owns this approval, when applicable. */
+  subagentName?: "reviewer" | "explorer" | "worker";
+  subagentTask?: string;
+  subagentTaskId?: string;
   summary: string;
   timeout: string;
   toolCallId: string;
@@ -70,6 +78,19 @@ export interface ToolApprovalRequest {
     title?: string;
   };
 }
+
+export interface ClarifyRequest {
+  allowCustomAnswer?: boolean;
+  choices?: string[];
+  kind: "approach" | "doubt";
+  prompt: string;
+  recommended?: number;
+  sessionId: string;
+  toolCallId: string;
+}
+
+export type WorkflowQuestionRequest = ClarifyRequest;
+export type WorkflowQuestionAnswer = string;
 
 export interface PreviewFile {
   contentHash?: string;
@@ -133,6 +154,7 @@ export type MessagePartType =
   | "reasoning"
   | "tool_call"
   | "tool_result"
+  | "subagent_response"
   | "activity_content"
   | "content";
 
@@ -174,6 +196,10 @@ export interface Message {
   isStored?: boolean;
   linkedFileIds?: string[];
   status?: "streaming" | "done" | "error" | "interrupted";
+  /** UI-only stream state. Not persisted. */
+  transientReasoningActive?: boolean;
+  /** UI-only stream state. Not persisted. */
+  transientStreamStarted?: boolean;
   parts?: MessagePart[];
   toolCalls?: ToolCall[];
   toolResults?: ToolResult[];
@@ -240,6 +266,8 @@ export interface DisplayMessage {
   role: "assistant" | "user";
   startedAtMs?: number;
   status?: "streaming" | "done" | "error" | "interrupted";
+  transientReasoningActive?: boolean;
+  transientStreamStarted?: boolean;
 }
 
 export interface Session {
@@ -251,6 +279,7 @@ export interface Session {
   updatedAtMs?: number;
   modelId?: ModelId;
   permissionMode?: PermissionMode;
+  reasoningLevel?: string | null;
   compactedContext?: CompactedContextRecord | null;
   events?: SessionEvent[];
   messages: Message[];
@@ -277,6 +306,7 @@ export interface WorkspaceSnapshot {
   isSidebarOpen: boolean;
   modelId: ModelId;
   permissionMode: PermissionMode;
+  reasoningLevel?: string;
   previewFiles: PreviewFile[];
   projects: Project[];
   selectedProjectId: string;

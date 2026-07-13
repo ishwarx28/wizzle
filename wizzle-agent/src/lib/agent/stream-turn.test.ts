@@ -6,6 +6,7 @@
 import type { OpenAIChatToolCall } from "../chat-stream.ts";
 
 const {
+  buildStreamingToolCallPreviews,
   mergeStreamedToolNameFragment,
   normalizeStreamedToolArguments,
   normalizeStreamedToolCalls,
@@ -100,6 +101,24 @@ function main() {
     "empty args become {}",
   );
 
+  const subagent = normalizeStreamedToolCalls(
+    [toolCall({ id: "sub-1", name: "subagent", arguments: '{"action":"list"}' })],
+    0,
+  );
+  assert(subagent.items[0]?.kind === "ready", "subagent is a recognized agent tool");
+
+  const todo = normalizeStreamedToolCalls(
+    [toolCall({ id: "todo-1", name: "todo", arguments: '{"action":"status"}' })],
+    0,
+  );
+  assert(todo.items[0]?.kind === "ready", "TODO is a recognized agent tool");
+
+  const clarify = normalizeStreamedToolCalls(
+    [toolCall({ id: "clarify-1", name: "clarify", arguments: '{"kind":"doubt","prompt":"Which target?"}' })],
+    0,
+  );
+  assert(clarify.items[0]?.kind === "ready", "clarify is a recognized agent tool");
+
   const badJson = normalizeStreamedToolCalls(
     [toolCall({ id: "c3", name: "bash", arguments: '{"command":' })],
     0,
@@ -128,6 +147,16 @@ function main() {
   const noise = normalizeStreamedToolCalls([toolCall({})], 0);
   assert(!noise.hadToolCallIntents, "empty slot not intent");
   assert(noise.items.length === 0, "noise dropped");
+
+  const previews = buildStreamingToolCallPreviews([
+    toolCall({ id: "p1", name: "bash", arguments: '{"command":"' }),
+    toolCall({ id: "p2", name: "", arguments: '{"path":"x"}' }),
+    toolCall({ id: "", name: "read", arguments: '{"path":"x"}' }),
+  ]);
+  assert(previews.length === 1, "preview requires id and name");
+  assert(previews[0]?.id === "p1", "preview keeps tool id");
+  assert(previews[0]?.function.name === "bash", "preview keeps tool name");
+  assert(previews[0]?.function.arguments === "", "preview buffers streamed arguments");
 
   const mixed = normalizeStreamedToolCalls(
     [

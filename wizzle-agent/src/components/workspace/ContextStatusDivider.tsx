@@ -10,7 +10,7 @@ export function ContextStatusDivider({ phase }: { phase: ContextCompactionPhase 
       role="status"
     >
       <div className="h-px flex-1 bg-[var(--color-border)]" />
-      <span className="shrink-0 text-[12px] text-[var(--color-text-tertiary)]">{label}</span>
+      <span className="shrink-0 text-[13px] text-[var(--color-text-tertiary)]">{label}</span>
       <div className="h-px flex-1 bg-[var(--color-border)]" />
     </div>
   );

@@ -40,6 +40,7 @@ import {
   type ComposerQueueItem,
 } from "../../lib/composer-session-queue";
 import { MAX_REPLAY_INPUT, selectReplayHistoryWithinBudget } from "../../lib/context-budget";
+import { requestNotificationPermissionForUserGesture } from "../../lib/desktop-notifications";
 import { loadComposerState, saveComposerState } from "../../lib/local-workspace";
 import { isImageAttachment, modelSupportsImages } from "../../lib/image-capability";
 import {
@@ -58,11 +59,13 @@ import type {
   PermissionMode,
   PreviewFile,
 } from "../../types/workspace";
+import { SessionTodoOverlay } from "./SessionTodoOverlay";
 
 interface ComposerProps {
   expanded?: boolean;
   placeholder: string;
   showFloatingEnhanceAction?: boolean;
+  showFloatingTodoAction?: boolean;
 }
 
 type QueuedSubmission = ComposerQueueItem;
@@ -167,7 +170,7 @@ function formatReasoningLevelLabel(level: string) {
 
 /** Same density as model id under model name in the selector list. */
 const MODEL_META_TEXT_CLASS =
-  "text-[11px] font-normal leading-none text-[var(--color-text-tertiary)]";
+  "text-[12px] font-normal leading-none text-[var(--color-text-tertiary)]";
 
 function inferPreviewKind(file: File, capabilities: ModelCapability[]): PreviewFile["kind"] | null {
   if (file.type.startsWith("image/")) {
@@ -334,6 +337,7 @@ export function Composer({
   expanded = false,
   placeholder,
   showFloatingEnhanceAction = true,
+  showFloatingTodoAction = true,
 }: ComposerProps) {
   const activeMessageEdit = useWorkspaceStore((state) => state.activeMessageEdit);
   const cancelMessageEdit = useWorkspaceStore((state) => state.cancelMessageEdit);
@@ -459,7 +463,7 @@ export function Composer({
   const isMacPlatform =
     typeof document !== "undefined" && document.documentElement.dataset.platform === "macos";
   const permissionModeLabel =
-    permissionMode === "full-access" ? "Auto approve · host access" : "Manual approve";
+    permissionMode === "full-access" ? "Full Access" : "Manual Approve";
   const modelIdLabel =
     selectedProviderModel?.displayName ??
     selectedProviderModel?.modelId ??
@@ -905,13 +909,13 @@ export function Composer({
         return;
       }
 
+      void requestNotificationPermissionForUserGesture();
       setQueuedSubmissions((current) => [
         ...current,
         createComposerQueueItem({ attachments, prompt: nextPrompt }),
       ]);
       setDraft("");
       setAttachments([]);
-      showToast("Queued for after the current response.");
       clearChatError();
       return;
     }
@@ -919,6 +923,8 @@ export function Composer({
     if (nextPrompt.length === 0 && attachments.length === 0) {
       return;
     }
+
+    void requestNotificationPermissionForUserGesture();
 
     if (activeMessageEdit) {
       shouldRestoreComposerAfterEditRef.current = false;
@@ -936,11 +942,18 @@ export function Composer({
     if (!result.accepted) {
       setDraft(draftSnapshot);
       setAttachments(attachmentSnapshot);
-      showToast(result.error);
+      if (!result.suppressToast) {
+        showToast(result.error);
+      }
       return;
     }
 
-    if (!result.ok && "error" in result && result.error) {
+    const inlineStreamError = result.turnId
+        ? Object.values(useWorkspaceStore.getState().sessionStreamErrors).some(
+          (entry) => entry?.turnId === result.turnId,
+        )
+      : false;
+    if (!result.ok && "error" in result && result.error && !inlineStreamError) {
       showToast(result.error);
     }
   }
@@ -1454,26 +1467,22 @@ export function Composer({
             {visibleQueuedSubmissions.map((submission, index) => (
               <div
                 className={[
-                  "flex items-center gap-2.5 px-3.5 py-2.5 text-[12px] text-[var(--color-text-secondary)]",
+                  "flex items-center gap-2.5 px-3.5 py-2.5 text-[13px] text-[var(--color-text-secondary)]",
                   submission.status === "failed" ? "bg-[color-mix(in_srgb,var(--color-danger)_8%,transparent)]" : "",
                   index > 0 ? "border-t border-[color-mix(in_srgb,var(--color-border)_60%,transparent)]" : "",
                 ].join(" ")}
                 key={submission.id}
               >
-                <span className="flex shrink-0 items-center gap-0.5 text-[var(--color-text-tertiary)]">
-                  <ChevronDown className="h-3 w-3" />
-                  <CornerDownLeft className="h-3.5 w-3.5" />
-                </span>
                 <span className="min-w-0 flex-1 truncate">{queueLabel(submission)}</span>
                 {submission.status === "failed" ? (
-                  <span className="shrink-0 rounded-full border border-[color-mix(in_srgb,var(--color-danger)_45%,transparent)] px-2 py-1 text-[11px] text-[var(--color-danger)]">
+                  <span className="shrink-0 rounded-full border border-[color-mix(in_srgb,var(--color-danger)_45%,transparent)] px-2 py-1 text-[12px] text-[var(--color-danger)]">
                     Failed
                   </span>
                 ) : null}
                 <div className="flex shrink-0 items-center gap-1">
                   {submission.status === "failed" ? (
                     <button
-                      className="flex items-center gap-1 rounded-md px-1.5 py-0.75 text-[12px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                      className="flex items-center gap-1 rounded-md px-1.5 py-0.75 text-[13px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                       onClick={() => {
                         clearChatError();
                         setQueuedSubmissions((current) =>
@@ -1492,7 +1501,7 @@ export function Composer({
                   ) : null}
                   {(submission.status ?? "queued") === "queued" ? (
                     <button
-                      className="flex items-center gap-1 rounded-md px-1.5 py-0.75 text-[12px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                      className="flex items-center gap-1 rounded-md px-1.5 py-0.75 text-[13px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                       onClick={() => {
                         setQueuedSubmissions((current) =>
                           current.filter((currentSubmission) => currentSubmission.id !== submission.id),
@@ -1508,7 +1517,7 @@ export function Composer({
                     </button>
                   ) : null}
                   <button
-                    className="flex items-center gap-1 rounded-md px-1.5 py-0.75 text-[12px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)] disabled:cursor-not-allowed disabled:opacity-50"
+                    className="flex items-center gap-1 rounded-md px-1.5 py-0.75 text-[13px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)] disabled:cursor-not-allowed disabled:opacity-50"
                     onClick={() => {
                       setQueuedSubmissions((current) =>
                         current.filter((currentSubmission) => currentSubmission.id !== submission.id),
@@ -1526,42 +1535,45 @@ export function Composer({
         </div>
       ) : null}
       <div className="relative">
-        {renderFloatingEnhanceAction ? (
-          <button
-            className={[
-              "absolute -top-10 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.25 rounded-full border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-panel)_94%,transparent)] px-2.5 py-1 text-[var(--color-text)] shadow-[0_8px_20px_rgba(0,0,0,0.14)] backdrop-blur-xl transition-all duration-150 hover:border-[var(--color-border-strong)] hover:bg-[var(--color-panel-hover)]",
-              showFloatingEnhanceActionState
-                ? "translate-y-0 scale-100 opacity-100"
-                : "translate-y-1 scale-[0.98] opacity-0 pointer-events-none",
-            ].join(" ")}
-            onClick={() => {
-              void handleEnhancePrompt();
-            }}
-            type="button"
-          >
-            <Sparkles className="h-[11px] w-[11px] text-[var(--color-text-secondary)]" />
-            <span className="text-[10px] font-medium leading-none tracking-[0.01em] text-[var(--color-text)]">
-              Enhance prompt
-            </span>
-            <span className="inline-flex items-center gap-1 rounded-full bg-[var(--color-panel-muted)] px-1.5 py-0.5 text-[9px] leading-none text-[var(--color-text-secondary)]">
-              {isMacPlatform ? <Command className="h-[10px] w-[10px]" /> : <span className="font-medium">Ctrl</span>}
-              <span className="font-medium">E</span>
-            </span>
-          </button>
-        ) : null}
+        <div className="absolute -top-10 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1.5">
+          {renderFloatingEnhanceAction ? (
+            <button
+              className={[
+                "flex items-center gap-1.25 rounded-full border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-panel)_94%,transparent)] px-2.5 py-1 text-[var(--color-text)] shadow-[0_8px_20px_rgba(0,0,0,0.14)] backdrop-blur-xl transition-all duration-150 hover:border-[var(--color-border-strong)] hover:bg-[var(--color-panel-hover)]",
+                showFloatingEnhanceActionState
+                  ? "translate-y-0 scale-100 opacity-100"
+                  : "translate-y-1 scale-[0.98] opacity-0 pointer-events-none",
+              ].join(" ")}
+              onClick={() => {
+                void handleEnhancePrompt();
+              }}
+              type="button"
+            >
+              <Sparkles className="h-[11px] w-[11px] text-[var(--color-text-secondary)]" />
+              <span className="text-[11px] font-medium leading-none tracking-[0.01em] text-[var(--color-text)]">
+                Enhance prompt
+              </span>
+              <span className="inline-flex items-center gap-1 rounded-full bg-[var(--color-panel-muted)] px-1.5 py-0.5 text-[10px] leading-none text-[var(--color-text-secondary)]">
+                {isMacPlatform ? <Command className="h-[10px] w-[10px]" /> : <span className="font-medium">Ctrl</span>}
+                <span className="font-medium">E</span>
+              </span>
+            </button>
+          ) : null}
+          {showFloatingTodoAction ? <SessionTodoOverlay /> : null}
+        </div>
         <div className="rounded-[24px] border border-[var(--color-border)] bg-[var(--color-composer)]">
           {activeMessageEdit ? (
             <div className="flex items-start justify-between gap-3 border-b border-[var(--color-border)] px-4 py-3">
               <div className="min-w-0">
-                <p className="text-[12px] font-medium text-[var(--color-text)]">
+                <p className="text-ui-tight font-medium text-[var(--color-text)]">
                   Editing last user turn
                 </p>
-                <p className="mt-0.5 text-[11px] leading-5 text-[var(--color-text-secondary)]">
+                <p className="mt-0.5 text-meta text-[var(--color-text-secondary)]">
                   Sending replaces the current turn, removes its current response, and marks the message as edited.
                 </p>
               </div>
               <button
-                className="inline-flex shrink-0 items-center gap-1 rounded-full px-2.5 py-1 text-[12px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                className="inline-flex shrink-0 items-center gap-1 rounded-full px-2.5 py-1 text-ui-tight text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                 onClick={handleCancelEdit}
                 type="button"
               >
@@ -1570,11 +1582,11 @@ export function Composer({
               </button>
             </div>
           ) : null}
-          <div className="relative px-6 pt-5 text-[14px] font-normal leading-5">
+          <div className="relative px-6 pt-5 text-ui font-normal">
             <textarea
               ref={textareaRef}
               className={[
-                "auto-hide-scrollbar w-full resize-none bg-transparent p-0 text-[var(--color-text)] outline-none placeholder:text-[var(--color-text-tertiary)]",
+                "auto-hide-scrollbar w-full resize-none bg-transparent p-0 text-ui text-[var(--color-text)] outline-none placeholder:text-[var(--color-text-tertiary)]",
                 isScrolling ? "is-scrolling" : "",
                 isEnhancingPrompt ? "text-transparent caret-transparent selection:bg-transparent" : "",
               ].join(" ")}
@@ -1667,7 +1679,7 @@ export function Composer({
             <div className="flex flex-wrap gap-2 px-4 py-2">
               {attachments.map((attachment) => (
                 <div
-                  className="flex items-center gap-2 rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-2.5 py-1.5 text-[12px] text-[var(--color-text-secondary)]"
+                  className="flex items-center gap-2 rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-2.5 py-1.5 text-[13px] text-[var(--color-text-secondary)]"
                   key={attachment.id}
                 >
                   <span className="text-[var(--color-text)]">{fileIcon(attachment.kind)}</span>
@@ -1709,15 +1721,15 @@ export function Composer({
               <div className="relative inline-flex items-center">
                 <span
                   className={[
-                    "pointer-events-none pr-5 text-[14px] font-normal leading-none tracking-[0.01em]",
+                    "pointer-events-none pr-5 text-ui-tight font-normal tracking-[0.01em]",
                     permissionMode === "full-access"
                       ? "text-[#ff9b6b]"
                       : "text-[var(--color-text-secondary)]",
                   ].join(" ")}
                   title={
                     permissionMode === "full-access"
-                      ? "Automatically approves tools. Shell commands run with your OS user permissions and can access files and networks outside this project."
-                      : "Requires approval before each tool runs."
+                      ? "Automatically allows ordinary reads and in-project edits. Sensitive reads, non-whitelisted shell commands, dangerous commands, and out-of-project changes require approval."
+                      : "Requires approval for mutations and non-whitelisted shell commands. In-project reads and basic read-only shell commands run automatically."
                   }
                 >
                   {permissionModeLabel}
@@ -1729,8 +1741,8 @@ export function Composer({
                   onChange={(event) => setPermissionMode(event.currentTarget.value as PermissionMode)}
                   value={permissionMode}
                 >
-                  <option value="full-access">Auto approve (host shell access)</option>
-                  <option value="manual-approve">Manual approve</option>
+                  <option value="full-access">Full Access</option>
+                  <option value="manual-approve">Manual Approve</option>
                 </select>
                 <ChevronDown
                   className={[
@@ -1780,15 +1792,15 @@ export function Composer({
                       transform={`rotate(-90 ${budgetRingSize / 2} ${budgetRingSize / 2})`}
                     />
                   </svg>
-                  <span className="pointer-events-none absolute text-[8px] font-semibold leading-none text-[var(--color-text)]">
+                  <span className="pointer-events-none absolute text-[9px] font-semibold leading-none text-[var(--color-text)]">
                     {budgetUsage.percentage}
                   </span>
                 </button>
                 <div className="pointer-events-none absolute right-0 bottom-full z-20 mb-2 w-[220px] translate-y-1 rounded-[18px] border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-panel)_94%,transparent)] p-3 text-left opacity-0 shadow-[0_14px_36px_rgba(0,0,0,0.22)] backdrop-blur-xl transition-all duration-150 group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:translate-y-0 group-focus-within:opacity-100">
-                  <p className="text-[12px] font-medium text-[var(--color-text)]">
+                  <p className="text-[13px] font-medium text-[var(--color-text)]">
                     Replay Budget
                   </p>
-                  <div className="mt-2 space-y-1 text-[11px] text-[var(--color-text-secondary)]">
+                  <div className="mt-2 space-y-1 text-[12px] text-[var(--color-text-secondary)]">
                     <div className="flex items-center justify-between gap-3">
                       <span>Used</span>
                       <span className="text-[var(--color-text)]">
@@ -1817,7 +1829,7 @@ export function Composer({
               >
                 <button
                   aria-expanded={isModelSelectorOpen}
-                  className="inline-flex max-w-[260px] items-center gap-1.5 rounded-full px-2 py-1 text-[14px] font-normal leading-none tracking-[0.01em] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                  className="inline-flex max-w-[260px] items-center gap-1.5 rounded-full px-2 py-1 text-ui-tight font-normal tracking-[0.01em] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                   disabled={providerModels.length === 0}
                   onClick={() => {
                     setIsModelSelectorOpen((current) => !current);
@@ -1839,11 +1851,11 @@ export function Composer({
                 {isModelSelectorOpen ? (
                   <div className="absolute right-0 bottom-full z-30 mb-2 w-[340px] max-w-[calc(100vw-32px)] overflow-hidden rounded-[20px] border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-panel)_96%,transparent)] shadow-[0_18px_48px_rgba(0,0,0,0.26)] backdrop-blur-xl">
                     <div className="border-b border-[var(--color-border)] p-2.5">
-                      <label className="flex h-9 items-center gap-2 rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-3 text-[12px] text-[var(--color-text-tertiary)]">
+                      <label className="flex h-9 items-center gap-2 rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-3 text-[13px] text-[var(--color-text-tertiary)]">
                         <Search className="h-3.5 w-3.5 shrink-0" />
                         <input
                           autoFocus
-                          className="min-w-0 flex-1 bg-transparent text-[13px] text-[var(--color-text)] outline-none placeholder:text-[var(--color-text-tertiary)]"
+                          className="min-w-0 flex-1 bg-transparent text-ui-tight text-[var(--color-text)] outline-none placeholder:text-[var(--color-text-tertiary)]"
                           onChange={(event) => setModelSearch(event.currentTarget.value)}
                           placeholder="Search models or providers"
                           value={modelSearch}
@@ -1853,7 +1865,7 @@ export function Composer({
 
                     {selectedReasoningLevels.length > 0 ? (
                       <div className="border-b border-[var(--color-border)] px-3 py-2">
-                        <div className="mb-1.5 text-[10px] font-medium text-[var(--color-text-tertiary)]">
+                        <div className="mb-1.5 text-[11px] font-medium text-[var(--color-text-tertiary)]">
                           Reasoning
                         </div>
                         <div className="flex flex-wrap gap-1">
@@ -1872,7 +1884,7 @@ export function Composer({
                                 onClick={() => setReasoningLevel(level)}
                                 type="button"
                               >
-                                <span className="text-[11px] font-normal leading-none">
+                                <span className="text-[12px] font-normal leading-none">
                                   {formatReasoningLevelLabel(level)}
                                 </span>
                               </button>
@@ -1884,13 +1896,13 @@ export function Composer({
 
                     <div className="auto-hide-scrollbar max-h-[320px] overflow-y-auto py-1">
                       {filteredModelsByProvider.length === 0 ? (
-                        <div className="px-3 py-5 text-center text-[13px] text-[var(--color-text-tertiary)]">
+                        <div className="px-3 py-5 text-center text-ui text-[var(--color-text-tertiary)]">
                           No models match that search.
                         </div>
                       ) : (
                         filteredModelsByProvider.map(([providerName, models]) => (
                           <div className="py-1" key={providerName}>
-                            <div className="px-3 py-1 text-[11px] font-medium text-[var(--color-text-tertiary)]">
+                            <div className="px-3 py-1 text-[12px] font-medium text-[var(--color-text-tertiary)]">
                               {providerName}
                             </div>
                             <div className="space-y-0.5 px-1.5">
@@ -1915,7 +1927,7 @@ export function Composer({
                                     type="button"
                                   >
                                     <div className="min-w-0 flex-1">
-                                      <div className="truncate text-[13px]">
+                                      <div className="truncate text-ui-tight">
                                         {model.displayName ?? model.modelId}
                                       </div>
                                       <div className={`mt-0.5 truncate ${MODEL_META_TEXT_CLASS}`}>
@@ -1968,7 +1980,7 @@ export function Composer({
         </div>
       </div>
       {toastMessage ? (
-        <div className="pointer-events-none fixed bottom-6 right-6 z-[120] rounded-2xl border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-panel)_92%,transparent)] px-3.5 py-2 text-[12px] font-medium text-[var(--color-text)] shadow-[0_16px_48px_rgba(0,0,0,0.28)] backdrop-blur-xl">
+        <div className="pointer-events-none fixed bottom-6 right-6 z-[120] rounded-2xl border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-panel)_92%,transparent)] px-3.5 py-2 text-ui-tight font-medium text-[var(--color-text)] shadow-[0_16px_48px_rgba(0,0,0,0.28)] backdrop-blur-xl">
           {toastMessage}
         </div>
       ) : null}

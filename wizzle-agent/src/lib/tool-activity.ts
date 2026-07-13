@@ -1,38 +1,85 @@
 import type { MessagePart, ToolCall, ToolResult } from "../types/workspace";
 
 export type ParsedToolPayload = {
+  action?: string;
+  addedItems?: string[];
+  allowCustomAnswer?: boolean;
+  answer?: string;
   afterContent?: string;
   background?: boolean;
   beforeContent?: string;
   bytesWritten?: number;
   combinedOutput?: string;
   command?: string;
+  choices?: string[];
   content?: string;
   created?: boolean;
+  currentItem?: TodoPayloadItem;
   cwd?: string;
   diffTruncated?: boolean;
   error?: string;
   exitCode?: number | null;
   imageSrc?: string;
   limit?: number;
+  latestOutput?: string | null;
+  join?: string;
+  item?: string;
+  itemId?: string;
+  items?: Array<string | TodoPayloadItem>;
+  name?: string;
+  kind?: string;
   mime?: string;
   mimeType?: string;
   next?: number;
+  note?: string;
+  persistenceWarning?: string;
   ok?: boolean;
   offset?: number;
   path?: string;
-  process?: {
-    id?: string;
-    status?: string;
-  } | null;
+  process?: ProcessPayload | null;
+  processes?: ProcessPayload[];
+  processId?: string;
+  prompt?: string;
+  recommended?: number;
   replacements?: number;
   status?: string;
+  summary?: string;
+  task?: ParsedToolPayload | string;
+  taskId?: string;
+  tasks?: ParsedToolPayload[];
+  createdAtMs?: number;
+  completedAtMs?: number | null;
+  interruptedAtMs?: number | null;
+  updatedAtMs?: number;
+  activeOwnerTurnId?: string | null;
+  pendingMessageCount?: number;
   stderr?: string;
   stdout?: string;
   timedOut?: boolean;
   timeout?: string;
+  timeoutMs?: string;
   type?: string;
   truncated?: boolean;
+};
+
+export type ProcessPayload = {
+  command?: string;
+  cwd?: string;
+  endedAtMs?: number | null;
+  exitCode?: number | null;
+  id?: string;
+  pid?: number | null;
+  startedAtMs?: number;
+  status?: string;
+  stderrTail?: string;
+  stdoutTail?: string;
+};
+
+export type TodoPayloadItem = {
+  addedByTemplate?: boolean;
+  id?: string;
+  status?: string;
+  title?: string;
 };
 
 export type ToolRunEntry = {
@@ -41,10 +88,11 @@ export type ToolRunEntry = {
   detailLabel: string;
   id: string;
   isExpandable: boolean;
-  kind: "bash" | "edit" | "other" | "read" | "write";
+  kind: "bash" | "clarify" | "edit" | "other" | "read" | "subagent" | "todo" | "write";
   result?: ToolResult;
   resultPayload: ParsedToolPayload | null;
   resourceLabel?: string;
+  startedAtMs?: number;
   status: string;
 };
 
@@ -81,6 +129,28 @@ export function parseToolPayload(value?: string) {
   }
 }
 
+export function resolveClarifyToolPresentation(payload: ParsedToolPayload) {
+  const choices = payload.choices ?? [];
+  if (choices.length === 0) {
+    return {
+      answer: payload.answer,
+      kind: "freeform" as const,
+      question: payload.prompt ?? "—",
+    };
+  }
+
+  const customAnswer = payload.answer && !choices.includes(payload.answer) ? payload.answer : null;
+  return {
+    choices: [...choices, ...(customAnswer ? [customAnswer] : [])].map((label) => ({
+      isCustom: label === customAnswer,
+      isSelected: label === payload.answer,
+      label,
+    })),
+    kind: "choices" as const,
+    question: payload.prompt ?? "—",
+  };
+}
+
 function isLiveToolStatus(status?: string | null) {
   return status === "pending" || status === "running" || status === "streaming";
 }
@@ -114,13 +184,50 @@ function buildRunDetailLabel(
       }
       return `Edited ${resourceLabel ?? "resource"}`;
     case "bash": {
-      if (resultPayload?.background === true || resultPayload?.process?.id) {
-        return "Started a background process";
+      const callPayload = parseToolPayload(toolCall.input);
+      const action = callPayload?.action ?? "run";
+      if (action === "list_processes") return live ? "Checking background processes" : "Checked background processes";
+      if (action === "read_process") return live ? "Checking a background process" : "Checked a background process";
+      if (action === "stop_process") return live ? "Stopping a background process" : "Stopped a background process";
+      if (callPayload?.background === true || resultPayload?.background === true) {
+        return live ? "Starting a background process" : "Started a background process";
       }
-      if (live) {
-        return "Running a command";
+      return live ? "Running a command" : "Ran a command";
+    }
+    case "subagent": {
+      const callPayload = parseToolPayload(toolCall.input);
+      const action = resultPayload?.action ?? callPayload?.action;
+      switch (action) {
+        case "create":
+          return "Created a subagent";
+        case "interrupt":
+          return "Interrupted a subagent";
+        case "list":
+          return "Listed subagents";
+        case "wait":
+          return "Waiting for subagent";
+        case "send_message":
+          return "Queued a subagent continuation";
+        default:
+          return live ? "Managing a subagent" : "Managed a subagent";
       }
-      return "Ran a command";
+    }
+    case "todo": {
+      const action = parseToolPayload(toolCall.input)?.action ?? resultPayload?.action ?? "status";
+      if (live) return action === "status" ? "Checking TODO" : "Updating TODO";
+      const labels: Record<string, string> = {
+        add: "Added a TODO item",
+        clear: "Cleared TODO",
+        create: "Created session TODO",
+        status: "Checked session TODO",
+        update: "Updated a TODO item",
+      };
+      return labels[action] ?? "Updated session TODO";
+    }
+    case "clarify": {
+      const kind = parseToolPayload(toolCall.input)?.kind;
+      if (live) return kind === "approach" ? "Choosing an approach" : "Waiting for clarification";
+      return kind === "approach" ? "Chose an approach" : "Clarified a detail";
     }
     default:
       return toolCall.name;
@@ -137,6 +244,12 @@ function resolveToolKind(toolName: string): ToolRunEntry["kind"] {
       return "edit";
     case "bash":
       return "bash";
+    case "subagent":
+      return "subagent";
+    case "todo":
+      return "todo";
+    case "clarify":
+      return "clarify";
     default:
       return "other";
   }
@@ -152,6 +265,18 @@ function isExpandableTool(
   }
 
   if (toolCall.name === "bash") {
+    return true;
+  }
+
+  if (toolCall.name === "subagent") {
+    return true;
+  }
+
+  if (toolCall.name === "todo") {
+    return parseToolPayload(toolCall.input)?.action !== "clear";
+  }
+
+  if (toolCall.name === "clarify") {
     return true;
   }
 
@@ -248,6 +373,7 @@ function createToolRunEntry(
     result: toolResult,
     resultPayload,
     resourceLabel,
+    startedAtMs: toolCallPart?.createdAtMs,
     status: toolResult?.status ?? toolCall.status ?? "pending",
   };
 }
@@ -361,8 +487,11 @@ export function summarizeToolRuns(runs: ToolRunEntry[]) {
     (run) => run.kind === "edit" || (run.kind === "write" && run.resultPayload?.created === false),
   );
   const bashRuns = runs.filter((run) => run.kind === "bash");
+  const subagentRuns = runs.filter((run) => run.kind === "subagent");
+  const todoRuns = runs.filter((run) => run.kind === "todo");
+  const clarifyRuns = runs.filter((run) => run.kind === "clarify");
   const otherRuns = runs.filter(
-    (run) => !["bash", "edit", "read", "write"].includes(run.kind),
+    (run) => !["bash", "clarify", "edit", "read", "subagent", "todo", "write"].includes(run.kind),
   );
   const summaryParts: string[] = [];
 
@@ -389,6 +518,18 @@ export function summarizeToolRuns(runs: ToolRunEntry[]) {
   } else if (bashRuns.length > 1) {
     summaryParts.push(`Ran ${pluralize(bashRuns.length, "command")}`);
   }
+
+  if (subagentRuns.length === 1) {
+    summaryParts.push(subagentRuns[0]!.detailLabel);
+  } else if (subagentRuns.length > 1) {
+    summaryParts.push(`Managed ${pluralize(subagentRuns.length, "subagent")}`);
+  }
+
+  if (todoRuns.length === 1) summaryParts.push(todoRuns[0]!.detailLabel);
+  else if (todoRuns.length > 1) summaryParts.push(`Updated ${pluralize(todoRuns.length, "TODO item")}`);
+
+  if (clarifyRuns.length === 1) summaryParts.push(clarifyRuns[0]!.detailLabel);
+  else if (clarifyRuns.length > 1) summaryParts.push(`Resolved ${pluralize(clarifyRuns.length, "clarification")}`);
 
   if (otherRuns.length > 0) {
     summaryParts.push(`Used ${pluralize(otherRuns.length, "tool")}`);

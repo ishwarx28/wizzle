@@ -716,6 +716,19 @@ export function buildChatMessages(
     }
 
     if (message.role === "tool") {
+      if (message.toolName === "subagent_response") {
+        const responseContent =
+          message.content.trim() ||
+          message.parts?.find((part) => part.type === "subagent_response")?.content?.trim() ||
+          "";
+        return [
+          {
+            content: responseContent,
+            role: "system",
+          },
+        ];
+      }
+
       if (!message.toolCallId) {
         return [];
       }
@@ -771,6 +784,8 @@ export async function streamWorkspaceChat(options: {
   onReasoningFinished?: () => void;
   projectId: string;
   reasoningLevel?: string;
+  /** Frontend cancellation key. Defaults to chatId; hidden subagents use their own key. */
+  streamKey?: string;
   toolChoice?: "auto" | "none";
   tools?: ProxyToolDefinition[];
 }) {
@@ -788,7 +803,7 @@ export async function streamWorkspaceChat(options: {
   }
 
   const requestId = crypto.randomUUID();
-  const sessionKey = options.chatId.trim();
+  const sessionKey = (options.streamKey ?? options.chatId).trim();
   if (sessionKey) {
     activeStreamRequestIdBySession.set(sessionKey, requestId);
   } else {
@@ -892,7 +907,11 @@ export async function streamWorkspaceChat(options: {
   }
 }
 
-export async function interruptWorkspaceChat(options: { sessionId?: string } = {}) {
+export async function interruptWorkspaceChat(options: {
+  /** False for a targeted hidden subagent stream; parent session interruption remains active. */
+  interruptSessionRun?: boolean;
+  sessionId?: string;
+} = {}) {
   const sessionId = options.sessionId?.trim();
   const requestId = sessionId
     ? activeStreamRequestIdBySession.get(sessionId) ?? null
@@ -910,7 +929,7 @@ export async function interruptWorkspaceChat(options: { sessionId?: string } = {
     });
   }
 
-  if (sessionId) {
+  if (sessionId && options.interruptSessionRun !== false) {
     await invoke("interrupt_session_run", {
       input: {
         sessionId,

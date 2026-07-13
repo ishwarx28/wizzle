@@ -60,7 +60,7 @@ export function SessionProcessMenu({ sessionId }: { sessionId: string | null }) 
         type="button"
       >
         <Terminal className="h-4 w-4" />
-        <span className="absolute right-0.5 top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-[var(--color-accent)] px-0.5 text-[9px] font-medium leading-none text-[var(--color-accent-foreground)]">
+        <span className="absolute right-0.5 top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-[var(--color-accent)] px-0.5 text-[10px] font-medium leading-none text-[var(--color-accent-foreground)]">
           {count > 9 ? "9+" : count}
         </span>
       </button>
@@ -71,10 +71,10 @@ export function SessionProcessMenu({ sessionId }: { sessionId: string | null }) 
           data-no-window-drag
         >
           <div className="flex items-center justify-between border-b border-[var(--color-border)] px-2.5 py-1.5">
-            <span className="text-[11px] font-medium text-[var(--color-text-tertiary)]">
+            <span className="text-[12px] font-medium text-[var(--color-text-tertiary)]">
               Processes
             </span>
-            <span className="text-[10px] text-[var(--color-text-tertiary)]">{count}</span>
+            <span className="text-[11px] text-[var(--color-text-tertiary)]">{count}</span>
           </div>
           <ul className="max-h-[220px] overflow-y-auto py-0.5">
             {activeProcesses.map((process) => {
@@ -88,14 +88,14 @@ export function SessionProcessMenu({ sessionId }: { sessionId: string | null }) 
                 >
                   <div className="min-w-0 flex-1">
                     <p
-                      className="truncate font-mono text-[11px] leading-snug text-[var(--color-text-secondary)]"
+                      className="truncate font-mono text-[12px] leading-snug text-[var(--color-text-secondary)]"
                       title={process.commandSummary}
                     >
                       {process.commandSummary}
                     </p>
                     {origin ? (
                       <p
-                        className="truncate text-[10px] leading-snug text-[var(--color-text-tertiary)]"
+                        className="truncate text-[11px] leading-snug text-[var(--color-text-tertiary)]"
                         title={[process.turnId, process.toolCallId].filter(Boolean).join(" · ")}
                       >
                         {origin}
@@ -121,7 +121,7 @@ export function SessionProcessMenu({ sessionId }: { sessionId: string | null }) 
             })}
           </ul>
           {error ? (
-            <p className="border-t border-[var(--color-border)] px-2.5 py-1.5 text-[10px] text-[var(--color-danger)]">
+            <p className="border-t border-[var(--color-border)] px-2.5 py-1.5 text-[11px] text-[var(--color-danger)]">
               {error}
             </p>
           ) : null}

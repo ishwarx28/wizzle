@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Copy, FileCode2, FileImage, FileText, Pencil } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, ChevronUp, Copy, FileCode2, FileImage, FileText, Pencil } from "lucide-react";
 
 import { MarkdownRenderer } from "../common/MarkdownRenderer";
 import { ToolActivityGroup } from "./ToolActivityGroup";
@@ -8,6 +8,7 @@ import {
   hasVisibleActivityBody,
   resolveActiveToolGroupSegmentId,
   shouldOpenWorkingSection,
+  shouldShowReasoningWorkingEvent,
   shouldShowWorkingPlaceholder,
 } from "../../lib/activity-disclosure";
 import { buildActivitySegments } from "../../lib/tool-activity";
@@ -97,7 +98,7 @@ function ReasoningStepItem({
   return (
     <div className="py-1">
       <button
-        className="flex w-full items-center gap-1.5 text-left text-[11px] text-[var(--color-text-secondary)] transition hover:text-[var(--color-text)]"
+        className="flex w-full items-center gap-1.5 text-left text-tiny text-[var(--color-text-secondary)] transition hover:text-[var(--color-text)]"
         onClick={toggle}
         type="button"
       >
@@ -118,7 +119,7 @@ function ReasoningStepItem({
         <div className="min-h-0 overflow-hidden">
           <div className="pt-1.5 pl-5">
             <MarkdownRenderer
-              className="text-[13px] leading-5 text-[var(--color-text)]"
+              className="text-ui text-[var(--color-text)]"
               content={content}
               streaming={isStreaming}
             />
@@ -143,10 +144,52 @@ function ActivityContentItem({
   return (
     <div className="py-1">
       <MarkdownRenderer
-        className="text-[13px] leading-5 text-[var(--color-text)]"
+        className="text-ui text-[var(--color-text)]"
         content={content}
         streaming={part.status === "streaming"}
       />
+    </div>
+  );
+}
+
+function SubagentResponseItem({ part }: { part: MessagePart }) {
+  const { isOpen, toggle } = useAutoDisclosure(false);
+  const content = part.content?.trim() ?? "";
+  const isManualInterruption = part.metadata?.trigger === "manual";
+
+  if (!content) {
+    return null;
+  }
+
+  return (
+    <div className="my-1 overflow-hidden rounded-xl border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-panel-muted)_68%,transparent)]">
+      <button
+        className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-meta text-[var(--color-text-secondary)] transition hover:text-[var(--color-text)]"
+        onClick={toggle}
+        type="button"
+      >
+        {isOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+        <span>{isManualInterruption ? "Subagent interrupted" : "Subagent responded"}</span>
+      </button>
+      <div
+        className="grid overflow-hidden transition-[grid-template-rows,opacity] duration-200 ease-out"
+        style={{ gridTemplateRows: isOpen ? "1fr" : "0fr", opacity: isOpen ? 1 : 0 }}
+      >
+        <div className="min-h-0 overflow-hidden border-t border-[var(--color-border)]">
+          <MarkdownRenderer
+            className="max-h-[360px] overflow-auto px-3 py-2 text-meta text-[var(--color-text-secondary)]"
+            content={content}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ReasoningWorkingItem() {
+  return (
+    <div className="py-1 text-ui text-[var(--color-text-secondary)]">
+      <span className="composer-text-shimmer">Thinking ...</span>
     </div>
   );
 }
@@ -163,6 +206,7 @@ export function MessageBubble({
 }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const [isCopied, setIsCopied] = useState(false);
+  const [showAllLinkedFiles, setShowAllLinkedFiles] = useState(false);
   const [manualToolExpansionSegmentIds, setManualToolExpansionSegmentIds] = useState(
     () => new Set<string>(),
   );
@@ -192,6 +236,12 @@ export function MessageBubble({
 
     return Array.from(uniqueFiles.values()).reverse();
   }, [fileMap, isUser, message.linkedFileIds]);
+  const visibleLinkedFiles = showAllLinkedFiles ? linkedFiles : linkedFiles.slice(0, 3);
+  const hiddenLinkedFileCount = Math.max(0, linkedFiles.length - 3);
+
+  useEffect(() => {
+    setShowAllLinkedFiles(false);
+  }, [message.id]);
 
   useEffect(() => {
     if (!isCopied) {
@@ -215,19 +265,21 @@ export function MessageBubble({
     setElapsedMs(Math.max(0, Date.now() - message.startedAtMs));
     const intervalId = window.setInterval(() => {
       setElapsedMs(Math.max(0, Date.now() - message.startedAtMs!));
-    }, 1000);
+    }, 5000);
 
     return () => {
       window.clearInterval(intervalId);
     };
   }, [message.startedAtMs, message.status]);
 
-  const workingDurationMs = message.durationMs ?? (message.startedAtMs ? elapsedMs : 0);
+  const isStreaming = message.status === "streaming";
+  const workingDurationMs = isStreaming && message.startedAtMs
+    ? elapsedMs
+    : message.durationMs ?? (message.startedAtMs ? elapsedMs : 0);
   const activityLabel =
-    message.status === "streaming"
+    isStreaming
       ? `Working for ${formatElapsedDuration(workingDurationMs)}`
       : `Worked for ${formatElapsedDuration(workingDurationMs)}`;
-  const isStreaming = message.status === "streaming";
   const visibleActivityBody = useMemo(
     () => hasVisibleActivityBody(activitySegments),
     [activitySegments],
@@ -236,11 +288,18 @@ export function MessageBubble({
   // I-2: temporary placeholder until tools or final answer appear (reasoning stays hidden).
   const showWorkingPlaceholder = shouldShowWorkingPlaceholder({
     hasFinalContent: Boolean(renderedContent.trim()),
+    hasStreamStarted: Boolean(message.transientStreamStarted),
     hasToolOrVisibleActivity: visibleActivityBody,
     isAssistant: !isUser,
     status: message.status,
   });
-  const hasActivitySection = !isUser && !showWorkingPlaceholder && visibleActivityBody;
+  const showReasoningWorkingEvent = shouldShowReasoningWorkingEvent({
+    isAssistant: !isUser,
+    isReasoningActive: Boolean(message.transientReasoningActive),
+    status: message.status,
+  });
+  const hasActivitySection =
+    !isUser && !showWorkingPlaceholder && (visibleActivityBody || showReasoningWorkingEvent);
   const activityDisclosure = useAutoDisclosure(
     shouldOpenWorkingSection({
       hasManualToolExpansion,
@@ -269,15 +328,18 @@ export function MessageBubble({
         <div
           className={[
             isUser
-              ? "rounded-[24px] rounded-br-md bg-[var(--color-user-bubble)] px-4 py-3 text-[15px] leading-6 text-[var(--color-text)]"
-              : "px-1 py-0.5 text-[15px] leading-6 text-[var(--color-text)]",
+              ? "rounded-[24px] rounded-br-md bg-[var(--color-user-bubble)] px-4 py-3 text-ui text-[var(--color-text)]"
+              : "px-1 py-0.5 text-ui text-[var(--color-text)]",
             isUser && isEditingUserMessage ? "ring-1 ring-[var(--color-border-strong)]" : "",
           ].join(" ")}
         >
           {isUser ? (
-            <p className="whitespace-pre-wrap">{message.content}</p>
+            <MarkdownRenderer
+              className="text-ui text-[var(--color-text)]"
+              content={message.content}
+            />
           ) : showWorkingPlaceholder ? (
-            <div className="flex items-center gap-2 py-1 text-[14px] text-[var(--color-text-secondary)]">
+            <div className="flex items-center gap-2 py-1 text-ui text-[var(--color-text-secondary)]">
               <span>Working...</span>
               <div className="flex items-center gap-1.5">
                 <span className="h-2 w-2 animate-pulse rounded-full bg-current [animation-delay:-0.2s]" />
@@ -291,7 +353,7 @@ export function MessageBubble({
                 <div className="space-y-1">
                   <div className="border-b border-[var(--color-border)] pb-1.5">
                     <button
-                      className="flex w-full items-center gap-1.5 py-0.5 text-left text-[12px] text-[var(--color-text-secondary)] transition hover:text-[var(--color-text)]"
+                      className="flex w-full items-center gap-1.5 py-0.5 text-left text-meta text-[var(--color-text-secondary)] transition hover:text-[var(--color-text)]"
                       onClick={activityDisclosure.toggle}
                       type="button"
                     >
@@ -349,8 +411,13 @@ export function MessageBubble({
                             return <ActivityContentItem key={part.id} part={part} />;
                           }
 
+                          if (part.type === "subagent_response") {
+                            return <SubagentResponseItem key={part.id} part={part} />;
+                          }
+
                           return null;
                         })}
+                        {showReasoningWorkingEvent ? <ReasoningWorkingItem /> : null}
                       </div>
                     </div>
                   </div>
@@ -359,6 +426,7 @@ export function MessageBubble({
 
               {renderedContent.trim() ? (
                 <MarkdownRenderer
+                  className="text-ui text-[var(--color-text)]"
                   content={renderedContent}
                   streaming={message.status === "streaming"}
                 />
@@ -369,7 +437,7 @@ export function MessageBubble({
 
         {shouldShowLinkedFiles ? (
           <div className="mt-3 space-y-1.5">
-            {linkedFiles.map((file) => (
+            {visibleLinkedFiles.map((file) => (
               <button
                 className={[
                   "flex w-full items-center justify-between gap-3 rounded-[20px] border border-[var(--color-border)] bg-[var(--color-panel-card)] px-3.5 py-3 text-left transition",
@@ -386,36 +454,53 @@ export function MessageBubble({
                     {fileIcon(file.kind)}
                   </div>
                   <div className="min-w-0">
-                    <p className="truncate text-[14px] font-medium text-[var(--color-text)]">
+                    <p className="truncate text-ui-tight font-medium text-[var(--color-text)]">
                       {file.name}
                     </p>
-                    <p className="truncate text-[12px] text-[var(--color-text-tertiary)]">
+                    <p className="truncate text-meta-tight text-[var(--color-text-tertiary)]">
                       {file.summary}
                     </p>
                   </div>
                 </div>
-                <span className="text-[12px] text-[var(--color-text-secondary)]">Open</span>
+                <span className="text-meta-tight text-[var(--color-text-secondary)]">Open</span>
               </button>
             ))}
+            {hiddenLinkedFileCount > 0 ? (
+              <button
+                className="flex w-full items-center justify-center gap-1.5 rounded-xl px-3 py-1.5 text-meta-tight text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                onClick={() => setShowAllLinkedFiles((current) => !current)}
+                type="button"
+              >
+                {showAllLinkedFiles ? (
+                  <ChevronUp className="h-3.5 w-3.5" />
+                ) : (
+                  <ChevronDown className="h-3.5 w-3.5" />
+                )}
+                {showAllLinkedFiles
+                  ? "Collapse attachments"
+                  : `Show ${hiddenLinkedFileCount} more`}
+              </button>
+            ) : null}
           </div>
         ) : null}
 
         {shouldShowFooter ? (
           <div
             className={[
-              "mt-1.5 flex items-center gap-3 px-1 text-xs text-[var(--color-text-tertiary)] transition-opacity",
+              "mt-1.5 flex items-center gap-3 px-1 text-meta-tight text-[var(--color-text-tertiary)] transition-opacity",
               isUser ? "justify-end" : "justify-start",
               shouldHighlightFooter ? "opacity-100" : "opacity-0 group-hover:opacity-100",
             ].join(" ")}
           >
             {isEditingUserMessage ? (
-              <span className="inline-flex items-center rounded-full border border-[var(--color-border)] px-2 py-1 text-[11px] text-[var(--color-text-secondary)]">
+              <span className="inline-flex items-center rounded-full border border-[var(--color-border)] px-2 py-1 text-tiny text-[var(--color-text-secondary)]">
                 Editing in composer
               </span>
             ) : null}
             {canEditUserMessage ? (
               <button
-                className="inline-flex items-center gap-1 rounded-full px-2 py-1 transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                aria-label={isEditedUserMessage ? "Re-edit message" : "Edit message"}
+                className="inline-flex items-center rounded-full p-1.5 transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                 onClick={() => {
                   onEditUserMessage({
                     attachments: linkedFiles,
@@ -424,15 +509,16 @@ export function MessageBubble({
                     turnId: editTargetTurnId,
                   });
                 }}
+                title={isEditedUserMessage ? "Re-edit" : "Edit"}
                 type="button"
               >
                 <Pencil className="h-3.5 w-3.5" />
-                {isEditedUserMessage ? "Re-edit" : "Edit"}
               </button>
             ) : null}
             <button
+              aria-label={isCopied ? "Copied" : "Copy message"}
               className={[
-                "inline-flex items-center gap-1 rounded-full px-2 py-1 transition",
+                "inline-flex items-center rounded-full p-1.5 transition",
                 isCopied || isEditingUserMessage
                   ? "cursor-default text-[var(--color-text-secondary)]"
                   : "hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]",
@@ -445,12 +531,13 @@ export function MessageBubble({
                   setIsCopied(true);
                 }
               }}
+              title={isCopied ? "Copied" : "Copy"}
+              type="button"
             >
-              <Copy className="h-3.5 w-3.5" />
-              {isCopied ? "Copied" : "Copy"}
+              {isCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
             </button>
             {isEditedUserMessage ? (
-              <span className="inline-flex items-center rounded-full border border-[var(--color-border)] px-2 py-1 text-[11px] text-[var(--color-text-secondary)]">
+              <span className="inline-flex items-center rounded-full border border-[var(--color-border)] px-2 py-1 text-tiny text-[var(--color-text-secondary)]">
                 Edited
               </span>
             ) : null}
@@ -461,7 +548,7 @@ export function MessageBubble({
         {inlineStreamError ? (
           <div
             className={[
-              "mt-2 rounded-xl border border-[color-mix(in_srgb,var(--color-danger)_35%,var(--color-border))] bg-[color-mix(in_srgb,var(--color-danger)_8%,var(--color-panel))] px-3 py-2 text-[13px] leading-5 text-[var(--color-danger)]",
+              "mt-2 rounded-xl border border-[color-mix(in_srgb,var(--color-danger)_35%,var(--color-border))] bg-[color-mix(in_srgb,var(--color-danger)_8%,var(--color-panel))] px-3 py-2 text-ui text-[var(--color-danger)]",
               isUser ? "text-right" : "",
             ].join(" ")}
             role="alert"

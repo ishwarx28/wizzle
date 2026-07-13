@@ -407,6 +407,13 @@ export function buildDisplayMessages(messages: Message[]): DisplayMessage[] {
         : groupedMessages.some((message) => message.status === "interrupted")
           ? "interrupted"
           : "done";
+    const streamingMessages = groupedMessages.filter((message) => message.status === "streaming");
+    const transientReasoningActive = streamingMessages.some(
+      (message) => message.status === "streaming" && message.transientReasoningActive,
+    );
+    const transientStreamStarted = streamingMessages.some(
+      (message) => message.transientStreamStarted,
+    );
 
     displayMessages.push({
       content,
@@ -423,6 +430,8 @@ export function buildDisplayMessages(messages: Message[]): DisplayMessage[] {
       role: "assistant",
       startedAtMs: firstStartedAtMs,
       status,
+      transientReasoningActive,
+      transientStreamStarted,
     });
   }
 

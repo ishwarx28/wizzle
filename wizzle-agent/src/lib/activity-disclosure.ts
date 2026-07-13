@@ -6,6 +6,7 @@ import type { ActivitySegment } from "./tool-activity";
  */
 export function shouldShowWorkingPlaceholder(options: {
   hasFinalContent: boolean;
+  hasStreamStarted: boolean;
   hasToolOrVisibleActivity: boolean;
   isAssistant: boolean;
   status?: string | null;
@@ -15,6 +16,10 @@ export function shouldShowWorkingPlaceholder(options: {
   }
 
   if (options.status !== "streaming") {
+    return false;
+  }
+
+  if (options.hasStreamStarted) {
     return false;
   }
 
@@ -29,6 +34,15 @@ export function shouldShowWorkingPlaceholder(options: {
   return true;
 }
 
+/** Transient UI-only marker while reasoning tokens are arriving. */
+export function shouldShowReasoningWorkingEvent(options: {
+  isAssistant: boolean;
+  isReasoningActive: boolean;
+  status?: string | null;
+}) {
+  return options.isAssistant && options.status === "streaming" && options.isReasoningActive;
+}
+
 /** Whether a segment contributes visible body under the Working section. */
 export function activitySegmentHasVisibleBody(segment: ActivitySegment) {
   if (segment.type === "tool_group") {
@@ -36,7 +50,11 @@ export function activitySegmentHasVisibleBody(segment: ActivitySegment) {
   }
 
   const content = segment.part.content?.trim() ?? "";
-  if (segment.part.type === "activity_content" || segment.part.type === "reasoning") {
+  if (
+    segment.part.type === "activity_content" ||
+    segment.part.type === "reasoning" ||
+    segment.part.type === "subagent_response"
+  ) {
     return content.length > 0;
   }
 

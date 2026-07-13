@@ -12,6 +12,7 @@ import {
 import {
   appendOrUpdateMessage,
   beginSessionRun,
+  checkProjectRootExists,
   createSessionIfNeeded,
   deleteWorkspaceSession,
   finalizeTurn,
@@ -45,6 +46,7 @@ import {
 } from "../lib/agent/context-pressure";
 import { createDurablePersistFailureReporter } from "../lib/durable-persist-failure";
 import { getErrorMessage } from "../lib/settle-turn-persist";
+import { notifyWhenAppBackgrounded } from "../lib/desktop-notifications";
 import {
   completeSessionRunFinish,
   isSessionAlreadyRunningError,
@@ -83,6 +85,10 @@ import {
 } from "../lib/stream-step-error";
 import { settleNonToolTurnMessage } from "../lib/settle-turn-status";
 import {
+  closeWorkspaceSubagents,
+  interruptWorkspaceSubagents,
+} from "../lib/agent/subagent-manager";
+import {
   addSendingSessionId,
   removeSendingSessionId,
   resolveIsSendingMessage,
@@ -109,13 +115,25 @@ import type {
   Session,
   SessionEvent,
   ToolApprovalRequest,
+  WorkflowQuestionAnswer,
+  WorkflowQuestionRequest,
   WorkspaceSnapshot,
 } from "../types/workspace";
 import { formatExactMessageTimestamp } from "../utils/time";
 
+export type ChatErrorDetail =
+  | {
+      kind: "missing-project-root";
+      message: string;
+      projectId: string;
+      projectName: string;
+      rootPath: string;
+    };
+
 interface WorkspaceState {
   activeMessageEdit: MessageEditState | null;
   chatError: string | null;
+  chatErrorDetail: ChatErrorDetail | null;
   draftSessions: Record<string, Session>;
   projects: Project[];
   previewFiles: PreviewFile[];
@@ -145,6 +163,8 @@ interface WorkspaceState {
   pendingToolApprovalsBySessionId: Record<string, ToolApprovalRequest>;
   /** Convenience: approval for the currently selected session (derived). */
   pendingToolApproval: ToolApprovalRequest | null;
+  pendingWorkflowQuestionsBySessionId: Record<string, WorkflowQuestionRequest>;
+  pendingWorkflowQuestion: WorkflowQuestionRequest | null;
   providerModels: ProviderModelInfo[];
   providerModelsError: string | null;
   providers: ProviderInfo[];
@@ -172,6 +192,8 @@ interface WorkspaceState {
   setPermissionMode: (permissionMode: PermissionMode) => void;
   requestToolApproval: (request: ToolApprovalRequest) => Promise<boolean>;
   resolveToolApproval: (approved: boolean, toolCallId?: string) => void;
+  requestWorkflowQuestions: (request: WorkflowQuestionRequest) => Promise<WorkflowQuestionAnswer>;
+  resolveWorkflowQuestions: (answer: WorkflowQuestionAnswer, toolCallId?: string) => void;
   startMessageEdit: (edit: MessageEditState) => void;
   cancelMessageEdit: () => void;
   interruptPrompt: () => Promise<void>;
@@ -205,13 +227,27 @@ type PendingToolApprovalResolver = {
   toolCallId: string;
 };
 
+type PendingWorkflowQuestionResolver = {
+  reject: (error: Error) => void;
+  resolve: (answer: WorkflowQuestionAnswer) => void;
+  toolCallId: string;
+};
+
 type SubmitPromptResult =
   | { ok: true; accepted: true; turnId: string }
-  | { ok: false; accepted: false; error: string; retryable?: boolean }
+  | {
+      ok: false;
+      accepted: false;
+      error: string;
+      errorKind?: "missing-project-root";
+      retryable?: boolean;
+      suppressToast?: boolean;
+    }
   | { ok: false; accepted: true; turnId: string; error: string; retryable?: boolean };
 
 /** Resolvers live for the whole wait; not cleared on session switch (#26). */
 const pendingToolApprovalResolversBySessionId = new Map<string, PendingToolApprovalResolver>();
+const pendingWorkflowQuestionResolversBySessionId = new Map<string, PendingWorkflowQuestionResolver>();
 const activeRunRequestIdsBySession = new Map<string, string>();
 
 function requestComposerQueueDrain(sessionId: string) {
@@ -378,6 +414,20 @@ function withPendingApprovalsState(
   };
 }
 
+function pendingWorkflowQuestionForSelection(
+  selectedSessionId: string | null,
+  pendingBySessionId: Record<string, WorkflowQuestionRequest>,
+) {
+  return selectedSessionId ? pendingBySessionId[selectedSessionId] ?? null : null;
+}
+
+function rejectPendingWorkflowQuestionsForSession(sessionId: string) {
+  const resolver = pendingWorkflowQuestionResolversBySessionId.get(sessionId);
+  if (!resolver) return;
+  pendingWorkflowQuestionResolversBySessionId.delete(sessionId);
+  resolver.reject(new Error(INTERRUPTED_WORKSPACE_CHAT_ERROR));
+}
+
 function rejectPendingToolApprovalForSession(sessionId: string, interrupted = false) {
   const resolver = pendingToolApprovalResolversBySessionId.get(sessionId);
   if (!resolver) {
@@ -391,6 +441,14 @@ function rejectPendingToolApprovalForSession(sessionId: string, interrupted = fa
   });
 }
 
+function rejectMatchingToolApprovalForSession(sessionId: string, toolCallId: string) {
+  const resolver = pendingToolApprovalResolversBySessionId.get(sessionId);
+
+  if (resolver?.toolCallId === toolCallId) {
+    rejectPendingToolApprovalForSession(sessionId, true);
+  }
+}
+
 function rejectAllPendingToolApprovals(interrupted = false) {
   const sessionIds = Array.from(pendingToolApprovalResolversBySessionId.keys());
   for (const sessionId of sessionIds) {
@@ -402,26 +460,33 @@ function rejectAllPendingToolApprovals(interrupted = false) {
 export async function interruptAllWorkspaceRunsForShutdown() {
   const state = useWorkspaceStore.getState();
   rejectAllPendingToolApprovals(true);
+  for (const sessionId of pendingWorkflowQuestionResolversBySessionId.keys()) {
+    rejectPendingWorkflowQuestionsForSession(sessionId);
+  }
 
   const sessionIds = Array.from(
     new Set([
       ...state.sendingSessionIds,
       ...Object.keys(state.pendingToolApprovalsBySessionId),
+      ...Object.keys(state.pendingWorkflowQuestionsBySessionId),
     ]),
   );
 
   setWorkspacePendingApprovalsCleared();
 
   await Promise.all(
-    sessionIds.map((sessionId) =>
+    sessionIds.flatMap((sessionId) => [
+      interruptWorkspaceSubagents(sessionId).catch(() => undefined),
       interruptWorkspaceChat({ sessionId }).catch(() => undefined),
-    ),
+    ]),
   );
 }
 
 function setWorkspacePendingApprovalsCleared() {
   useWorkspaceStore.setState((state) => ({
     ...withPendingApprovalsState(state.selectedSessionId, {}),
+    pendingWorkflowQuestion: null,
+    pendingWorkflowQuestionsBySessionId: {},
   }));
 }
 
@@ -699,6 +764,75 @@ function resolvePersistedSession(projects: Project[], projectId: string, session
     ?.sessions.find((session) => session.id === sessionId);
 }
 
+function resolveSessionTitle(projects: Project[], sessionId: string) {
+  for (const project of projects) {
+    const session = project.sessions.find((entry) => entry.id === sessionId);
+    if (session) {
+      return session.title;
+    }
+  }
+
+  return null;
+}
+
+function resolveApprovalNotificationBody(request: ToolApprovalRequest) {
+  const requestCount = request.batchRequests?.length ?? 1;
+
+  if (requestCount > 1) {
+    return `Wizzle wants to run ${requestCount} tool calls`;
+  }
+
+  const toolName = request.toolName;
+  if (toolName === "bash") {
+    return "Wizzle wants to run a command";
+  }
+
+  if (toolName === "read") {
+    return "Wizzle wants to read a file";
+  }
+
+  if (toolName === "write") {
+    return "Wizzle wants to create a file";
+  }
+
+  return "Wizzle wants to edit a file";
+}
+
+function resolveFinalAssistantResponse(projects: Project[], sessionId: string, turnId: string) {
+  const session = projects
+    .flatMap((project) => project.sessions)
+    .find((entry) => entry.id === sessionId);
+  const assistantMessages = [...(session?.messages ?? [])]
+    .reverse()
+    .filter((message) => message.turnId === turnId && message.role === "assistant");
+  const finalAssistant =
+    assistantMessages.find((message) => message.assistantPhase === "final") ??
+    assistantMessages.find((message) => message.content.trim().length > 0);
+
+  return finalAssistant?.content.trim() || "Final assistant response";
+}
+
+function notifyTurnSettledInBackground(input: {
+  projects: Project[];
+  sessionId: string;
+  status: "done" | "error" | "interrupted";
+  turnId: string;
+}) {
+  const sessionTitle = resolveSessionTitle(input.projects, input.sessionId) ?? "Session";
+  const body =
+    input.status === "done"
+      ? resolveFinalAssistantResponse(input.projects, input.sessionId, input.turnId)
+      : input.status === "error"
+        ? "Turn failed."
+        : "Turn interrupted.";
+
+  void notifyWhenAppBackgrounded({
+    body,
+    tag: `wizzle-turn-${input.sessionId}`,
+    title: sessionTitle,
+  });
+}
+
 function isDraftSessionSelection(state: WorkspaceState) {
   const draftSession = state.draftSessions[state.selectedProjectId];
   return draftSession?.id === state.selectedSessionId;
@@ -717,11 +851,24 @@ function applyWorkspaceSnapshotToState(
     : {};
 
   const selectedProjectId = snapshot.selectedProjectId;
+  const activeSessionIds = new Set([
+    ...state.sendingSessionIds,
+    ...Object.keys(state.pendingToolApprovalsBySessionId),
+  ]);
   const projects = snapshot.projects.map((project) => {
     const currentProject = state.projects.find((p) => p.id === project.id);
-    return currentProject
-      ? { ...project, isExpanded: currentProject.isExpanded }
-      : project;
+    if (!currentProject) {
+      return project;
+    }
+
+    return {
+      ...project,
+      isExpanded: currentProject.isExpanded,
+      sessions: project.sessions.map((session) => {
+        const currentSession = currentProject.sessions.find((entry) => entry.id === session.id);
+        return currentSession && activeSessionIds.has(session.id) ? currentSession : session;
+      }),
+    };
   });
   const selectedProject = projects.find((project) => project.id === selectedProjectId);
   // #74: project selected + session null/stale → draft if any, else latest session.
@@ -743,6 +890,7 @@ function applyWorkspaceSnapshotToState(
     modelId: snapshot.modelId,
     openedFileIds: [],
     permissionMode: snapshot.permissionMode,
+    reasoningLevel: snapshot.reasoningLevel ?? state.reasoningLevel,
     previewFiles: mergeHydratedPreviewFiles(snapshot.previewFiles, state.previewFiles, nextDraftSessions),
     projects,
     selectedProjectId,
@@ -838,8 +986,34 @@ async function persistWorkspaceSettingsForCurrentState() {
     isSidebarOpen: state.isSidebarOpen,
     modelId: state.modelId,
     permissionMode: state.permissionMode,
+    reasoningLevel: state.reasoningLevel,
     selectedProjectId: state.selectedProjectId || null,
     selectedSessionId,
+  });
+}
+
+async function persistSelectedSessionModelSettings() {
+  const state = useWorkspaceStore.getState();
+  if (!state.selectedProjectId || !state.selectedSessionId || isDraftSessionSelection(state)) {
+    return;
+  }
+  const session = resolvePersistedSession(
+    state.projects,
+    state.selectedProjectId,
+    state.selectedSessionId,
+  );
+  const model = state.providerModels.find((entry) => entry.id === state.modelId);
+  const provider = state.providers.find((entry) => entry.id === model?.providerId);
+  if (!session || !model) {
+    return;
+  }
+  await updateSessionSelection({
+    permissionMode: session.permissionMode ?? state.permissionMode,
+    projectId: state.selectedProjectId,
+    reasoningLevel: state.reasoningLevel,
+    selectedModelUuid: state.modelId,
+    sessionId: state.selectedSessionId,
+    tokenizerKind: resolveEffectiveTokenizer(model, provider).kind,
   });
 }
 
@@ -847,6 +1021,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   activeMessageEdit: null,
   activeFileId: null,
   chatError: null,
+  chatErrorDetail: null,
   draftSessions: {},
   hasHydratedWorkspace: false,
   isFilePanelOpen: true,
@@ -860,6 +1035,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   openedFileIds: [],
   pendingToolApproval: null,
   pendingToolApprovalsBySessionId: {},
+  pendingWorkflowQuestion: null,
+  pendingWorkflowQuestionsBySessionId: {},
   permissionMode: "manual-approve",
   reasoningLevel: "",
   previewFiles: [],
@@ -869,7 +1046,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   providers: [],
   selectedProjectId: "",
   selectedSessionId: null,
-  clearChatError: () => set({ chatError: null }),
+  clearChatError: () => set({ chatError: null, chatErrorDetail: null }),
   clearSessionStreamError: (sessionId) =>
     set((state) => ({
       sessionStreamErrors: clearSessionStreamErrorMap(state.sessionStreamErrors, sessionId),
@@ -894,6 +1071,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         ...applied,
         activeMessageEdit: didChangeWorkspaceContext ? null : state.activeMessageEdit,
         chatError: didChangeWorkspaceContext ? null : state.chatError,
+        chatErrorDetail: didChangeWorkspaceContext ? null : state.chatErrorDetail,
         // Recompute selected-session busy flag after selection may change.
         ...withSendingSessionState(nextSelectedSessionId, state.sendingSessionIds),
         ...withPendingApprovalsState(nextSelectedSessionId, {}),
@@ -941,6 +1119,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       return {
         activeMessageEdit: null,
         chatError: null,
+        chatErrorDetail: null,
         draftSessions: nextDraftSessions,
         projects: nextProjects,
         selectedProjectId: projectId,
@@ -1036,6 +1215,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   deleteSession: async (projectId, sessionId) => {
     // Deleting a session interrupts its pending approval / run.
     rejectPendingToolApprovalForSession(sessionId, true);
+    await closeWorkspaceSubagents(sessionId);
 
     const snapshot = await deleteWorkspaceSession(projectId, sessionId);
 
@@ -1073,6 +1253,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       ? null
       : resolvePersistedSession(currentState.projects, projectId, sessionId);
     const needsHydration = Boolean(persistedSession && !persistedSession.messagesLoaded);
+    const selectedModelId =
+      persistedSession?.modelId &&
+      currentState.providerModels.some((model) => model.id === persistedSession.modelId)
+        ? persistedSession.modelId
+        : currentState.modelId;
+    const selectedModel = currentState.providerModels.find((model) => model.id === selectedModelId);
+    const selectedReasoningLevel =
+      persistedSession?.reasoningLevel &&
+      selectedModel?.reasoningLevels.includes(persistedSession.reasoningLevel)
+        ? persistedSession.reasoningLevel
+        : selectedModel?.reasoningLevels.includes(currentState.reasoningLevel)
+          ? currentState.reasoningLevel
+          : selectedModel?.reasoningLevels[0] ?? "";
 
     // Do NOT reject pending approvals on switch — keep waiters alive and re-show on return (#26/#28).
 
@@ -1080,12 +1273,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       activeFileId: didChangeSelection ? null : state.activeFileId,
       activeMessageEdit: didChangeSelection ? null : state.activeMessageEdit,
       chatError: didChangeSelection ? null : state.chatError,
+      chatErrorDetail: didChangeSelection ? null : state.chatErrorDetail,
       loadingSessionId: needsHydration ? sessionId : null,
+      modelId: selectedModelId,
       openedFileIds: didChangeSelection ? [] : state.openedFileIds,
+      reasoningLevel: selectedReasoningLevel,
       selectedProjectId: projectId,
       selectedSessionId: sessionId,
       ...withSendingSessionState(sessionId, state.sendingSessionIds),
       ...withPendingApprovalsState(sessionId, state.pendingToolApprovalsBySessionId),
+      pendingWorkflowQuestion: pendingWorkflowQuestionForSelection(
+        sessionId,
+        state.pendingWorkflowQuestionsBySessionId,
+      ),
     }));
     // Drain any stranded queue for the session we left and the one we open (#43).
     if (currentState.selectedSessionId && currentState.selectedSessionId !== sessionId) {
@@ -1134,6 +1334,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           state.selectedProjectId === projectId && state.selectedSessionId === sessionId
             ? {
                 chatError: message,
+                chatErrorDetail: null,
                 loadingSessionId: null,
               }
             : state,
@@ -1173,18 +1374,49 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   setModelId: (modelId) => {
     set((state) => {
       const selectedModel = state.providerModels.find((model) => model.id === modelId);
+      const reasoningLevel = selectedModel?.reasoningLevels.includes(state.reasoningLevel)
+        ? state.reasoningLevel
+        : selectedModel?.reasoningLevels[0] ?? "";
+      const projects =
+        state.selectedProjectId && state.selectedSessionId && !isDraftSessionSelection(state)
+          ? updatePersistedSession(
+              state.projects,
+              state.selectedProjectId,
+              state.selectedSessionId,
+              (session) => {
+                session.modelId = modelId;
+                session.reasoningLevel = reasoningLevel;
+                session.selectedModelUuid = modelId;
+              },
+            ) ?? state.projects
+          : state.projects;
 
       return {
         modelId,
-        reasoningLevel: selectedModel?.reasoningLevels.includes(state.reasoningLevel)
-          ? state.reasoningLevel
-          : selectedModel?.reasoningLevels[0] ?? "",
+        projects,
+        reasoningLevel,
       };
     });
     void persistWorkspaceSettingsForCurrentState().catch(() => undefined);
+    void persistSelectedSessionModelSettings().catch(() => undefined);
   },
   setReasoningLevel: (reasoningLevel) => {
-    set({ reasoningLevel });
+    set((state) => ({
+      projects:
+        state.selectedProjectId && state.selectedSessionId && !isDraftSessionSelection(state)
+          ? updatePersistedSession(
+              state.projects,
+              state.selectedProjectId,
+              state.selectedSessionId,
+              (session) => {
+                session.reasoningLevel = reasoningLevel;
+              },
+            ) ?? state.projects
+          : state.projects,
+      reasoningLevel,
+    }));
+    void persistWorkspaceSettingsForCurrentState().catch(() => undefined);
+    void persistSelectedSessionModelSettings().catch(() => undefined);
   },
   setProviderConfig: ({ models, providers }) =>
     set((state) => {
@@ -1220,6 +1452,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         [sessionId]: request,
       };
       return withPendingApprovalsState(state.selectedSessionId, pendingToolApprovalsBySessionId);
+    });
+
+    const sessionTitle =
+      resolveSessionTitle(useWorkspaceStore.getState().projects, sessionId) ?? "Session";
+    void notifyWhenAppBackgrounded({
+      body: resolveApprovalNotificationBody(request),
+      tag: `wizzle-approval-${sessionId}`,
+      title: sessionTitle,
     });
 
     const resolution = await new Promise<PendingToolApprovalResolution>((resolve) => {
@@ -1279,6 +1519,58 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       interrupted: false,
     });
   },
+  requestWorkflowQuestions: async (request) => {
+    rejectPendingWorkflowQuestionsForSession(request.sessionId);
+    set((state) => {
+      const pendingWorkflowQuestionsBySessionId = {
+        ...state.pendingWorkflowQuestionsBySessionId,
+        [request.sessionId]: request,
+      };
+      return {
+        pendingWorkflowQuestion: pendingWorkflowQuestionForSelection(
+          state.selectedSessionId,
+          pendingWorkflowQuestionsBySessionId,
+        ),
+        pendingWorkflowQuestionsBySessionId,
+      };
+    });
+    const sessionTitle = resolveSessionTitle(useWorkspaceStore.getState().projects, request.sessionId) ?? "Session";
+    void notifyWhenAppBackgrounded({
+      body: request.kind === "approach" ? "Choose an implementation approach." : "The agent needs one detail.",
+      tag: `wizzle-clarify-${request.sessionId}`,
+      title: sessionTitle,
+    });
+    try {
+      return await new Promise<WorkflowQuestionAnswer>((resolve, reject) => {
+        pendingWorkflowQuestionResolversBySessionId.set(request.sessionId, {
+          reject,
+          resolve,
+          toolCallId: request.toolCallId,
+        });
+      });
+    } finally {
+      set((state) => {
+        const pendingWorkflowQuestionsBySessionId = { ...state.pendingWorkflowQuestionsBySessionId };
+        if (pendingWorkflowQuestionsBySessionId[request.sessionId]?.toolCallId === request.toolCallId) {
+          delete pendingWorkflowQuestionsBySessionId[request.sessionId];
+        }
+        return {
+          pendingWorkflowQuestion: pendingWorkflowQuestionForSelection(state.selectedSessionId, pendingWorkflowQuestionsBySessionId),
+          pendingWorkflowQuestionsBySessionId,
+        };
+      });
+    }
+  },
+  resolveWorkflowQuestions: (answer, toolCallId) => {
+    const state = useWorkspaceStore.getState();
+    const sessionId = state.selectedSessionId;
+    if (!sessionId) return;
+    const request = state.pendingWorkflowQuestionsBySessionId[sessionId];
+    const resolver = pendingWorkflowQuestionResolversBySessionId.get(sessionId);
+    if (!request || !resolver || (toolCallId && request.toolCallId !== toolCallId)) return;
+    pendingWorkflowQuestionResolversBySessionId.delete(sessionId);
+    resolver.resolve(answer);
+  },
   startMessageEdit: (edit) =>
     set((state) => {
       const session = resolvePersistedSession(state.projects, edit.projectId, edit.sessionId);
@@ -1319,6 +1611,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       return {
         activeMessageEdit: edit,
         chatError: null,
+        chatErrorDetail: null,
       };
     }),
   cancelMessageEdit: () => set({ activeMessageEdit: null }),
@@ -1332,14 +1625,24 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     }
 
     rejectPendingToolApprovalForSession(sessionId, true);
+    rejectPendingWorkflowQuestionsForSession(sessionId);
     // Do not auto-continue after the user stops a pressure-settled run.
     cancelQueuedContextContinues(sessionId);
     set((current) => {
       const pendingToolApprovalsBySessionId = { ...current.pendingToolApprovalsBySessionId };
+      const pendingWorkflowQuestionsBySessionId = { ...current.pendingWorkflowQuestionsBySessionId };
       delete pendingToolApprovalsBySessionId[sessionId];
-      return withPendingApprovalsState(current.selectedSessionId, pendingToolApprovalsBySessionId);
+      delete pendingWorkflowQuestionsBySessionId[sessionId];
+      return {
+        ...withPendingApprovalsState(current.selectedSessionId, pendingToolApprovalsBySessionId),
+        pendingWorkflowQuestion: pendingWorkflowQuestionForSelection(current.selectedSessionId, pendingWorkflowQuestionsBySessionId),
+        pendingWorkflowQuestionsBySessionId,
+      };
     });
-    await interruptWorkspaceChat({ sessionId });
+    await Promise.all([
+      interruptWorkspaceSubagents(sessionId),
+      interruptWorkspaceChat({ sessionId }),
+    ]);
   },
   sendPrompt: async (prompt, attachments = [], options): Promise<SubmitPromptResult> => {
     const initialState = useWorkspaceStore.getState();
@@ -1372,19 +1675,58 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       const error = formatPromptTooLargeError(MAX_PROMPT_SIZE);
       set({
         chatError: error,
+        chatErrorDetail: null,
       });
       return { accepted: false, error, ok: false };
     }
 
     if (!targetProjectId) {
       const error = "Choose a project before sending a message.";
-      set({ chatError: error });
+      set({ chatError: error, chatErrorDetail: null });
       return { accepted: false, error, ok: false };
+    }
+
+    const targetProject = initialState.projects.find((project) => project.id === targetProjectId);
+    if (!targetProject) {
+      const error = "The selected project is no longer available.";
+      set({ chatError: error, chatErrorDetail: null });
+      return { accepted: false, error, ok: false };
+    }
+
+    try {
+      const projectRootExists = await checkProjectRootExists(targetProjectId);
+      if (!projectRootExists) {
+        const error = `Project folder not found: ${targetProject.rootPath}`;
+        set({
+          chatError: error,
+          chatErrorDetail: {
+            kind: "missing-project-root",
+            message: error,
+            projectId: targetProject.id,
+            projectName: targetProject.name,
+            rootPath: targetProject.rootPath,
+          },
+        });
+        return {
+          accepted: false,
+          error,
+          errorKind: "missing-project-root",
+          ok: false,
+          suppressToast: true,
+        };
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message.trim()
+          ? error.message
+          : "Wizzle could not inspect the selected project folder.";
+      set({ chatError: message, chatErrorDetail: null });
+      return { accepted: false, error: message, ok: false };
     }
 
     if (!initialState.modelId || !initialState.providerModels.some((model) => model.id === initialState.modelId)) {
       const error = "Choose a provider model before sending a message.";
-      set({ chatError: error });
+      set({ chatError: error, chatErrorDetail: null });
       return { accepted: false, error, ok: false };
     }
     const initialProviderModel =
@@ -1399,13 +1741,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       attachments,
     );
     if (imageAttachmentError) {
-      set({ chatError: imageAttachmentError });
+      set({ chatError: imageAttachmentError, chatErrorDetail: null });
       return { accepted: false, error: imageAttachmentError, ok: false };
     }
 
     if (initialState.loadingSessionId && initialState.loadingSessionId === targetSessionId) {
       const error = "Wait for the selected session to finish loading.";
-      set({ chatError: error });
+      set({ chatError: error, chatErrorDetail: null });
       return { accepted: false, error, ok: false };
     }
 
@@ -1473,6 +1815,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           messagesLoaded: true,
           modelId: state.modelId,
           permissionMode: state.permissionMode,
+          reasoningLevel: state.reasoningLevel,
           replayTurnSummaries: [],
           title: fallbackTitle,
           updatedAtLabel: nowLabel(),
@@ -1496,6 +1839,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
         return {
           chatError: null,
+          chatErrorDetail: null,
           draftSessions: nextDraftSessions,
           previewFiles: nextPreviewFiles,
           projects: nextProjects,
@@ -1515,7 +1859,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     } else {
       if (!targetSessionId) {
         const error = "Choose or create a session before sending a message.";
-        set({ chatError: error });
+        set({ chatError: error, chatErrorDetail: null });
         return { accepted: false, error, ok: false };
       }
 
@@ -1527,7 +1871,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
       if (!existingSession) {
         const error = "Could not resolve the active chat.";
-        set({ chatError: error });
+        set({ chatError: error, chatErrorDetail: null });
         return { accepted: false, error, ok: false };
       }
 
@@ -1539,6 +1883,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           set({
             activeMessageEdit: null,
             chatError: error,
+            chatErrorDetail: null,
           });
           return { accepted: false, error, ok: false };
         }
@@ -1570,6 +1915,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
             }
             session.modelId = state.modelId;
             session.permissionMode = state.permissionMode;
+            session.reasoningLevel = state.reasoningLevel;
             session.updatedAtLabel = nowLabel();
             session.updatedAtMs = timestamp;
           },
@@ -1587,6 +1933,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         return {
           activeMessageEdit: null,
           chatError: null,
+          chatErrorDetail: null,
           previewFiles: nextPreviewFiles,
           projects: nextProjects,
           // #19 C: new send hides prior stream-step error under the bubble.
@@ -1615,6 +1962,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       const error = "Could not resolve the active chat.";
       set((state) => ({
         chatError: error,
+        chatErrorDetail: null,
         ...withSendingSessionState(state.selectedSessionId, state.sendingSessionIds),
       }));
       return { accepted: false, error, ok: false };
@@ -1637,6 +1985,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       // Keep projects/selection; only clear the sending flag. Persist best-effort.
       set((state) => ({
         chatError: retryable ? state.chatError : message,
+        chatErrorDetail: retryable ? state.chatErrorDetail : null,
         ...withSendingSessionState(
           state.selectedSessionId,
           removeSendingSessionId(targetSessionId, state.sendingSessionIds),
@@ -1703,6 +2052,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         await updateSessionSelection({
           permissionMode: sessionToPersist.permissionMode ?? currentPersistState.permissionMode,
           projectId: targetProjectId,
+          reasoningLevel: sessionToPersist.reasoningLevel ?? currentPersistState.reasoningLevel,
           selectedModelUuid: sessionToPersist.selectedModelUuid ?? currentPersistState.modelId,
           sessionId: targetSessionId,
           tokenizerKind: initialTokenizer.kind,
@@ -1842,6 +2192,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       // I-11: keep the user message in the transcript; do not restore pre-send project snapshot.
       set((state) => ({
         chatError: message,
+        chatErrorDetail: null,
         ...withSendingSessionState(
           state.selectedSessionId,
           removeSendingSessionId(targetSessionId, state.sendingSessionIds),
@@ -1878,11 +2229,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     let settledTurnPersistResult: SettledTurnPersistResult | null = null;
     const bufferedToolOutputByCallId = new Map<string, BufferedToolOutput>();
     let activeContentStepId: string | null = null;
+    const streamStartedAssistantMessageIds = new Set<string>();
+    const reasoningActiveAssistantMessageIds = new Set<string>();
 
     // Soft UI warning for mid-stream save failures; do not abort the turn (#6).
     const durablePersistFailureReporter = createDurablePersistFailureReporter({
       onReport: (message) => {
-        set({ chatError: message });
+        set({ chatError: message, chatErrorDetail: null });
       },
     });
 
@@ -2241,6 +2594,60 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       }, STREAM_FLUSH_INTERVAL_MS);
     };
 
+    const markAssistantStreamState = (
+      messageId: string,
+      options: {
+        reasoningActive: boolean;
+        streamStarted?: boolean;
+      },
+    ) => {
+      if (!isActiveRunRequest() || turnSettled) {
+        return;
+      }
+
+      const shouldMarkStarted = options.streamStarted ?? true;
+      const streamStartedChanged =
+        shouldMarkStarted && !streamStartedAssistantMessageIds.has(messageId);
+      const reasoningChanged = options.reasoningActive
+        ? !reasoningActiveAssistantMessageIds.has(messageId)
+        : reasoningActiveAssistantMessageIds.has(messageId);
+
+      if (!streamStartedChanged && !reasoningChanged) {
+        return;
+      }
+
+      if (shouldMarkStarted) {
+        streamStartedAssistantMessageIds.add(messageId);
+      }
+      if (options.reasoningActive) {
+        reasoningActiveAssistantMessageIds.add(messageId);
+      } else {
+        reasoningActiveAssistantMessageIds.delete(messageId);
+      }
+
+      set((state) => {
+        const nextProjects = updatePersistedSession(
+          state.projects,
+          targetProjectId,
+          targetSessionId as string,
+          (session) => {
+            const targetMessage = session.messages.find((message) => message.id === messageId);
+
+            if (!targetMessage) {
+              return;
+            }
+
+            if (shouldMarkStarted) {
+              targetMessage.transientStreamStarted = true;
+            }
+            targetMessage.transientReasoningActive = options.reasoningActive;
+          },
+        );
+
+        return nextProjects ? { projects: nextProjects } : state;
+      });
+    };
+
     const beginAssistantMessage = (message: Message) => {
       if (!isActiveRunRequest()) {
         return;
@@ -2287,6 +2694,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     };
 
     const finishReasoningStep = (messageId: string) => {
+      markAssistantStreamState(messageId, {
+        reasoningActive: false,
+        streamStarted: true,
+      });
       frontendLogger.debug("frontend.workspace", "assistant_reasoning_finished", {
         messageIdLength: messageId.length,
         reasoningStepIdLength: 0,
@@ -2330,6 +2741,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
                 : undefined);
             // Content stream is finished; phase "working" still has tool_call parts (#15).
             targetMessage.status = "done";
+            targetMessage.transientReasoningActive = false;
+            targetMessage.transientStreamStarted = true;
             targetMessage.parts = (targetMessage.parts ?? []).map((part) => {
               if (
                 part.status !== "streaming" ||
@@ -2383,6 +2796,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
               return;
             }
 
+            targetMessage.transientReasoningActive = false;
+            targetMessage.transientStreamStarted = true;
             targetMessage.toolCalls = toolCalls;
             const existingParts = targetMessage.parts ?? [];
             const nonToolCallParts = existingParts.filter((part) => part.type !== "tool_call");
@@ -2636,6 +3051,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
               .flatMap((message) => message.linkedFileIds ?? []);
             const completedAtMs = Date.now();
             let lastAssistantMessage = assistantMessages[assistantMessages.length - 1];
+
+            for (const assistantMessage of assistantMessages) {
+              assistantMessage.transientReasoningActive = false;
+              if (assistantMessage.status === "streaming") {
+                assistantMessage.transientStreamStarted = true;
+              }
+            }
 
             if (!lastAssistantMessage && fallbackContent) {
               lastAssistantMessage = {
@@ -3032,7 +3454,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         return;
       }
 
-      set({ chatError: description });
+      set({ chatError: description, chatErrorDetail: null });
     };
 
     const finishRuntimeRun = async () => {
@@ -3088,6 +3510,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       await activateTokenizer(effectiveTokenizer.localPath);
 
       const agentRunResult = await runWorkspaceAgent({
+        cancelToolApproval: (toolCallId) =>
+          rejectMatchingToolApprovalForSession(targetSessionId as string, toolCallId),
         chatId: targetSessionId,
         // Exclude pre-send Working… placeholders from model context (I-15).
         history: session.messages.filter((message) => !isPendingAssistantPlaceholder(message)),
@@ -3100,8 +3524,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           }
 
           if (kind === "reasoning") {
-            void text;
+            markAssistantStreamState(messageId, {
+              reasoningActive: true,
+              streamStarted: true,
+            });
           } else {
+            markAssistantStreamState(messageId, {
+              reasoningActive: false,
+              streamStarted: true,
+            });
             bufferedContent += text;
             scheduleChunkFlush();
           }
@@ -3268,6 +3699,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           : selectedProviderModel.reasoningLevels[0],
         requestToolApproval: (request) =>
           useWorkspaceStore.getState().requestToolApproval(request),
+        requestWorkflowQuestions: (request) =>
+          useWorkspaceStore.getState().requestWorkflowQuestions(request),
         selectedModel: selectedProviderModel,
         turnSummaries: session.replayTurnSummaries ?? [],
         turnId,
@@ -3287,6 +3720,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           removeSendingSessionId(targetSessionId, state.sendingSessionIds),
         ),
       }));
+      notifyTurnSettledInBackground({
+        projects: useWorkspaceStore.getState().projects,
+        sessionId: targetSessionId,
+        status: "done",
+        turnId,
+      });
       // After context pressure: one internal continue ahead of any user queue.
       // Standard compaction for the oversized turn runs on the continue send.
       if (agentRunResult.finishReason === "context_pressure") {
@@ -3332,6 +3771,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
             removeSendingSessionId(targetSessionId, state.sendingSessionIds),
           ),
         }));
+        notifyTurnSettledInBackground({
+          projects: useWorkspaceStore.getState().projects,
+          sessionId: targetSessionId,
+          status: "interrupted",
+          turnId,
+        });
         requestComposerQueueDrain(targetSessionId);
         frontendLogger.info("frontend.workspace", "agent_run_interrupted", {
           finalizeError: persistResult?.finalizeError ?? null,
@@ -3400,6 +3845,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
       set((state) => ({
         chatError: null,
+        chatErrorDetail: null,
         sessionStreamErrors: setSessionStreamErrorMap(state.sessionStreamErrors, targetSessionId, {
           message: streamErrorMessage,
           turnId,
@@ -3409,6 +3855,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           removeSendingSessionId(targetSessionId, state.sendingSessionIds),
         ),
       }));
+      notifyTurnSettledInBackground({
+        projects: useWorkspaceStore.getState().projects,
+        sessionId: targetSessionId,
+        status: "error",
+        turnId,
+      });
       requestComposerQueueDrain(targetSessionId);
       // Message was accepted into the session; keep accepted so composer does not restore draft (#79).
       return { accepted: true, error: streamErrorMessage, ok: false, turnId };

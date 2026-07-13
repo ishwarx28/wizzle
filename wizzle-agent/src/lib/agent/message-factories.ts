@@ -1,6 +1,7 @@
 import type { Message, ToolCall } from "../../types/workspace";
 import { formatExactMessageTimestamp } from "../../utils/time";
 import type { OpenAIChatToolCall } from "../chat-stream";
+import type { SubagentResponse } from "./subagent-manager";
 
 export type ToolExecutionPayload = {
   error?: string | null;
@@ -200,5 +201,65 @@ export function createToolCallState(toolCall: OpenAIChatToolCall): ToolCall {
     input: toolCall.function.arguments,
     name: toolCall.function.name,
     status: "pending",
+  };
+}
+
+export function createSubagentResponseMessage(
+  response: SubagentResponse,
+  fallbackTurnId: string,
+): Message {
+  const content = [
+    response.trigger === "manual"
+      ? "Manual subagent interruption event"
+      : "Subagent response injection",
+    `Task ID: ${response.taskId}`,
+    `Name: ${response.name}`,
+    `Task: ${response.task}`,
+    `Join: ${response.join}`,
+    `Status: ${response.status}`,
+    "",
+    response.output,
+    "",
+    "Integrate this result. Do not repeat the completed delegated scope; use direct tools only for a specific validation gap.",
+  ].join("\n");
+
+  return {
+    completedAtMs: response.completedAtMs,
+    content,
+    createdAtLabel: formatExactMessageTimestamp(response.completedAtMs),
+    createdAtMs: response.completedAtMs,
+    id: `message-subagent-${response.taskId}-${response.sequence}`,
+    parts: [
+      {
+        content,
+        createdAtMs: response.completedAtMs,
+        id: `message-subagent-${response.taskId}-${response.sequence}-response`,
+        metadata: {
+          sequence: response.sequence,
+          status: response.status,
+          name: response.name,
+          join: response.join,
+          task: response.task,
+          taskId: response.taskId,
+          trigger: response.trigger,
+        },
+        status:
+          response.status === "completed"
+            ? "done"
+            : response.status === "interrupted"
+              ? "interrupted"
+              : "error",
+        type: "subagent_response",
+      },
+    ],
+    role: "tool",
+    status:
+      response.status === "completed"
+        ? "done"
+        : response.status === "interrupted"
+          ? "interrupted"
+          : "error",
+    toolName: "subagent_response",
+    turnId: response.ownerTurnId || fallbackTurnId,
   };
 }

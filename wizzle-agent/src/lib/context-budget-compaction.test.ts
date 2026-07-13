@@ -236,6 +236,33 @@ function main() {
     "cap reinflate at 5",
   );
   assert(
+    reinflateSelection.requestEstimatedTokens > reinflateSelection.estimatedTokens,
+    "reinflated pairs count toward the actual request but not required live usage",
+  );
+  assert(
+    reinflateSelection.requestEstimatedTokens <= reinflateSelection.budget.inputBudget,
+    "reinflated pairs stay within residual request space",
+  );
+  const requiredOnlySelection = selectReplayHistoryWithinBudget({
+    compactedContext: {
+      compactedTurnIds: [turnA, turnB, turnC],
+      summary: "Identified several issues. Goal: keep fixing.",
+      tokens: 40,
+      updatedAtMs: 1,
+    },
+    currentTurnId: turnActive,
+    history: reinflateHistory.filter((message) => message.turnId === turnActive),
+    maxContext: 128_000,
+    maxOutputTokens: 1_000,
+    modelCapabilities: ["text"],
+    previewFileMap: new Map(),
+    systemPrompt: "sys",
+  });
+  assert(
+    reinflateSelection.estimatedTokens === requiredOnlySelection.estimatedTokens,
+    "optional reinflated history does not increase compaction or displayed usage",
+  );
+  assert(
     !reinflateSelection.messages.some((message) => message.role === "tool"),
     "reinflate excludes tool activity",
   );

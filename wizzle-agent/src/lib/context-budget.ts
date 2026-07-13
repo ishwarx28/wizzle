@@ -69,8 +69,11 @@ export type ReplaySelectionResult = {
   blocks: ReplayBlock[];
   compactedSummaryTokens: number;
   droppedTurnIds: string[];
+  /** Required live usage only. Optional reinflated compacted turns are excluded. */
   estimatedTokens: number;
   messages: Message[];
+  /** Actual request usage, including optional reinflated user+final pairs. */
+  requestEstimatedTokens: number;
   /** Compacted turns reinflated as user+final only (newest-fit residual budget). */
   reinflatedTurnIds: string[];
 };
@@ -581,7 +584,7 @@ export function selectReplayHistoryWithinBudget(options: {
     return true;
   });
 
-  let estimatedTokens =
+  const estimatedTokens =
     fixedLiveTokens +
     includedBlocks.reduce((total, block) => total + estimateBlock(block).tokens, 0);
 
@@ -600,7 +603,7 @@ export function selectReplayHistoryWithinBudget(options: {
     residualTokens: budget.inputBudget - estimatedTokens,
   });
 
-  estimatedTokens += reinflate.tokens;
+  const requestEstimatedTokens = estimatedTokens + reinflate.tokens;
 
   return {
     blocks,
@@ -609,6 +612,7 @@ export function selectReplayHistoryWithinBudget(options: {
     droppedTurnIds,
     estimatedTokens,
     messages: [...reinflate.messages, ...includedBlocks.flatMap((block) => block.messages)],
+    requestEstimatedTokens,
     reinflatedTurnIds: reinflate.turnIds,
   } satisfies ReplaySelectionResult;
 }

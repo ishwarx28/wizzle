@@ -1,14 +1,22 @@
 import { PanelLeftOpen, PanelRightOpen } from "lucide-react";
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { ChatView } from "../components/workspace/ChatView";
+import { AppDialog } from "../components/common/AppDialog";
 import { FilePanel } from "../components/workspace/FilePanel";
 import { SessionProcessMenu } from "../components/workspace/SessionProcessMenu";
+import { SessionSubagentMenu } from "../components/workspace/SessionSubagentMenu";
 import { Sidebar } from "../components/workspace/Sidebar";
 import { usePanelResize } from "../hooks/use-panel-resize";
 import { useWindowDrag } from "../hooks/use-window-drag";
 import { frontendLogger } from "../lib/logger";
+import {
+  CLOSE_SUBAGENT_VIEW_EVENT,
+  REQUEST_APP_EXIT_EVENT,
+  resolveNativeCloseAction,
+} from "../lib/app-window-events";
 import { listProviderModels, listProviders, loadWorkspaceSnapshot } from "../lib/local-workspace";
 import {
   interruptAllWorkspaceRunsForShutdown,
@@ -45,6 +53,9 @@ export function AppPage() {
   const [activePage, setActivePage] = useState<"chat" | "providers">("chat");
   const [startupError, setStartupError] = useState<string | null>(null);
   const [startupRetryKey, setStartupRetryKey] = useState(0);
+  const [isExitConfirmationOpen, setIsExitConfirmationOpen] = useState(false);
+  const [isClosingApp, setIsClosingApp] = useState(false);
+  const isClosingAppRef = useRef(false);
   const hasHydratedWorkspace = useWorkspaceStore((state) => state.hasHydratedWorkspace);
   const draftSessions = useWorkspaceStore((state) => state.draftSessions);
   const isFilePanelOpen = useWorkspaceStore((state) => state.isFilePanelOpen);
@@ -152,21 +163,61 @@ export function AppPage() {
     window.addEventListener("beforeunload", handlePageHide);
 
     let unlistenClose: (() => void) | undefined;
-    void getCurrentWindow()
-      .onCloseRequested(async () => {
-        await interruptAllWorkspaceRunsForShutdown();
+    const appWindow = getCurrentWindow();
+    const requestExit = () => {
+      if (!isClosingAppRef.current) {
+        setIsExitConfirmationOpen(true);
+      }
+    };
+    void appWindow
+      .onCloseRequested((event) => {
+        if (isClosingAppRef.current) {
+          return;
+        }
+
+        event.preventDefault();
+        const action = resolveNativeCloseAction(
+          Boolean(document.querySelector("[data-subagent-conversation]")),
+        );
+        if (action === "close_subagent_view") {
+          window.dispatchEvent(new CustomEvent(CLOSE_SUBAGENT_VIEW_EVENT));
+          return;
+        }
+        requestExit();
       })
       .then((unlisten) => {
         unlistenClose = unlisten;
       })
       .catch(() => undefined);
+    window.addEventListener(REQUEST_APP_EXIT_EVENT, requestExit);
 
     return () => {
       window.removeEventListener("pagehide", handlePageHide);
       window.removeEventListener("beforeunload", handlePageHide);
+      window.removeEventListener(REQUEST_APP_EXIT_EVENT, requestExit);
       unlistenClose?.();
     };
   }, []);
+
+  async function exitApp() {
+    if (isClosingAppRef.current) {
+      return;
+    }
+    isClosingAppRef.current = true;
+    setIsClosingApp(true);
+
+    try {
+      await Promise.race([
+        interruptAllWorkspaceRunsForShutdown(),
+        new Promise<void>((resolve) => window.setTimeout(resolve, 1_500)),
+      ]);
+      await invoke("exit_app");
+    } catch (error) {
+      frontendLogger.error("frontend.app", "app_exit_failed", { error });
+      isClosingAppRef.current = false;
+      setIsClosingApp(false);
+    }
+  }
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -261,7 +312,7 @@ export function AppPage() {
                   </button>
                 ) : null}
                 <div className="min-w-0 select-none">
-                  <p className="truncate text-[15px] font-medium leading-none text-[var(--color-text)]">
+                  <p className="truncate text-ui-tight font-medium text-[var(--color-text)]">
                     {activePage === "providers"
                       ? "Providers"
                       : currentSession?.title ??
@@ -276,7 +327,10 @@ export function AppPage() {
 
               <div className="relative z-10 flex shrink-0 items-center gap-0.5">
                 {activePage === "chat" ? (
-                  <SessionProcessMenu sessionId={currentSession?.id ?? selectedSessionId} />
+                  <>
+                    <SessionSubagentMenu sessionId={currentSession?.id ?? selectedSessionId} />
+                    <SessionProcessMenu sessionId={currentSession?.id ?? selectedSessionId} />
+                  </>
                 ) : null}
                 {!isFilePanelOpen ? (
                   <button
@@ -292,7 +346,7 @@ export function AppPage() {
 
             {providerModelsError ? (
               <div
-                className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-panel-muted)] px-5 py-3 text-[13px] text-[var(--color-text-secondary)]"
+                className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-panel-muted)] px-5 py-3 text-ui text-[var(--color-text-secondary)]"
                 role="status"
               >
                 <span>
@@ -315,7 +369,7 @@ export function AppPage() {
             {hasHydratedWorkspace && activePage === "providers" ? (
               <Suspense
                 fallback={
-                  <div className="flex min-h-0 flex-1 items-center justify-center text-[13px] text-[var(--color-text-secondary)]">
+                  <div className="flex min-h-0 flex-1 items-center justify-center text-ui text-[var(--color-text-secondary)]">
                     Loading providers…
                   </div>
                 }
@@ -327,14 +381,14 @@ export function AppPage() {
             ) : startupError ? (
               <div className="flex min-h-0 flex-1 items-center justify-center px-8 py-10">
                 <div className="max-w-[360px] rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)] p-5 text-center shadow-[0_18px_40px_rgba(0,0,0,0.18)]">
-                  <p className="text-[15px] font-medium text-[var(--color-text)]">
+                  <p className="text-ui-tight font-medium text-[var(--color-text)]">
                     Wizzle could not start
                   </p>
-                  <p className="mt-2 text-[13px] leading-5 text-[var(--color-text-secondary)]">
+                  <p className="mt-2 text-ui text-[var(--color-text-secondary)]">
                     {startupError}
                   </p>
                   <button
-                    className="mt-4 h-10 rounded-full bg-[var(--color-accent)] px-4 text-[14px] font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)]"
+                    className="mt-4 h-10 rounded-full bg-[var(--color-accent)] px-4 text-ui-tight font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)]"
                     onClick={() => {
                       setStartupError(null);
                       setStartupRetryKey((value) => value + 1);
@@ -345,7 +399,7 @@ export function AppPage() {
                 </div>
               </div>
             ) : (
-              <div className="flex min-h-0 flex-1 items-center justify-center px-8 py-10 text-[14px] text-[var(--color-text-secondary)]">
+              <div className="flex min-h-0 flex-1 items-center justify-center px-8 py-10 text-ui text-[var(--color-text-secondary)]">
                 Loading workspace...
               </div>
             )}
@@ -384,6 +438,35 @@ export function AppPage() {
           </div>
         </div>
       </div>
+
+      {isExitConfirmationOpen ? (
+        <AppDialog
+          actions={
+            <>
+              <button
+                className="h-10 rounded-full px-4 text-ui-tight text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                disabled={isClosingApp}
+                onClick={() => setIsExitConfirmationOpen(false)}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="h-10 rounded-full bg-[var(--color-accent)] px-4 text-ui-tight font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                disabled={isClosingApp}
+                onClick={() => void exitApp()}
+                type="button"
+              >
+                Exit
+              </button>
+            </>
+          }
+          busy={isClosingApp}
+          description="Close the Wizzle desktop app?"
+          onClose={() => setIsExitConfirmationOpen(false)}
+          title="Exit Wizzle?"
+        />
+      ) : null}
 
     </>
   );

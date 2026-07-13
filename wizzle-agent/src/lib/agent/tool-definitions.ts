@@ -7,11 +7,11 @@ import {
   TOOL_TIMEOUT_OPTIONS,
 } from "./tool-timeouts";
 
-export const TOOL_SCHEMA_VERSION = 1;
+export const TOOL_SCHEMA_VERSION = 14;
 
 type JsonSchema = Record<string, unknown>;
 
-type ToolName = "bash" | "edit" | "read" | "write";
+type ToolName = "bash" | "clarify" | "edit" | "read" | "subagent" | "todo" | "write";
 
 export type ToolProviderFormat = "anthropic" | "google" | "openai_compatible";
 
@@ -94,7 +94,8 @@ export const WRITE_TOOL: WizzleToolDefinition = {
         type: "string",
       },
       path: {
-        description: "Path to write inside the selected project root.",
+        description:
+          "Path to write, relative to the selected project root unless absolute. Paths outside the project require approval.",
         type: "string",
       },
     },
@@ -118,7 +119,8 @@ export const EDIT_TOOL: WizzleToolDefinition = {
         type: "string",
       },
       path: {
-        description: "Path to edit inside the selected project root.",
+        description:
+          "Path to edit, relative to the selected project root unless absolute. Paths outside the project require approval.",
         type: "string",
       },
       replaceAll: {
@@ -151,9 +153,14 @@ export const BASH_TOOL: WizzleToolDefinition = {
         description: "Shell command to run when action is run.",
         type: "string",
       },
+      description: {
+        description:
+          "Short user-facing description of why the command is needed, used in approval prompts.",
+        type: "string",
+      },
       cwd: {
         description:
-          "Optional working directory relative to the selected project root. Defaults to the project root.",
+          "Optional working directory, relative to the selected project root unless absolute. External directories require approval. Defaults to the project root.",
         type: "string",
       },
       processId: {
@@ -168,15 +175,146 @@ export const BASH_TOOL: WizzleToolDefinition = {
   schemaVersion: TOOL_SCHEMA_VERSION,
 };
 
+export const TODO_TOOL: WizzleToolDefinition = {
+  description:
+    "Maintain the single durable TODO list for this session. Create it before multi-step coding work, update one item at a time, and finish every active item before replying. Recognized create types are creating_project, fixing_bugs, and adding_features; these automatically receive recommended items in the proper positions. Other type strings remain valid. Creating another list is rejected while unfinished items exist.",
+  name: "todo",
+  parameters: {
+    additionalProperties: false,
+    properties: {
+      action: {
+        enum: ["create", "add", "update", "status", "clear"],
+        type: "string",
+      },
+      type: {
+        description:
+          "Create only. Prefer creating_project, fixing_bugs, or adding_features when matched so the library can enrich the list; otherwise use a short descriptive type.",
+        type: "string",
+      },
+      items: {
+        description: "Create only. One to thirty initial task titles in execution order.",
+        items: { type: "string" },
+        maxItems: 30,
+        minItems: 1,
+        type: "array",
+      },
+      item: {
+        description: "Add only. New task title; inserted before final verification or review items.",
+        type: "string",
+      },
+      itemId: {
+        description: "Update only. Item ID from the current session TODO.",
+        type: "string",
+      },
+      status: {
+        description: "Update only. Cancel only when the user removed or replaced that scope.",
+        enum: ["pending", "in_progress", "completed", "cancelled"],
+        type: "string",
+      },
+    },
+    required: ["action"],
+    type: "object",
+  },
+  schemaVersion: TOOL_SCHEMA_VERSION,
+};
+
+export const CLARIFY_TOOL: WizzleToolDefinition = {
+  description:
+    "Ask exactly one blocking user decision and continue the same agent turn with the answer. Use doubt for missing information and approach for implementation choices. Omit choices for freeform; with choices, omit allowCustomAnswer or set it true for mixed answers, and set it false for selection-only. Do not stop and ask in assistant text.",
+  name: "clarify",
+  parameters: {
+    additionalProperties: false,
+    properties: {
+      allowCustomAnswer: {
+        description: "With choices only. False makes them selection-only; true or omitted also allows a typed answer.",
+        type: "boolean",
+      },
+      kind: { enum: ["doubt", "approach"], type: "string" },
+      prompt: { description: "One concise question for the user.", type: "string" },
+      choices: {
+        description: "Optional two or three concise choices. Omit for a free-text doubt.",
+        items: { type: "string" },
+        maxItems: 3,
+        minItems: 2,
+        type: "array",
+      },
+      recommended: {
+        description: "Optional zero-based index into choices, normally used for approach.",
+        minimum: 0,
+        maximum: 2,
+        type: "integer",
+      },
+    },
+    required: ["kind", "prompt"],
+    type: "object",
+  },
+  schemaVersion: TOOL_SCHEMA_VERSION,
+};
+
+export const SUBAGENT_TOOL: WizzleToolDefinition = {
+  description:
+    "Delegate a clear bounded task to a reusable asynchronous subagent. One subagent per role is retained: creating an existing role interrupts and removes the old task, then starts a fresh one. Never duplicate its task. While it runs, do other clearly separate work when available; otherwise wait. Completion ends a wait immediately, even with a long timeout, and injects the response automatically. A timeout is not failure: wait again unless the result is no longer needed. Maximum 3 per session.",
+  name: "subagent",
+  parameters: {
+    additionalProperties: false,
+    properties: {
+      action: {
+        enum: ["create", "send_message", "interrupt", "list", "wait"],
+        type: "string",
+      },
+      prompt: {
+        description:
+          "Clear bounded task for create, or new substantive instructions for a continuation. Include every relevant user constraint. Do not use send_message to ask for status or early findings.",
+        type: "string",
+      },
+      name: {
+        description:
+          "Role for a newly created subagent. Creating a role that already exists replaces its prior task; use send_message instead when continuing the existing task.",
+        enum: ["reviewer", "explorer", "worker"],
+        type: "string",
+      },
+      join: {
+        description:
+          "required when the final answer depends on this result; optional only when the result may be safely abandoned if it becomes unnecessary.",
+        enum: ["required", "optional"],
+        type: "string",
+      },
+      taskId: {
+        description: "Subagent task ID returned by create or list.",
+        type: "string",
+      },
+      timeoutMs: {
+        default: "5m",
+        description:
+          "Used only when action is wait. Maximum wait window; completion wakes the main agent immediately. Prefer minutes and use 30s only for an obviously tiny, predictable task. If it times out, wait again unless the task is no longer needed.",
+        enum: ["30s", "1m", "2m", "5m", "10m"],
+        type: "string",
+      },
+    },
+    required: ["action"],
+    type: "object",
+  },
+  schemaVersion: TOOL_SCHEMA_VERSION,
+};
+
 export function resolveVersionedAgentToolDefinitions(options?: {
   imageCapable?: boolean;
+  includeSubagent?: boolean;
   modelCapabilities?: ModelCapability[];
 }) {
   const imageCapable =
     options?.imageCapable ??
     (options?.modelCapabilities ? options.modelCapabilities.includes("image") : true);
 
-  return [buildReadToolDefinition(imageCapable), WRITE_TOOL, EDIT_TOOL, BASH_TOOL];
+  return [
+    TODO_TOOL,
+    CLARIFY_TOOL,
+    buildReadToolDefinition(imageCapable),
+    WRITE_TOOL,
+    EDIT_TOOL,
+    BASH_TOOL,
+    ...(options?.includeSubagent === false ? [] : [SUBAGENT_TOOL]),
+  ];
 }
 
 function toOpenAiToolDefinition(tool: WizzleToolDefinition): ProxyToolDefinition {
@@ -279,6 +417,7 @@ export function adaptAgentToolsForProvider(
 /** OpenAI-compatible tool defs for the agent loop (image description depends on model). */
 export function resolveAgentTools(options?: {
   imageCapable?: boolean;
+  includeSubagent?: boolean;
   modelCapabilities?: ModelCapability[];
 }): ProxyToolDefinition[] {
   return adaptAgentToolsForProvider("openai_compatible", options);

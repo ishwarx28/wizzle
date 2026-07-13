@@ -12,7 +12,15 @@ type StreamedAgentTurn = {
   toolCalls: OpenAIChatToolCall[];
 };
 
-const KNOWN_AGENT_TOOL_NAMES = new Set(["bash", "edit", "read", "write"]);
+const KNOWN_AGENT_TOOL_NAMES = new Set([
+  "bash",
+  "clarify",
+  "edit",
+  "read",
+  "subagent",
+  "todo",
+  "write",
+]);
 
 export type NormalizedStreamedToolCall =
   | {
@@ -115,6 +123,30 @@ function isNoiseToolCallSlot(toolCall: OpenAIChatToolCall) {
   );
 }
 
+export function buildStreamingToolCallPreviews(
+  toolCalls: OpenAIChatToolCall[],
+): OpenAIChatToolCall[] {
+  return toolCalls
+    .map((toolCall) => {
+      const id = toolCall.id.trim();
+      const name = toolCall.function.name.trim();
+
+      if (!id || !name) {
+        return null;
+      }
+
+      return {
+        function: {
+          arguments: "",
+          name,
+        },
+        id,
+        type: "function" as const,
+      };
+    })
+    .filter((toolCall): toolCall is OpenAIChatToolCall => Boolean(toolCall));
+}
+
 /**
  * Normalize streamed tool calls for execution.
  * Invalid names/args become `invalid` items (do not execute) instead of being
@@ -162,7 +194,7 @@ export function normalizeStreamedToolCalls(
 
     if (!KNOWN_AGENT_TOOL_NAMES.has(name)) {
       items.push({
-        error: `Unknown tool name "${name}". Expected one of: bash, edit, read, write.`,
+        error: `Unknown tool name "${name}". Expected one of: bash, clarify, edit, read, subagent, todo, write.`,
         kind: "invalid",
         toolCall: normalizedCall,
       });
@@ -210,6 +242,7 @@ export async function streamAgentTurn(options: {
   onToolCalls?: (toolCalls: ToolCall[]) => void;
   projectId: string;
   reasoningLevel?: string | null;
+  streamKey?: string;
   toolChoice?: "auto" | "none";
   tools: ProxyToolDefinition[];
   turnIndex: number;
@@ -220,6 +253,7 @@ export async function streamAgentTurn(options: {
     reasoning: "",
     toolCalls: [],
   };
+  let lastToolCallPreviewSignature = "";
 
   await streamWorkspaceChat({
     chatId: options.chatId,
@@ -251,20 +285,26 @@ export async function streamAgentTurn(options: {
         toolCall.function.arguments += chunk.text;
       }
 
-      // Progressive tool-call UI when the host wires onToolCalls (#14 still partial).
-      if (options.onToolCalls) {
-        const preview = normalizeStreamedToolCalls(streamedTurn.toolCalls, options.turnIndex);
-        const previewCalls = preview.items.map((item) =>
-          options.toToolCallState(item.toolCall),
-        );
-        if (previewCalls.length > 0) {
-          options.onToolCalls(previewCalls);
-        }
+      if (!options.onToolCalls || chunk.kind === "toolArguments") {
+        return;
+      }
+
+      const previewCalls = buildStreamingToolCallPreviews(streamedTurn.toolCalls).map(
+        options.toToolCallState,
+      );
+      const previewSignature = previewCalls
+        .map((call) => `${call.id}\u0000${call.name}`)
+        .join("\u0001");
+
+      if (previewCalls.length > 0 && previewSignature !== lastToolCallPreviewSignature) {
+        lastToolCallPreviewSignature = previewSignature;
+        options.onToolCalls(previewCalls);
       }
     },
     onReasoningFinished: options.onReasoningFinished,
     projectId: options.projectId,
     reasoningLevel: options.reasoningLevel ?? undefined,
+    streamKey: options.streamKey,
     toolChoice: resolveAgentTurnToolChoice(options.tools, options.toolChoice),
     tools: options.tools,
   });

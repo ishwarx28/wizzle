@@ -238,11 +238,16 @@ export async function removeProjectById(projectId: string) {
   return invoke<WorkspaceSnapshot>("remove_project_by_id", { projectId });
 }
 
+export async function checkProjectRootExists(projectId: string) {
+  return invoke<boolean>("check_project_root_exists", { projectId });
+}
+
 export async function saveWorkspaceSettings(input: {
   isFilePanelOpen: boolean;
   isSidebarOpen: boolean;
   modelId: ModelId;
   permissionMode: PermissionMode;
+  reasoningLevel: string;
   selectedProjectId: string | null;
   selectedSessionId: string | null;
 }) {
@@ -408,6 +413,7 @@ export async function reconcileEntireSessionForExplicitEditOrRepair(input: {
         messages: buildPersistedMessages(input.session.messages),
         modelId: input.session.modelId ?? null,
         permissionMode: input.session.permissionMode ?? null,
+        reasoningLevel: input.session.reasoningLevel ?? null,
         compactedContext: input.session.compactedContext ?? null,
         events: buildPersistedSessionEvents(input.session.events),
         replayTurnSummaries: buildPersistedTurnSummaries(input.session.replayTurnSummaries),
@@ -432,6 +438,7 @@ function buildPersistedSessionMetadata(session: Session) {
     id: session.id,
     modelId: null,
     permissionMode: session.permissionMode ?? null,
+    reasoningLevel: session.reasoningLevel ?? null,
     selectedModelUuid: session.selectedModelUuid ?? session.modelId ?? null,
     systemPromptHash: session.systemPromptHash ?? null,
     title: session.title,
@@ -476,6 +483,7 @@ export async function updateSessionSelection(input: {
   projectId: string;
   selectedModelUuid?: string | null;
   permissionMode?: PermissionMode | null;
+  reasoningLevel?: string | null;
   sessionId: string;
   tokenizerKind?: string | null;
   updatedAtMs?: number;
@@ -485,6 +493,7 @@ export async function updateSessionSelection(input: {
   return invoke("update_session_selection", {
     input: {
       permissionMode: input.permissionMode ?? null,
+      reasoningLevel: input.reasoningLevel ?? null,
       projectId: input.projectId,
       selectedModelUuid: input.selectedModelUuid ?? null,
       sessionId: input.sessionId,

@@ -15,6 +15,17 @@ type NormalizedPath = {
   root: string;
 };
 
+export type ResolvedPathCandidate = {
+  error?: string | null;
+  expandedPath?: string | null;
+  hasUnexpandedVariables?: boolean;
+  isInsideProjectRoot?: boolean | null;
+  isSafeExternal?: boolean;
+  rawPath: string;
+  realPath?: string | null;
+  resolvedPath?: string | null;
+};
+
 const SAFE_DEVICE_PATHS = new Set([
   "/dev/null",
   "/dev/zero",
@@ -23,6 +34,26 @@ const SAFE_DEVICE_PATHS = new Set([
   "/dev/stdin",
   "/dev/stdout",
   "/dev/stderr",
+]);
+const SAFE_DEVICE_PATH_PREFIXES = ["/dev/fd/", "/dev/pts/"];
+const MANUAL_APPROVAL_BASH_ALLOWLIST = new Set([
+  "ag",
+  "cat",
+  "cut",
+  "egrep",
+  "fgrep",
+  "file",
+  "find",
+  "grep",
+  "head",
+  "ls",
+  "pwd",
+  "rg",
+  "stat",
+  "tail",
+  "wc",
+  "where",
+  "which",
 ]);
 const SECRET_FILE_NAMES = new Set([
   ".aws/credentials",
@@ -40,7 +71,7 @@ const SECRET_FILE_NAMES = new Set([
   "service-account.json",
 ]);
 const SECRET_FILE_NAME_PATTERNS = [
-  /^\.env(?:\.|$)/,
+  /^\.env(?:\.|$|\*|\?|\[)/,
   /(?:^|[._-])api[_-]?key(?:[._-]|$)/,
   /(?:^|[._-])credential(?:s)?(?:[._-]|$)/,
   /\.(?:key|p12|pem|pfx)$/,
@@ -66,6 +97,17 @@ const SECRET_COPY_OR_UPLOAD_COMMANDS = new Set([
   "rsync",
   "scp",
   "sftp",
+]);
+const PATH_OPERAND_COMMANDS = new Set([
+  ...MANUAL_APPROVAL_BASH_ALLOWLIST,
+  "cp",
+  "mv",
+  "rm",
+  "rsync",
+  "scp",
+  "sftp",
+  "sed",
+  "unlink",
 ]);
 
 function isUrlLike(value: string) {
@@ -153,9 +195,39 @@ function resolveAgainstProjectRoot(projectRoot: string, requestedPath: string): 
   };
 }
 
-function isInsideProjectRoot(projectRoot: string, requestedPath: string) {
+function resolveAgainstBasePath(projectRoot: string, basePath: string, requestedPath: string) {
+  const requested = parsePath(requestedPath);
+
+  if (requested.absolute) {
+    return requested;
+  }
+
+  const base = parsePath(basePath).absolute
+    ? parsePath(basePath)
+    : resolveAgainstProjectRoot(projectRoot, basePath);
+  const parts = [...base.parts];
+
+  for (const segment of requested.parts) {
+    if (segment === "..") {
+      if (parts.length > 0) {
+        parts.pop();
+      }
+      continue;
+    }
+
+    parts.push(segment);
+  }
+
+  return {
+    absolute: true,
+    parts,
+    root: base.root,
+  };
+}
+
+function isInsideProjectRoot(projectRoot: string, requestedPath: string, basePath = projectRoot) {
   const projectPath = parsePath(projectRoot);
-  const resolvedPath = resolveAgainstProjectRoot(projectRoot, requestedPath);
+  const resolvedPath = resolveAgainstBasePath(projectRoot, basePath, requestedPath);
 
   if (!resolvedPath.absolute || projectPath.root !== resolvedPath.root) {
     return false;
@@ -166,21 +238,6 @@ function isInsideProjectRoot(projectRoot: string, requestedPath: string) {
   }
 
   return projectPath.parts.every((part, index) => resolvedPath.parts[index] === part);
-}
-
-function isInsideAllowedRoot(allowedRoot: string, requestedPath: string) {
-  const allowedPath = parsePath(allowedRoot);
-  const resolvedPath = resolveAgainstProjectRoot(allowedRoot, requestedPath);
-
-  if (!resolvedPath.absolute || allowedPath.root !== resolvedPath.root) {
-    return false;
-  }
-
-  if (resolvedPath.parts.length < allowedPath.parts.length) {
-    return false;
-  }
-
-  return allowedPath.parts.every((part, index) => resolvedPath.parts[index] === part);
 }
 
 function isPathLike(value: string) {
@@ -206,10 +263,10 @@ function isPathLike(value: string) {
   );
 }
 
-function isExternalPath(projectRoot: string, value: string) {
+function isExternalPath(projectRoot: string, value: string, basePath = projectRoot) {
   const trimmedValue = value.trim();
 
-  if (!trimmedValue || isUrlLike(trimmedValue) || SAFE_DEVICE_PATHS.has(trimmedValue)) {
+  if (!trimmedValue || isUrlLike(trimmedValue) || isSafeDevicePath(trimmedValue)) {
     return false;
   }
 
@@ -217,32 +274,18 @@ function isExternalPath(projectRoot: string, value: string) {
     return true;
   }
 
-  return !isInsideProjectRoot(projectRoot, trimmedValue);
+  return !isInsideProjectRoot(projectRoot, trimmedValue, basePath);
 }
 
-function isGlobalSkillsPath(value: string, globalSkillsDir?: string) {
-  const trimmedValue = value.trim();
+function isSafeDevicePath(value: string) {
+  const normalizedPath = normalizeSeparators(value.trim()).replace(/\/+$/, "") || "/";
 
-  if (!trimmedValue || isUrlLike(trimmedValue)) {
-    return false;
-  }
-
-  if (
-    trimmedValue === "~/.wizzle/skills" ||
-    trimmedValue === "~/.wizzle/skills/" ||
-    trimmedValue.startsWith("~/.wizzle/skills/") ||
-    trimmedValue === "~\\.wizzle\\skills" ||
-    trimmedValue === "~\\.wizzle\\skills\\" ||
-    trimmedValue.startsWith("~\\.wizzle\\skills\\")
-  ) {
-    return true;
-  }
-
-  if (!globalSkillsDir?.trim()) {
-    return false;
-  }
-
-  return isInsideAllowedRoot(globalSkillsDir, trimmedValue);
+  return (
+    SAFE_DEVICE_PATHS.has(normalizedPath) ||
+    SAFE_DEVICE_PATH_PREFIXES.some((prefix) =>
+      normalizeSeparators(value.trim()).startsWith(prefix),
+    )
+  );
 }
 
 function normalizeSecretPath(value: string) {
@@ -322,24 +365,274 @@ function extractShellTokens(command: string) {
   return tokens;
 }
 
+function markSearchPatternOperands(commandName: string, tokens: string[], skipIndexes: Set<number>) {
+  if (!["ag", "egrep", "fgrep", "grep", "rg"].includes(commandName)) {
+    return;
+  }
+
+  let hasPattern = false;
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index] ?? "";
+    const lowerToken = token.toLowerCase();
+
+    if (lowerToken === "--") {
+      continue;
+    }
+
+    if (["-e", "--regexp", "--regexp="].includes(lowerToken)) {
+      if (index + 1 < tokens.length) {
+        skipIndexes.add(index + 1);
+        hasPattern = true;
+        index += 1;
+      }
+      continue;
+    }
+
+    if (lowerToken.startsWith("-e") && lowerToken.length > 2) {
+      skipIndexes.add(index);
+      hasPattern = true;
+      continue;
+    }
+
+    if (
+      lowerToken.startsWith("--regexp=") ||
+      lowerToken.startsWith("--glob=") ||
+      lowerToken.startsWith("--iglob=")
+    ) {
+      skipIndexes.add(index);
+      continue;
+    }
+
+    if (
+      ["-g", "--glob", "--iglob", "--include", "--exclude"].includes(lowerToken) &&
+      index + 1 < tokens.length
+    ) {
+      skipIndexes.add(index + 1);
+      index += 1;
+      continue;
+    }
+
+    if (token.startsWith("-")) {
+      continue;
+    }
+
+    if (!hasPattern) {
+      skipIndexes.add(index);
+      hasPattern = true;
+    }
+  }
+}
+
+function markSedScriptOperands(commandName: string, tokens: string[], skipIndexes: Set<number>) {
+  if (commandName !== "sed") {
+    return;
+  }
+
+  let hasScript = false;
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index] ?? "";
+    const lowerToken = token.toLowerCase();
+
+    if (lowerToken === "-e" || lowerToken === "--expression") {
+      if (index + 1 < tokens.length) {
+        skipIndexes.add(index + 1);
+        hasScript = true;
+        index += 1;
+      }
+      continue;
+    }
+
+    if (lowerToken.startsWith("-e") && lowerToken.length > 2) {
+      skipIndexes.add(index);
+      hasScript = true;
+      continue;
+    }
+
+    if (lowerToken === "-f" || lowerToken === "--file") {
+      hasScript = true;
+      if (index + 1 < tokens.length) {
+        index += 1;
+      }
+      continue;
+    }
+
+    if (token.startsWith("-")) {
+      continue;
+    }
+
+    if (!hasScript) {
+      skipIndexes.add(index);
+      hasScript = true;
+    }
+  }
+}
+
+function markAwkProgramOperands(commandName: string, tokens: string[], skipIndexes: Set<number>) {
+  if (commandName !== "awk") {
+    return;
+  }
+
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index] ?? "";
+    const lowerToken = token.toLowerCase();
+
+    if (lowerToken === "-f" || lowerToken === "--file") {
+      if (index + 1 < tokens.length) {
+        index += 1;
+      }
+      continue;
+    }
+
+    if (lowerToken === "-v" && index + 1 < tokens.length) {
+      index += 1;
+      continue;
+    }
+
+    if (token.startsWith("-")) {
+      continue;
+    }
+
+    skipIndexes.add(index);
+    return;
+  }
+}
+
+function markFindExpressionOperands(commandName: string, tokens: string[], skipIndexes: Set<number>) {
+  if (commandName !== "find") {
+    return;
+  }
+
+  const patternTests = new Set([
+    "-ilname",
+    "-iname",
+    "-ipath",
+    "-iregex",
+    "-iwholename",
+    "-lname",
+    "-name",
+    "-path",
+    "-regex",
+    "-wholename",
+  ]);
+
+  for (let index = 1; index < tokens.length; index += 1) {
+    if (patternTests.has((tokens[index] ?? "").toLowerCase()) && index + 1 < tokens.length) {
+      skipIndexes.add(index + 1);
+      index += 1;
+    }
+  }
+}
+
+function buildNonPathOperandIndexes(commandName: string, tokens: string[]) {
+  const skipIndexes = new Set<number>();
+  markSearchPatternOperands(commandName, tokens, skipIndexes);
+  markSedScriptOperands(commandName, tokens, skipIndexes);
+  markAwkProgramOperands(commandName, tokens, skipIndexes);
+  markFindExpressionOperands(commandName, tokens, skipIndexes);
+  return skipIndexes;
+}
+
 function collectBashPathCandidates(command: string) {
   const candidates = new Set<string>();
+  const tokens = unwrapCommandTokens(extractShellTokens(command));
+  const commandName = getCommandName(tokens[0] ?? "");
+  const nonPathOperandIndexes = buildNonPathOperandIndexes(commandName, tokens);
 
-  for (const token of extractShellTokens(command)) {
-    if (isPathLike(token) || isSensitivePath(token)) {
+  for (const [index, token] of tokens.entries()) {
+    if (nonPathOperandIndexes.has(index)) {
+      continue;
+    }
+
+    const isBarePathOperand =
+      index > 0 && PATH_OPERAND_COMMANDS.has(commandName) && !token.startsWith("-");
+
+    if (
+      isBarePathOperand ||
+      isPathLike(token) ||
+      isSensitivePath(token) ||
+      isShellVariableReference(token)
+    ) {
       candidates.add(token);
     }
 
     const equalsIndex = token.indexOf("=");
     if (equalsIndex > 0) {
       const value = token.slice(equalsIndex + 1);
-      if (isPathLike(value) || isSensitivePath(value)) {
+      if (isPathLike(value) || isSensitivePath(value) || isShellVariableReference(value)) {
         candidates.add(value);
       }
     }
   }
 
   return [...candidates];
+}
+
+export function collectToolPathCandidates(input: {
+  command?: string;
+  path?: string;
+  toolName: ApprovalToolName;
+}) {
+  if (input.toolName === "bash") {
+    return collectBashPathCandidates(input.command ?? "");
+  }
+
+  const path = input.path?.trim();
+  return path ? [path] : [];
+}
+
+function findResolvedPathCandidate(
+  resolvedPaths: readonly ResolvedPathCandidate[] | undefined,
+  rawPath: string,
+) {
+  return resolvedPaths?.find((entry) => entry.rawPath === rawPath);
+}
+
+function isResolvedCandidateSensitive(
+  candidate: string,
+  resolved?: ResolvedPathCandidate,
+) {
+  return [
+    candidate,
+    resolved?.expandedPath,
+    resolved?.realPath,
+    resolved?.resolvedPath,
+  ].some((value) => Boolean(value?.trim()) && isSensitivePath(value ?? ""));
+}
+
+function isResolvedCandidateExternal(input: {
+  basePath?: string;
+  candidate: string;
+  projectRoot: string;
+  resolved?: ResolvedPathCandidate;
+}) {
+  const resolved = input.resolved;
+
+  if (
+    isShellVariableReference(input.candidate) &&
+    (!resolved || isShellVariableReference(resolved.expandedPath ?? input.candidate))
+  ) {
+    return true;
+  }
+
+  if (resolved?.hasUnexpandedVariables) {
+    return true;
+  }
+
+  const resolvedPath =
+    resolved?.realPath?.trim() ||
+    resolved?.resolvedPath?.trim() ||
+    resolved?.expandedPath?.trim() ||
+    input.candidate;
+
+  if (isSafeDevicePath(resolvedPath)) {
+    return false;
+  }
+
+  if (typeof resolved?.isInsideProjectRoot === "boolean") {
+    return !resolved.isInsideProjectRoot;
+  }
+
+  return isExternalPath(input.projectRoot, resolvedPath, input.basePath);
 }
 
 function getCommandName(token: string) {
@@ -349,6 +642,160 @@ function getCommandName(token: string) {
 
 function tokenHasFlag(token: string, flagPattern: RegExp) {
   return token.startsWith("-") && flagPattern.test(token);
+}
+
+function isShellVariableReference(value: string) {
+  return (
+    /\$(?:\{[^}]+\}|[a-zA-Z_][a-zA-Z\d_]*)/.test(value) ||
+    /%[a-zA-Z_][a-zA-Z\d_]*%/.test(value)
+  );
+}
+
+function hasShellControlSyntax(command: string) {
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index] ?? "";
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+
+    if (quote) {
+      if (character === quote) {
+        quote = null;
+      } else if (
+        quote === '"' &&
+        (character === "`" || (character === "$" && command[index + 1] === "("))
+      ) {
+        return true;
+      }
+      continue;
+    }
+
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+
+    if (character === "`" || ";|&<>{}\n\r".includes(character)) {
+      return true;
+    }
+
+    if (character === "$" && command[index + 1] === "(") {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function hasUnquotedGlob(command: string) {
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+
+  for (const character of command) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+
+    if (quote) {
+      if (character === quote) {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+
+    if (character === "*" || character === "?" || character === "[") {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function hasUnsafeFindAction(tokens: string[]) {
+  const unsafeActions = new Set([
+    "-delete",
+    "-exec",
+    "-execdir",
+    "-fls",
+    "-fprint",
+    "-fprint0",
+    "-ok",
+    "-okdir",
+  ]);
+
+  return tokens.slice(1).some((token) => unsafeActions.has(token.toLowerCase()));
+}
+
+function searchCanReadHiddenFiles(commandName: string, tokens: string[]) {
+  if (!["ag", "egrep", "fgrep", "grep", "rg"].includes(commandName)) {
+    return false;
+  }
+
+  return tokens.slice(1).some((token) => {
+    const lowerToken = token.toLowerCase();
+
+    if (["--hidden", "--no-ignore", "--recursive"].includes(lowerToken)) {
+      return true;
+    }
+
+    if (commandName === "rg" && /^-.*u{2,}/.test(lowerToken)) {
+      return true;
+    }
+
+    return ["egrep", "fgrep", "grep"].includes(commandName) && /^-[^-]*[rR]/.test(token);
+  });
+}
+
+export function isWhitelistedBashCommand(command: string) {
+  const normalizedCommand = command.trim();
+
+  if (!normalizedCommand || hasShellControlSyntax(normalizedCommand)) {
+    return false;
+  }
+
+  const rawTokens = extractShellTokens(normalizedCommand);
+
+  if (getCommandName(rawTokens[0] ?? "") === "sudo") {
+    return false;
+  }
+
+  const tokens = unwrapCommandTokens(rawTokens);
+  const commandName = getCommandName(tokens[0] ?? "");
+
+  if (!MANUAL_APPROVAL_BASH_ALLOWLIST.has(commandName)) {
+    return false;
+  }
+
+  if (hasUnquotedGlob(normalizedCommand)) {
+    return false;
+  }
+
+  if (commandName === "find" && hasUnsafeFindAction(tokens)) {
+    return false;
+  }
+
+  return !searchCanReadHiddenFiles(commandName, tokens);
 }
 
 function wildcardToRegExp(pattern: string) {
@@ -434,7 +881,21 @@ export function classifyDangerousCommand(command: string) {
   const tokens = unwrapCommandTokens(extractShellTokens(normalizedCommand));
   const commandName = getCommandName(tokens[0] ?? "");
 
-  if (/(^|[;&|]\s*)(?:sudo\s+)?rm\b/.test(lowerCommand)) {
+  if (
+    isShellVariableReference(tokens[0] ?? "") ||
+    commandName === "eval" ||
+    (commandName === "xargs" &&
+      tokens.some((token) => ["dd", "rm", "rmdir", "shred", "truncate", "unlink"].includes(getCommandName(token)))) ||
+    /\bxargs\b[^;&|]*\b(?:dd|rm|rmdir|shred|truncate|unlink)\b/.test(lowerCommand) ||
+    (["bash", "cmd", "sh", "zsh"].includes(commandName) &&
+      tokens.slice(1).some((token) => token === "-c" || token === "/c")) ||
+    (commandName === "find" && hasUnsafeFindAction(tokens)) ||
+    /(?:\$\([^)]*|`[^`]*)\b(?:dd|rm|rmdir|shred|truncate|unlink)\b/.test(lowerCommand)
+  ) {
+    return "The command can execute a destructive operation indirectly.";
+  }
+
+  if (/(^|[;&|]\s*)(?:sudo\s+)?(?:rm|rmdir|unlink)\b/.test(lowerCommand)) {
     return "The command deletes files.";
   }
 
@@ -454,7 +915,7 @@ export function classifyDangerousCommand(command: string) {
     return "The command can print environment secrets.";
   }
 
-  if (commandName === "rm") {
+  if (["rm", "rmdir", "unlink"].includes(commandName)) {
     return "The command deletes files.";
   }
 
@@ -545,14 +1006,17 @@ function warningMessage(toolName: ApprovalToolName) {
 
 export function createExternalPathWarning(input: {
   command?: string;
-  globalSkillsDir?: string;
+  cwd?: string;
   path?: string;
   permissionMode: PermissionMode;
   projectRoot: string;
+  resolvedCwd?: ResolvedPathCandidate;
+  resolvedPaths?: ResolvedPathCandidate[];
   toolName: ApprovalToolName;
 }): ToolApprovalRequest["warning"] {
   if (input.toolName === "bash") {
     const command = input.command ?? "";
+    const pathCandidates = collectBashPathCandidates(command);
     const commandTokens = unwrapCommandTokens(extractShellTokens(command));
     const commandName = getCommandName(commandTokens[0] ?? "");
 
@@ -567,7 +1031,7 @@ export function createExternalPathWarning(input: {
 
     if (
       SECRET_PRINT_COMMANDS.has(commandName) &&
-      collectBashPathCandidates(command).some(isSensitivePath)
+      pathCandidates.some(isSensitivePath)
     ) {
       return {
         kind: "sensitive-path",
@@ -596,7 +1060,14 @@ export function createExternalPathWarning(input: {
       };
     }
 
-    if (collectBashPathCandidates(command).some(isSensitivePath)) {
+    if (
+      pathCandidates.some((candidate) =>
+        isResolvedCandidateSensitive(
+          candidate,
+          findResolvedPathCandidate(input.resolvedPaths, candidate),
+        ),
+      )
+    ) {
       return {
         kind: "sensitive-path",
         message:
@@ -604,7 +1075,13 @@ export function createExternalPathWarning(input: {
         title: "Sensitive file",
       };
     }
-  } else if (isSensitivePath(input.path ?? "")) {
+  } else if (
+    input.toolName === "read" &&
+    isResolvedCandidateSensitive(
+      input.path ?? "",
+      findResolvedPathCandidate(input.resolvedPaths, input.path?.trim() ?? ""),
+    )
+  ) {
     return {
       kind: "sensitive-path",
       message:
@@ -613,14 +1090,35 @@ export function createExternalPathWarning(input: {
     };
   }
 
+  if (input.toolName === "read" && input.permissionMode === "full-access") {
+    return undefined;
+  }
+
+  const hasExternalCwd =
+    input.toolName === "bash" &&
+    Boolean(input.cwd?.trim()) &&
+    isResolvedCandidateExternal({
+      candidate: input.cwd ?? "",
+      projectRoot: input.projectRoot,
+      resolved: input.resolvedCwd,
+    });
   const hasExternalPath =
     input.toolName === "bash"
-      ? collectBashPathCandidates(input.command ?? "").some((candidate) =>
-          isExternalPath(input.projectRoot, candidate),
-        )
-      : isPathLike(input.path ?? "") &&
-        isExternalPath(input.projectRoot, input.path ?? "") &&
-        !(input.toolName === "read" && isGlobalSkillsPath(input.path ?? "", input.globalSkillsDir));
+      ? hasExternalCwd ||
+        collectBashPathCandidates(input.command ?? "").some((candidate) =>
+            isResolvedCandidateExternal({
+              basePath: input.cwd,
+              candidate,
+              projectRoot: input.projectRoot,
+              resolved: findResolvedPathCandidate(input.resolvedPaths, candidate),
+            }),
+          )
+      : Boolean(input.path?.trim()) &&
+        isResolvedCandidateExternal({
+          candidate: input.path ?? "",
+          projectRoot: input.projectRoot,
+          resolved: findResolvedPathCandidate(input.resolvedPaths, input.path?.trim() ?? ""),
+        });
 
   if (!hasExternalPath) {
     return undefined;

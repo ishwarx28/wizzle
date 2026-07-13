@@ -2,6 +2,7 @@ import {
   activitySegmentHasVisibleBody,
   hasVisibleActivityBody,
   resolveActiveToolGroupSegmentId,
+  shouldShowReasoningWorkingEvent,
   shouldOpenToolGroup,
   shouldOpenWorkingSection,
   shouldShowWorkingPlaceholder,
@@ -20,6 +21,7 @@ function main() {
       isAssistant: true,
       status: "streaming",
       hasFinalContent: false,
+      hasStreamStarted: false,
       hasToolOrVisibleActivity: false,
     }),
     "streaming empty → Working...",
@@ -29,6 +31,7 @@ function main() {
       isAssistant: true,
       status: "streaming",
       hasFinalContent: false,
+      hasStreamStarted: false,
       hasToolOrVisibleActivity: true,
     }),
     "tools present → no Working...",
@@ -38,6 +41,7 @@ function main() {
       isAssistant: true,
       status: "streaming",
       hasFinalContent: true,
+      hasStreamStarted: false,
       hasToolOrVisibleActivity: false,
     }),
     "final content → no Working...",
@@ -47,9 +51,36 @@ function main() {
       isAssistant: true,
       status: "done",
       hasFinalContent: false,
+      hasStreamStarted: false,
       hasToolOrVisibleActivity: false,
     }),
     "done → no Working...",
+  );
+  assert(
+    !shouldShowWorkingPlaceholder({
+      isAssistant: true,
+      status: "streaming",
+      hasFinalContent: false,
+      hasStreamStarted: true,
+      hasToolOrVisibleActivity: false,
+    }),
+    "started stream → no pre-stream Working...",
+  );
+  assert(
+    shouldShowReasoningWorkingEvent({
+      isAssistant: true,
+      status: "streaming",
+      isReasoningActive: true,
+    }),
+    "reasoning stream → transient Working event",
+  );
+  assert(
+    !shouldShowReasoningWorkingEvent({
+      isAssistant: true,
+      status: "streaming",
+      isReasoningActive: false,
+    }),
+    "reasoning stopped → hide transient Working event",
   );
 
   assert(
@@ -161,6 +192,18 @@ function main() {
       part: { id: "p2", type: "activity_content", content: "  " },
     }),
     "empty activity not visible",
+  );
+  assert(
+    activitySegmentHasVisibleBody({
+      id: "subagent-response",
+      type: "part",
+      part: {
+        content: "Found the implementation.",
+        id: "subagent-response",
+        type: "subagent_response",
+      },
+    }),
+    "subagent response injection is visible activity",
   );
 
   console.log("activity-disclosure tests passed");

@@ -13,6 +13,12 @@ export type AgentGlobalSkillFile = {
 };
 
 export type AgentProjectContext = {
+  gitEnvironment: {
+    available: boolean;
+    isWorktree: boolean;
+    statusAvailable: boolean;
+    trackedChangeCount?: number;
+  };
   gitTrackedState: string;
   globalSkillFiles: AgentGlobalSkillFile[];
   globalSkillsDir: string | null;
@@ -42,6 +48,8 @@ export async function runAgentTool(input: {
   arguments: string;
   /** When false, read on image files returns an error instead of image data. */
   imageCapable?: boolean;
+  /** True only after the user approves this exact tool call in the permission prompt. */
+  manualApprovalGranted?: boolean;
   onChunk?: (chunk: AgentToolOutputChunk) => void;
   projectId: string;
   sessionId?: string;

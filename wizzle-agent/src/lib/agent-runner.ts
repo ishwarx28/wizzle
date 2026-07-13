@@ -13,10 +13,26 @@ import {
 import {
   createAssistantMessage,
   createPendingToolMessage,
+  createSubagentResponseMessage,
   createToolCallState,
   createToolMessage,
   type ToolExecutionPayload,
 } from "./agent/message-factories";
+import {
+  SUBAGENT_NAMES,
+  withoutSubagentOutput,
+  workspaceSubagentManager,
+  type SubagentName,
+  type StartSubagentRun,
+} from "./agent/subagent-manager";
+import explorerSystemPrompt from "./prompts/subagents/explorer-system-prompt.txt?raw";
+import reviewerSystemPrompt from "./prompts/subagents/reviewer-system-prompt.txt?raw";
+import workerSystemPrompt from "./prompts/subagents/worker-system-prompt.txt?raw";
+import { shouldDeferFinalForSubagentResponse } from "./agent/subagent-finalization";
+import { buildSubagentTaskPrompt } from "./agent/subagent-prompt";
+import {
+  buildSubagentCoordinationMessage,
+} from "./agent/subagent-coordination";
 import {
   resolveForcedFinalDisplayContent,
   type ForcedFinalKind,
@@ -35,10 +51,18 @@ import {
   resolveCompactionFailureAction,
   toCompactionFailureError,
 } from "./agent/compaction-failure";
-import { createRejectedToolPayload, createToolApprovalRequest } from "./tool-approval";
+import {
+  createRejectedToolPayload,
+  createToolApprovalBatchRequest,
+  createToolApprovalRequest,
+} from "./tool-approval";
 import { resolvePostStreamAssistantAction } from "./agent/assistant-stream-finish";
 import { findIncompleteToolCallIds } from "./agent/tool-batch";
 import { normalizeStreamedToolCalls, streamAgentTurn } from "./agent/stream-turn";
+import { runClarifyTool } from "./agent/clarify-tool";
+import { TodoEngine } from "./agent/todos/engine";
+import { runTodoTool } from "./agent/todos/tool";
+import { loadTodoState, publishTodoState, saveTodoState } from "./agent/todos/storage";
 import {
   buildCompactedContextMessage,
   compactReplayBlocks,
@@ -47,9 +71,12 @@ import {
 import {
   buildChatMessages,
   INTERRUPTED_WORKSPACE_CHAT_ERROR,
+  interruptWorkspaceChat,
   type ChatRequestMessage,
   type ProxyToolDefinition,
 } from "./chat-stream";
+import { getMessageContent } from "./message-parts";
+import { listAgentProcesses, stopAgentProcess } from "./local-workspace";
 import {
   buildReplayBlocks,
   buildPromptTokenCacheKeyData,
@@ -67,7 +94,11 @@ import type {
   PreviewFile,
   ProviderModelInfo,
   ToolCall,
+  ToolApprovalRequest,
+  WorkflowQuestionAnswer,
+  WorkflowQuestionRequest,
 } from "../types/workspace";
+import { formatExactMessageTimestamp } from "../utils/time";
 
 const MAX_ALLOWED_AGENT_STEPS = 100;
 const DEFAULT_AGENT_STEPS = 100;
@@ -78,6 +109,21 @@ const FINAL_RESPONSE_SYSTEM_PROMPT =
   "You have finished the tool work for this turn. Reply to the user now with the final answer only. Do not call tools. Do not add progress narration. Do not describe what you are about to do. Give the completed user-facing response.";
 const FINAL_RESPONSE_AFTER_LIMIT_SYSTEM_PROMPT =
   "You have reached the maximum number of tool steps for this turn. Do not call tools. Reply to the user now with the best possible final answer based on the completed work so far. Clearly summarize what was completed, and mention any remaining limitation or incomplete part if relevant.";
+const SUBAGENT_SYSTEM_PROMPTS: Record<SubagentName, string> = {
+  explorer: explorerSystemPrompt.trim(),
+  reviewer: reviewerSystemPrompt.trim(),
+  worker: workerSystemPrompt.trim(),
+};
+const BACKGROUND_SUBAGENT_GUIDANCE =
+  "The delegated task is running. Do not duplicate it. Do other clearly separate work if available; otherwise wait. Prefer minute-scale waits because completion wakes you immediately. A timeout is normal, not failure: wait again unless the task is no longer needed. Never interrupt merely because it is taking time.";
+const SUBAGENT_WAIT_DURATIONS = {
+  "10m": 600_000,
+  "1m": 60_000,
+  "2m": 120_000,
+  "30s": 30_000,
+  "5m": 300_000,
+} as const;
+type SubagentWaitDuration = keyof typeof SUBAGENT_WAIT_DURATIONS;
 
 function resolveMaxAgentSteps() {
   const rawValue = clientEnv.WIZZLE_MAX_AGENT_STEPS;
@@ -214,6 +260,7 @@ async function requestForcedFinalResponse(options: {
   prompt?: string;
   reasoningLevel?: string | null;
   step: number;
+  streamKey?: string;
   tools: ProxyToolDefinition[];
   turnId: string;
 }): Promise<ForcedFinalOutcome> {
@@ -244,6 +291,7 @@ async function requestForcedFinalResponse(options: {
       onReasoningFinished: () => options.onReasoningFinished?.(finalAssistantMessage.id),
       projectId: options.projectId,
       reasoningLevel: options.reasoningLevel,
+      streamKey: options.streamKey,
       toolChoice: "none",
       tools: options.tools,
       turnIndex: options.step,
@@ -282,7 +330,12 @@ async function requestForcedFinalResponse(options: {
   return outcome;
 }
 
-export async function runWorkspaceAgent(options: {
+export type RunWorkspaceAgentOptions = {
+  /** Hidden child runs disable the subagent tool to prevent recursive delegation. */
+  allowSubagents?: boolean;
+  /** Reviewer runs may delegate only to the Explorer role. */
+  allowedSubagentNames?: SubagentName[];
+  cancelToolApproval?: (toolCallId: string) => void;
   chatId: string;
   history: Message[];
   modelId: ModelId;
@@ -320,24 +373,379 @@ export async function runWorkspaceAgent(options: {
   previewFileMap: Map<string, PreviewFile>;
   projectId: string;
   reasoningLevel?: string | null;
-  requestToolApproval: (request: {
-    command?: string;
-    path?: string;
-    sessionId: string;
-    summary: string;
-    timeout: string;
-    toolCallId: string;
-    toolName: "bash" | "edit" | "read" | "write";
-    warning?: {
-      kind: "dangerous-command" | "external-path" | "sensitive-path";
-      message: string;
-    };
-  }) => Promise<boolean>;
+  /** Visible parent turn used for lifecycle ownership across nested Reviewer delegation. */
+  rootTurnId?: string;
+  requestToolApproval: (request: ToolApprovalRequest) => Promise<boolean>;
+  requestWorkflowQuestions: (request: WorkflowQuestionRequest) => Promise<WorkflowQuestionAnswer>;
   selectedModel: ProviderModelInfo;
+  /** Frontend-only key used to target a hidden subagent provider stream. */
+  streamKey?: string;
+  systemPromptAddendum?: string;
+  /** Hidden task that owns this run; used to isolate nested responses and tools. */
+  subagentTaskId?: string;
+  subagentRole?: SubagentName;
   turnSummaries?: PersistedTurnSummaryRecord[];
   turnId: string;
   tokenizerKind?: string | null;
-}): Promise<WorkspaceAgentRunResult> {
+};
+
+function createSubagentUserMessage(prompt: string, turnId: string): Message {
+  const createdAtMs = Date.now();
+
+  return {
+    content: prompt,
+    createdAtLabel: formatExactMessageTimestamp(createdAtMs),
+    createdAtMs,
+    id: `message-subagent-user-${crypto.randomUUID()}`,
+    role: "user",
+    status: "done",
+    turnId,
+  };
+}
+
+function createSubagentRunStarter(parent: RunWorkspaceAgentOptions): StartSubagentRun {
+  return ({ history, name, onUpdate, prompt, taskId }) => {
+    const turnId = `turn-${crypto.randomUUID()}`;
+    const parentRequest = [...parent.history]
+      .reverse()
+      .find((message) => message.role === "user");
+    const requestText = parentRequest
+      ? getMessageContent(parentRequest).trim() || parentRequest.content.trim()
+      : "";
+    const taskPrompt = buildSubagentTaskPrompt({
+      isContinuation: history.length > 0,
+      parentRequest: requestText,
+      task: prompt,
+    });
+    const transcript = [
+      ...history,
+      createSubagentUserMessage(taskPrompt, turnId),
+    ];
+    const streamKey = `${parent.chatId}:${taskId}`;
+    const pendingApprovalIds = new Set<string>();
+
+    const upsertTranscriptMessage = (message: Message) => {
+      const index = transcript.findIndex((entry) => entry.id === message.id);
+
+      if (index >= 0) {
+        transcript[index] = message;
+      } else {
+        transcript.push(message);
+      }
+      onUpdate(transcript);
+    };
+
+    onUpdate(transcript);
+
+    const promise = runWorkspaceAgentInternal({
+      ...parent,
+      allowSubagents: name === "reviewer",
+      allowedSubagentNames: name === "reviewer" ? ["explorer"] : [],
+      compactedContext: null,
+      history: transcript,
+      // Child quality must match its parent even if parent option defaults change later.
+      modelId: parent.modelId,
+      onAssistantChunk: ({ kind, messageId, text }) => {
+        const message = transcript.find((entry) => entry.id === messageId);
+
+        if (!message) {
+          return;
+        }
+
+        if (kind === "content") {
+          message.content += text;
+        } else {
+          message.reasoning = `${message.reasoning ?? ""}${text}`;
+        }
+        onUpdate(transcript);
+      },
+      onAssistantCreated: (message) => upsertTranscriptMessage(message),
+      onAssistantStreamFinished: (messageId, phase) => {
+        const message = transcript.find((entry) => entry.id === messageId);
+
+        if (message) {
+          message.assistantPhase = phase;
+          message.completedAtMs = Date.now();
+          message.status = "done";
+          onUpdate(transcript);
+        }
+      },
+      onAssistantToolCalls: (messageId, toolCalls) => {
+        const message = transcript.find((entry) => entry.id === messageId);
+
+        if (message) {
+          message.toolCalls = toolCalls;
+          onUpdate(transcript);
+        }
+      },
+      onCompactedContext: undefined,
+      onCompactionEnded: undefined,
+      onCompactionStarted: undefined,
+      onReasoningFinished: undefined,
+      onSessionPromptMetadata: undefined,
+      onToolChunk: undefined,
+      onToolMessage: (message) => upsertTranscriptMessage(message),
+      onTurnFinished: () => undefined,
+      requestToolApproval: async (request) => {
+        pendingApprovalIds.add(request.toolCallId);
+        workspaceSubagentManager.setWaitingForPermission(parent.chatId, taskId, true);
+        try {
+          return await parent.requestToolApproval({
+            ...request,
+            subagentName: name,
+            subagentTask:
+              workspaceSubagentManager.list(parent.chatId).find(
+                (task) => task.taskId === taskId,
+              )?.task ?? prompt,
+            subagentTaskId: taskId,
+          });
+        } finally {
+          pendingApprovalIds.delete(request.toolCallId);
+          workspaceSubagentManager.setWaitingForPermission(parent.chatId, taskId, false);
+        }
+      },
+      requestWorkflowQuestions: parent.requestWorkflowQuestions,
+      reasoningLevel: parent.reasoningLevel,
+      selectedModel: parent.selectedModel,
+      streamKey,
+      subagentTaskId: taskId,
+      subagentRole: name,
+      systemPromptAddendum: SUBAGENT_SYSTEM_PROMPTS[name],
+      rootTurnId: parent.rootTurnId ?? parent.turnId,
+      turnId,
+      turnSummaries: [],
+    }).then(() => {
+      const output = [...transcript]
+        .reverse()
+        .filter((message) => message.role === "assistant")
+        .map((message) => getMessageContent(message).trim() || message.content.trim())
+        .find(Boolean);
+
+      return {
+        history: transcript,
+        output: output || "The subagent completed without returning findings.",
+      };
+    });
+
+    return {
+      interrupt: async () => {
+        const interruptedAtMs = Date.now();
+        for (const message of transcript) {
+          if (message.status === "streaming") {
+            message.status = "interrupted";
+            message.completedAtMs = interruptedAtMs;
+          }
+          message.parts = message.parts?.map((part) =>
+            ["pending", "running", "streaming"].includes(part.status ?? "")
+              ? { ...part, status: "interrupted" }
+              : part,
+          );
+          message.toolCalls = message.toolCalls?.map((call) =>
+            ["pending", "running", "streaming"].includes(call.status ?? "")
+              ? { ...call, status: "interrupted" }
+              : call,
+          );
+        }
+        onUpdate(transcript);
+        for (const toolCallId of pendingApprovalIds) {
+          parent.cancelToolApproval?.(toolCallId);
+        }
+        const cancelStream = interruptWorkspaceChat({
+          interruptSessionRun: false,
+          sessionId: streamKey,
+        });
+        const stopProcesses = listAgentProcesses(parent.chatId)
+          .then((processes) =>
+            Promise.all(
+              processes
+                .filter(
+                  (process) =>
+                    process.turnId === turnId &&
+                    (process.status === "pending" || process.status === "running"),
+                )
+                .map((process) => stopAgentProcess(parent.chatId, process.id)),
+            ),
+          )
+          .catch(() => undefined);
+        await Promise.all([cancelStream, stopProcesses]);
+      },
+      promise,
+    };
+  };
+}
+
+function parseSubagentArguments(argumentsJson: string) {
+  const parsed = JSON.parse(argumentsJson) as unknown;
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Subagent arguments must be a JSON object.");
+  }
+
+  return parsed as Record<string, unknown>;
+}
+
+function requireSubagentString(
+  input: Record<string, unknown>,
+  field: "action" | "prompt" | "taskId",
+) {
+  const value = input[field];
+
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`Subagent ${field} is required.`);
+  }
+
+  return value.trim();
+}
+
+function requireSubagentName(input: Record<string, unknown>) {
+  const name = input.name;
+
+  if (typeof name !== "string" || !SUBAGENT_NAMES.includes(name as SubagentName)) {
+    throw new Error("Subagent name is required and must be reviewer, explorer, or worker.");
+  }
+
+  return name as SubagentName;
+}
+
+function subagentToolPayload(value: Record<string, unknown>): ToolExecutionPayload {
+  return {
+    output: JSON.stringify({ ok: true, ...value }),
+    status: "done",
+  };
+}
+
+async function runSubagentTool(options: {
+  allowedNames?: SubagentName[];
+  argumentsJson: string;
+  ownerTurnId: string;
+  recipientTaskId: string | null;
+  responseTurnId: string;
+  sessionId: string;
+  start: StartSubagentRun;
+}): Promise<ToolExecutionPayload> {
+  try {
+    const input = parseSubagentArguments(options.argumentsJson);
+    const action = requireSubagentString(input, "action");
+
+    switch (action) {
+      case "create": {
+        const name = requireSubagentName(input);
+        if (options.allowedNames && !options.allowedNames.includes(name)) {
+          throw new Error(`This agent may create only these subagent roles: ${options.allowedNames.join(", ")}.`);
+        }
+        const prompt = requireSubagentString(input, "prompt");
+        const join = input.join;
+        if (join !== "required" && join !== "optional") {
+          throw new Error("Subagent join must be required or optional.");
+        }
+        const task = workspaceSubagentManager.create({
+          join,
+          name,
+          ownerTurnId: options.ownerTurnId,
+          prompt,
+          recipientTaskId: options.recipientTaskId,
+          responseTurnId: options.responseTurnId,
+          sessionId: options.sessionId,
+          start: options.start,
+        });
+        return subagentToolPayload({ action, guidance: BACKGROUND_SUBAGENT_GUIDANCE, ...task });
+      }
+      case "send_message": {
+        const prompt = requireSubagentString(input, "prompt");
+        const taskId = requireSubagentString(input, "taskId");
+        if (
+          options.recipientTaskId &&
+          !workspaceSubagentManager
+            .listForOwner(options.sessionId, options.recipientTaskId)
+            .some((task) => task.taskId === taskId)
+        ) {
+          throw new Error("A subagent may manage only subagents it created.");
+        }
+        const task = workspaceSubagentManager.sendMessage({
+          ownerTurnId: options.ownerTurnId,
+          prompt,
+          recipientTaskId: options.recipientTaskId,
+          responseTurnId: options.responseTurnId,
+          sessionId: options.sessionId,
+          start: options.start,
+          taskId,
+        });
+        return subagentToolPayload({ action, guidance: BACKGROUND_SUBAGENT_GUIDANCE, ...task });
+      }
+      case "interrupt": {
+        const taskId = requireSubagentString(input, "taskId");
+        if (
+          options.recipientTaskId &&
+          !workspaceSubagentManager
+            .listForOwner(options.sessionId, options.recipientTaskId)
+            .some((task) => task.taskId === taskId)
+        ) {
+          throw new Error("A subagent may manage only subagents it created.");
+        }
+        const task = await workspaceSubagentManager.interrupt(options.sessionId, taskId);
+        return subagentToolPayload({ action, ...task });
+      }
+      case "list":
+        return subagentToolPayload({
+          action,
+          guidance:
+            "Use list only to recover task IDs or answer an explicit status request. Do not poll. Do not duplicate an active task; do separate work or wait.",
+          tasks: (options.recipientTaskId
+            ? workspaceSubagentManager.listForOwner(
+                options.sessionId,
+                options.recipientTaskId,
+              )
+            : workspaceSubagentManager.list(options.sessionId)
+          ).map(withoutSubagentOutput),
+        });
+      case "wait": {
+        const taskId = requireSubagentString(input, "taskId");
+        if (
+          options.recipientTaskId &&
+          !workspaceSubagentManager
+            .listForOwner(options.sessionId, options.recipientTaskId)
+            .some((task) => task.taskId === taskId)
+        ) {
+          throw new Error("A subagent may manage only subagents it created.");
+        }
+        const timeout =
+          typeof input.timeoutMs === "string" && input.timeoutMs in SUBAGENT_WAIT_DURATIONS
+            ? (input.timeoutMs as SubagentWaitDuration)
+            : "5m";
+        const timeoutMs = SUBAGENT_WAIT_DURATIONS[timeout];
+        const result = await workspaceSubagentManager.wait(
+          options.sessionId,
+          taskId,
+          timeoutMs,
+        );
+        return subagentToolPayload({
+          action,
+          task: withoutSubagentOutput(result.snapshot),
+          timeoutMs: timeout,
+          timedOut: result.timedOut,
+          guidance: result.timedOut
+            ? "The task is still working. This is normal. Do not poll, request status, interrupt, or duplicate it. Do separate work if available; otherwise call wait again, preferably with a minute-scale duration."
+            : "The task completed before the wait window ended. Its response is injected separately after this result. Integrate it and do not repeat the task.",
+        });
+      }
+      default:
+        throw new Error(
+          `Unsupported subagent action "${action}". Expected create, send_message, interrupt, list, or wait.`,
+        );
+    }
+  } catch (error) {
+    const message = resolveToolExecutionErrorMessage(error);
+    return {
+      error: message,
+      output: JSON.stringify({ error: message, ok: false }),
+      status: "error",
+    };
+  }
+}
+
+async function runWorkspaceAgentInternal(
+  options: RunWorkspaceAgentOptions,
+): Promise<WorkspaceAgentRunResult> {
   const maxAgentSteps = resolveMaxAgentSteps();
 
   frontendLogger.info("frontend.agent", "run_started", {
@@ -352,8 +760,36 @@ export async function runWorkspaceAgent(options: {
 
   const projectContext = await loadAgentProjectContext(options.projectId, options.chatId);
   const imageCapable = options.modelCapabilities.includes("image");
-  const tools = resolveAgentTools({ imageCapable, modelCapabilities: options.modelCapabilities });
-  const systemPrompt = buildSystemPrompt({
+  const allowSubagents = options.allowSubagents !== false;
+  const permittedToolNames = options.subagentRole
+    ? new Set(
+        options.subagentRole === "reviewer"
+          ? ["bash", "read", "subagent"]
+          : options.subagentRole === "worker"
+            ? ["bash", "edit", "read", "write"]
+            : ["bash", "read"],
+      )
+    : null;
+  const tools = resolveAgentTools({
+    imageCapable,
+    includeSubagent: allowSubagents,
+    modelCapabilities: options.modelCapabilities,
+  }).filter((tool) => !permittedToolNames || permittedToolNames.has(tool.function.name));
+  let restoredTodoState = null;
+  if (!options.subagentRole) {
+    try {
+      restoredTodoState = await loadTodoState(options.chatId);
+      publishTodoState(options.chatId, restoredTodoState);
+    } catch (error) {
+      frontendLogger.error("frontend.agent", "todo_state_load_failed", {
+        error,
+        sessionIdLength: options.chatId.length,
+      });
+    }
+  }
+  const todoEngine = new TodoEngine(restoredTodoState);
+  const restoredTodoInstruction = todoEngine.getContinuationInstruction();
+  const baseSystemPrompt = buildSystemPrompt({
     currentYear: new Date().getFullYear(),
     gitTrackedState: projectContext.gitTrackedState,
     globalSkillFiles: projectContext.globalSkillFiles,
@@ -365,6 +801,13 @@ export async function runWorkspaceAgent(options: {
     projectRoot: projectContext.projectRoot,
     sessionCacheDir: projectContext.sessionCacheDir,
   });
+  const systemPrompt = [
+    baseSystemPrompt,
+    options.systemPromptAddendum,
+    restoredTodoInstruction,
+  ]
+    .filter((value): value is string => Boolean(value?.trim()))
+    .join("\n\n");
   const promptCacheKeyData = buildPromptTokenCacheKeyData({
     selectedModelUuid: options.modelId,
     systemPrompt,
@@ -381,6 +824,101 @@ export async function runWorkspaceAgent(options: {
   });
   const replayEstimateCache = new Map<string, { replayMessageCount: number; tokens: number }>();
   const conversationHistory = [...options.history];
+  const persistTodoProgress = async () => {
+    if (options.subagentRole) {
+      return true;
+    }
+    try {
+      await saveTodoState(options.chatId, todoEngine.getSnapshot());
+      return true;
+    } catch (error) {
+      frontendLogger.error("frontend.agent", "todo_state_save_failed", {
+        error,
+        sessionIdLength: options.chatId.length,
+      });
+      return false;
+    }
+  };
+  let approvalQueue = Promise.resolve<unknown>(undefined);
+  const cancelledApprovalIds = new Set<string>();
+  const requestToolApproval: RunWorkspaceAgentOptions["requestToolApproval"] = (request) => {
+    const result = approvalQueue.then(() => {
+      if (cancelledApprovalIds.delete(request.toolCallId)) {
+        throw new Error(INTERRUPTED_WORKSPACE_CHAT_ERROR);
+      }
+
+      return options.requestToolApproval(request);
+    });
+    approvalQueue = result.catch(() => undefined);
+    return result;
+  };
+  const cancelToolApproval = (toolCallId: string) => {
+    cancelledApprovalIds.add(toolCallId);
+    options.cancelToolApproval?.(toolCallId);
+  };
+  const startSubagent = allowSubagents
+    ? createSubagentRunStarter({ ...options, cancelToolApproval, requestToolApproval })
+    : null;
+  const responseRecipientTaskId = options.subagentTaskId ?? null;
+  const activeTasksForRun = () =>
+    options.subagentTaskId
+      ? workspaceSubagentManager.listActiveForOwner(options.chatId, options.subagentTaskId)
+      : workspaceSubagentManager.listActiveForTurn(
+          options.chatId,
+          options.rootTurnId ?? options.turnId,
+        );
+  const hasUnsettledSubagentsForRun = () => {
+    const hasActive = activeTasksForRun().length > 0;
+    return (
+      hasActive ||
+      workspaceSubagentManager.hasResponses(
+        options.chatId,
+        responseRecipientTaskId,
+      )
+    );
+  };
+  const settleSubagentsForFinal = async () => {
+    const optionalTasks = activeTasksForRun().filter((task) => task.join === "optional");
+    await Promise.all(
+      optionalTasks.map((task) =>
+        workspaceSubagentManager.interrupt(options.chatId, task.taskId),
+      ),
+    );
+
+    while (true) {
+      const requiredTasks = activeTasksForRun().filter((task) => task.join === "required");
+      if (requiredTasks.length === 0) {
+        return;
+      }
+      await Promise.all(
+        requiredTasks.map((task) =>
+          workspaceSubagentManager.wait(options.chatId, task.taskId, 600_000),
+        ),
+      );
+    }
+  };
+  const injectCompletedSubagentResponses = async () => {
+    if (!allowSubagents) {
+      return 0;
+    }
+
+    const responses = workspaceSubagentManager.drainResponses(
+      options.chatId,
+      responseRecipientTaskId,
+    );
+    for (const response of responses) {
+      const message = createSubagentResponseMessage(response, options.turnId);
+      conversationHistory.push(message);
+      await options.onToolMessage(message);
+      frontendLogger.info("frontend.agent", "subagent_response_injected", {
+        outputLength: response.output.length,
+        status: response.status,
+        taskIdLength: response.taskId.length,
+        turnIdLength: options.turnId.length,
+      });
+    }
+    return responses.length;
+  };
   let compactedContext = options.compactedContext ?? null;
   const tokenizerKind = options.selectedModel.tokenizerKind ?? options.tokenizerKind;
 
@@ -422,6 +960,7 @@ export async function runWorkspaceAgent(options: {
       droppedTurnCount: selection.droppedTurnIds.length,
       estimatedTokens: selection.estimatedTokens,
       inputBudget: selection.budget.inputBudget,
+      requestEstimatedTokens: selection.requestEstimatedTokens,
       turnIdLength: options.turnId.length,
     });
     await options.onCompactionStarted?.();
@@ -552,7 +1091,11 @@ export async function runWorkspaceAgent(options: {
 
   let usedToolsInTurn = false;
 
-  const settleSoftAfterToolsForCompactionFailure = (error: CompactionFailureError) => {
+  const settleSoftAfterToolsForCompactionFailure = async (error: CompactionFailureError) => {
+    if (allowSubagents) {
+      await settleSubagentsForFinal();
+      await injectCompletedSubagentResponses();
+    }
     const notice = buildCompactionFailureUserMessage(error.message);
     frontendLogger.error("frontend.agent", "compaction_failed_after_tools_soft_settle", {
       errorMessage: error.message,
@@ -591,10 +1134,21 @@ export async function runWorkspaceAgent(options: {
   };
 
   const runContextPressureFinal = async (): Promise<WorkspaceAgentRunResult> => {
+    if (todoEngine.hasIncompleteItems()) {
+      options.onTurnFinished({ finishReason: "error", status: "error", turnId: options.turnId });
+      throw new Error(
+        "The context limit was reached while the session TODO was unfinished. The saved TODO remains available to continue.",
+      );
+    }
     frontendLogger.info("frontend.agent", "context_pressure_started", {
       historyCount: conversationHistory.length,
       turnIdLength: options.turnId.length,
     });
+
+    if (allowSubagents) {
+      await settleSubagentsForFinal();
+      await injectCompletedSubagentResponses();
+    }
 
     let pressureConversation: ChatRequestMessage[];
     try {
@@ -637,6 +1191,7 @@ export async function runWorkspaceAgent(options: {
       projectId: options.projectId,
       reasoningLevel: options.reasoningLevel,
       step: 0,
+      streamKey: options.streamKey,
       tools,
       turnId: options.turnId,
     });
@@ -682,7 +1237,13 @@ export async function runWorkspaceAgent(options: {
       }
 
       if (resolveCompactionFailureAction({ usedToolsInTurn }) === "soft_settle_done") {
-        settleSoftAfterToolsForCompactionFailure(error);
+        if (todoEngine.hasIncompleteItems()) {
+          options.onTurnFinished({ finishReason: "error", status: "error", turnId: options.turnId });
+          throw new Error(
+            "Context compaction failed while the session TODO was unfinished. The saved TODO remains available to continue.",
+          );
+        }
+        await settleSoftAfterToolsForCompactionFailure(error);
         return { kind: "settled" };
       }
 
@@ -694,6 +1255,7 @@ export async function runWorkspaceAgent(options: {
 
   let conversation: ChatRequestMessage[];
   {
+    await injectCompletedSubagentResponses();
     const initial = await rebuildConversationForTurn();
     if (initial.kind === "context_pressure") {
       return runContextPressureFinal();
@@ -705,6 +1267,7 @@ export async function runWorkspaceAgent(options: {
   }
 
   for (let step = 0; step < maxAgentSteps; step += 1) {
+    await injectCompletedSubagentResponses();
     const rebuilt = await rebuildConversationForTurn();
     if (rebuilt.kind === "context_pressure") {
       return runContextPressureFinal();
@@ -713,6 +1276,22 @@ export async function runWorkspaceAgent(options: {
       return { finishReason: "done" };
     }
     conversation = rebuilt.conversation;
+    const activeSubagentTasks = allowSubagents ? activeTasksForRun() : [];
+    const bufferForSubagent = allowSubagents && hasUnsettledSubagentsForRun();
+    const todoInstruction = todoEngine.getContinuationInstruction();
+    const bufferForTodo = todoEngine.hasIncompleteItems();
+    const bufferWorkingContent = bufferForSubagent || bufferForTodo;
+    const coordinationMessage = buildSubagentCoordinationMessage(activeSubagentTasks);
+    const stepConversation = bufferWorkingContent
+      ? [
+          ...conversation,
+          {
+            content: [coordinationMessage, todoInstruction].filter(Boolean).join("\n\n") ||
+              "Required work is still pending. Do not give a final answer yet.",
+            role: "system" as const,
+          },
+        ]
+      : conversation;
     frontendLogger.info("frontend.agent", "step_started", {
       conversationCount: conversation.length,
       step,
@@ -727,17 +1306,22 @@ export async function runWorkspaceAgent(options: {
     try {
       streamedTurn = await streamAgentTurn({
         chatId: options.chatId,
-        conversation,
+        conversation: stepConversation,
         modelId: options.modelId,
-        onChunk: (chunk) =>
+        onChunk: (chunk) => {
+          if (bufferWorkingContent && chunk.kind === "content") {
+            return;
+          }
           options.onAssistantChunk({
             ...chunk,
             messageId: assistantMessage.id,
-          }),
+          });
+        },
         onReasoningFinished: () => options.onReasoningFinished?.(assistantMessage.id),
         onToolCalls: (toolCalls) => options.onAssistantToolCalls(assistantMessage.id, toolCalls),
         projectId: options.projectId,
         reasoningLevel: options.reasoningLevel,
+        streamKey: options.streamKey,
         tools,
         turnIndex: step,
         toToolCallState: createToolCallState,
@@ -785,9 +1369,46 @@ export async function runWorkspaceAgent(options: {
     }
 
     if (postStreamAction.type === "finish_final") {
-      options.onAssistantStreamFinished(assistantMessage.id, "final");
-
+      let requiredJoinPending = false;
+      if (bufferForSubagent) {
+        await settleSubagentsForFinal();
+        requiredJoinPending = activeTasksForRun().some((task) => task.join === "required");
+      }
+      const injectedResponseCount = await injectCompletedSubagentResponses();
       const hasFinalContent = streamedTurn.content.trim().length > 0;
+      if (todoEngine.hasIncompleteItems()) {
+        options.onAssistantStreamFinished(assistantMessage.id, "working");
+        frontendLogger.info("frontend.agent", "final_deferred_for_session_todo", {
+          step,
+          turnIdLength: options.turnId.length,
+        });
+        continue;
+      }
+      if (
+        shouldDeferFinalForSubagentResponse({
+          candidateWasBuffered: bufferForSubagent,
+          injectedResponseCount,
+          requiredJoinPending,
+        })
+      ) {
+        options.onAssistantStreamFinished(assistantMessage.id, "working");
+        frontendLogger.info("frontend.agent", "final_deferred_for_subagent_event", {
+          injectedResponseCount,
+          step,
+          turnIdLength: options.turnId.length,
+        });
+        continue;
+      }
+
+      if (bufferWorkingContent && streamedTurn.content) {
+        options.onAssistantChunk({
+          kind: "content",
+          messageId: assistantMessage.id,
+          text: streamedTurn.content,
+        });
+      }
+
+      options.onAssistantStreamFinished(assistantMessage.id, "final");
 
       if (usedToolsInTurn && !hasFinalContent) {
         frontendLogger.info("frontend.agent", "missing_final_response_after_tool_run", {
@@ -808,6 +1429,7 @@ export async function runWorkspaceAgent(options: {
           prompt: FINAL_RESPONSE_SYSTEM_PROMPT,
           reasoningLevel: options.reasoningLevel,
           step: step + 1,
+          streamKey: options.streamKey,
           tools,
           turnId: options.turnId,
         });
@@ -830,6 +1452,13 @@ export async function runWorkspaceAgent(options: {
     }
 
     // #15: attach tool_call parts before finishing the assistant stream as working.
+    if (bufferWorkingContent && streamedTurn.content) {
+      options.onAssistantChunk({
+        kind: "content",
+        messageId: assistantMessage.id,
+        text: streamedTurn.content,
+      });
+    }
     const openAiToolCalls = toolCallItems.map((item) => item.toolCall);
     let toolCallState = openAiToolCalls.map(createToolCallState);
     usedToolsInTurn = true;
@@ -849,6 +1478,68 @@ export async function runWorkspaceAgent(options: {
         status: "pending",
       })),
     });
+    const approvalPreflightResults = await Promise.all(
+      toolCallItems.map(async (item) => {
+        const toolCall = item.toolCall;
+        const isSpecialTool = ["clarify", "subagent", "todo"].includes(
+          toolCall.function.name,
+        );
+        const isDisallowedForRole =
+          Boolean(permittedToolNames) && !permittedToolNames?.has(toolCall.function.name);
+
+        if (item.kind === "invalid" || isSpecialTool || isDisallowedForRole) {
+          return { request: null, toolCallId: toolCall.id };
+        }
+
+        try {
+          return {
+            request: await createToolApprovalRequest({
+              arguments: toolCall.function.arguments,
+              permissionMode: options.permissionMode,
+              projectRoot: projectContext.projectRoot,
+              sessionId: options.chatId,
+              toolCallId: toolCall.id,
+              toolName: toolCall.function.name,
+            }),
+            toolCallId: toolCall.id,
+          };
+        } catch (error) {
+          return {
+            error: resolveToolExecutionErrorMessage(error),
+            request: null,
+            toolCallId: toolCall.id,
+          };
+        }
+      }),
+    );
+    const approvalRequestsByToolCallId = new Map(
+      approvalPreflightResults.flatMap((result) =>
+        result.request ? [[result.toolCallId, result.request] as const] : [],
+      ),
+    );
+    const approvalPreparationErrorsByToolCallId = new Map(
+      approvalPreflightResults.flatMap((result) =>
+        result.error ? [[result.toolCallId, result.error] as const] : [],
+      ),
+    );
+    const approvalRequests = [...approvalRequestsByToolCallId.values()];
+    let batchApprovalGranted = false;
+    let batchApprovalError: string | null = null;
+    let batchApprovalInterrupted = false;
+
+    if (approvalRequests.length > 0) {
+      try {
+        batchApprovalGranted = await requestToolApproval(
+          createToolApprovalBatchRequest(approvalRequests),
+        );
+      } catch (error) {
+        if (error instanceof Error && error.message === INTERRUPTED_WORKSPACE_CHAT_ERROR) {
+          batchApprovalInterrupted = true;
+        } else {
+          batchApprovalError = resolveToolExecutionErrorMessage(error);
+        }
+      }
+    }
     let batchInterrupted = false;
     for (const item of toolCallItems) {
       const toolCall = item.toolCall;
@@ -877,7 +1568,17 @@ export async function runWorkspaceAgent(options: {
 
       let toolPayload: ToolExecutionPayload;
 
-      if (batchInterrupted) {
+      if (batchApprovalInterrupted) {
+        toolPayload = {
+          error: "User interrupted",
+          output: JSON.stringify({
+            error: "User interrupted",
+            interrupted: true,
+            ok: false,
+          }),
+          status: "interrupted",
+        };
+      } else if (batchInterrupted) {
         toolPayload = {
           error: "Skipped because an earlier tool in this batch was interrupted.",
           output: JSON.stringify({
@@ -905,28 +1606,110 @@ export async function runWorkspaceAgent(options: {
         };
       } else {
         try {
-          const approvalRequest = createToolApprovalRequest({
-            arguments: toolCall.function.arguments,
-            globalSkillsDir: projectContext.globalSkillsDir ?? undefined,
-            permissionMode: options.permissionMode,
-            projectRoot: projectContext.projectRoot,
-            sessionId: options.chatId,
-            toolCallId: toolCall.id,
-            toolName: toolCall.function.name,
-          });
-          if (approvalRequest && !(await options.requestToolApproval(approvalRequest))) {
-            toolPayload = createRejectedToolPayload(approvalRequest);
+          if (toolCall.function.name === "todo") {
+            if (options.subagentRole) {
+              toolPayload = {
+                error: "Session TODOs are managed by the main agent.",
+                output: JSON.stringify({
+                  error: "Session TODOs are managed by the main agent.",
+                  ok: false,
+                }),
+                status: "error",
+              };
+            } else {
+              toolPayload = runTodoTool(todoEngine, toolCall.function.arguments);
+              if (!(await persistTodoProgress()) && toolPayload.output) {
+                try {
+                  const output = JSON.parse(toolPayload.output) as Record<string, unknown>;
+                  toolPayload.output = JSON.stringify({
+                    ...output,
+                    persistenceWarning:
+                      "Session TODO changed but could not be saved for restart recovery.",
+                  });
+                } catch {
+                  // Keep the original result when output is unexpected.
+                }
+              }
+            }
+          } else if (toolCall.function.name === "clarify") {
+            if (options.subagentRole) {
+              toolPayload = {
+                error: "Clarification is managed by the main agent.",
+                output: JSON.stringify({ error: "Clarification is managed by the main agent.", ok: false }),
+                status: "error",
+              };
+            } else {
+              toolPayload = await runClarifyTool({
+                argumentsJson: toolCall.function.arguments,
+                request: (request) => options.requestWorkflowQuestions({
+                  ...request,
+                  sessionId: options.chatId,
+                  toolCallId: toolCall.id,
+                }),
+              });
+            }
+          } else if (toolCall.function.name === "subagent") {
+            if (!startSubagent) {
+              toolPayload = {
+                error: "Subagents are not available inside a subagent run.",
+                output: JSON.stringify({
+                  error: "Subagents are not available inside a subagent run.",
+                  ok: false,
+                }),
+                status: "error",
+              };
+            } else {
+              toolPayload = await runSubagentTool({
+                allowedNames: options.allowedSubagentNames,
+                argumentsJson: toolCall.function.arguments,
+                ownerTurnId: options.rootTurnId ?? options.turnId,
+                recipientTaskId: options.subagentTaskId ?? null,
+                responseTurnId: options.turnId,
+                sessionId: options.chatId,
+                start: startSubagent,
+              });
+            }
           } else {
-            toolPayload = await runAgentTool({
-              arguments: toolCall.function.arguments,
-              imageCapable,
-              onChunk: (chunk) => options.onToolChunk?.(chunk),
-              projectId: options.projectId,
-              sessionId: options.chatId,
-              toolCallId: toolCall.id,
-              turnId: options.turnId,
-              toolName: toolCall.function.name,
-            });
+            if (permittedToolNames && !permittedToolNames.has(toolCall.function.name)) {
+              toolPayload = {
+                error: `${options.subagentRole} cannot use ${toolCall.function.name}.`,
+                output: JSON.stringify({ error: "Tool is not allowed for this subagent role.", ok: false }),
+                status: "error",
+              };
+            } else {
+              const approvalPreparationError =
+                approvalPreparationErrorsByToolCallId.get(toolCall.id);
+              const approvalRequest = approvalRequestsByToolCallId.get(toolCall.id);
+              const manualApprovalGranted = Boolean(approvalRequest && batchApprovalGranted);
+
+              if (approvalPreparationError) {
+                toolPayload = {
+                  error: approvalPreparationError,
+                  output: null,
+                  status: "error",
+                };
+              } else if (approvalRequest && batchApprovalError) {
+                toolPayload = {
+                  error: batchApprovalError,
+                  output: null,
+                  status: "error",
+                };
+              } else if (approvalRequest && !manualApprovalGranted) {
+                toolPayload = createRejectedToolPayload(approvalRequest);
+              } else {
+                toolPayload = await runAgentTool({
+                  arguments: toolCall.function.arguments,
+                  imageCapable,
+                  manualApprovalGranted,
+                  onChunk: (chunk) => options.onToolChunk?.(chunk),
+                  projectId: options.projectId,
+                  sessionId: options.chatId,
+                  toolCallId: toolCall.id,
+                  turnId: options.turnId,
+                  toolName: toolCall.function.name,
+                });
+              }
+            }
           }
         } catch (error) {
           if (error instanceof Error && error.message === INTERRUPTED_WORKSPACE_CHAT_ERROR) {
@@ -1024,6 +1807,7 @@ export async function runWorkspaceAgent(options: {
     // Tool batches are context-atomic: every call receives a terminal result before
     // replay selection can compact or enter current-turn pressure.
     {
+      await injectCompletedSubagentResponses();
       const rebuiltAfterToolBatch = await rebuildConversationForTurn();
       if (rebuiltAfterToolBatch.kind === "context_pressure") {
         return runContextPressureFinal();
@@ -1040,7 +1824,26 @@ export async function runWorkspaceAgent(options: {
     turnIdLength: options.turnId.length,
   });
 
+  if (todoEngine.hasIncompleteItems()) {
+    options.onTurnFinished({ finishReason: "error", status: "error", turnId: options.turnId });
+    throw new Error("The agent reached the step limit while the session TODO was still unfinished.");
+  }
+
   if (usedToolsInTurn) {
+    if (allowSubagents) {
+      await settleSubagentsForFinal();
+      const injectedResponseCount = await injectCompletedSubagentResponses();
+      if (injectedResponseCount > 0) {
+        const rebuiltAfterResponses = await rebuildConversationForTurn();
+        if (rebuiltAfterResponses.kind === "context_pressure") {
+          return runContextPressureFinal();
+        }
+        if (rebuiltAfterResponses.kind === "settled") {
+          return { finishReason: "done" };
+        }
+        conversation = rebuiltAfterResponses.conversation;
+      }
+    }
     const finalOutcome = await requestForcedFinalResponse({
       chatId: options.chatId,
       conversation,
@@ -1054,6 +1857,7 @@ export async function runWorkspaceAgent(options: {
       prompt: FINAL_RESPONSE_AFTER_LIMIT_SYSTEM_PROMPT,
       reasoningLevel: options.reasoningLevel,
       step: maxAgentSteps,
+      streamKey: options.streamKey,
       tools,
       turnId: options.turnId,
     });
@@ -1074,4 +1878,16 @@ export async function runWorkspaceAgent(options: {
   throw new Error(
     "The agent reached the maximum number of tool steps for this turn before producing a final response.",
   );
+}
+
+export async function runWorkspaceAgent(
+  options: RunWorkspaceAgentOptions,
+): Promise<WorkspaceAgentRunResult> {
+  try {
+    return await runWorkspaceAgentInternal(options);
+  } finally {
+    if (options.allowSubagents !== false) {
+      await workspaceSubagentManager.interruptAll(options.chatId);
+    }
+  }
 }

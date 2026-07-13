@@ -4,28 +4,32 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  CircleAlert,
+  CirclePause,
+  CircleHelp,
   CircleX,
   Copy,
   Folder,
   FolderOpenDot,
   FolderPlus,
+  Info,
   Laptop,
   LoaderCircle,
+  MessageSquareText,
   Moon,
   MoreHorizontal,
   PanelLeftClose,
   Pencil,
   Power,
   Settings,
+  ShieldAlert,
   Sun,
   SquarePen,
   Trash2,
 } from "lucide-react";
 import { createPortal } from "react-dom";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { useWindowDrag } from "../../hooks/use-window-drag";
+import { REQUEST_APP_EXIT_EVENT } from "../../lib/app-window-events";
 import { useScrollActivity } from "../../hooks/use-scroll-activity";
 import {
   addProjectFromPath,
@@ -41,10 +45,14 @@ import {
   getThemeChangeEventName,
 } from "../../utils/theme";
 import { AppDialog } from "../common/AppDialog";
+import { AboutDialog } from "../common/AboutDialog";
+import { FeedbackDialog } from "../common/FeedbackDialog";
 import { LogoMark } from "../common/LogoMark";
+import type { Session } from "../../types/workspace";
 
 type DialogState =
-  | { type: "confirm-exit" }
+  | { type: "about" }
+  | { type: "feedback" }
   | { projectId: string; projectName: string; type: "remove-project" }
   | { projectId: string; sessionId: string; sessionTitle: string; type: "delete-session" }
   | { projectId: string; sessionId: string; value: string; type: "rename-session" };
@@ -58,11 +66,68 @@ type MenuState = {
   y: number;
 };
 
+type SessionTileState = "error" | "interrupted" | "running" | "waiting_approval" | "waiting_question";
+
+function resolveSessionTerminalTileState(session: Session): "error" | "interrupted" | null {
+  for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+    const status = session.messages[index]?.status;
+
+    if (status === "done") {
+      return null;
+    }
+
+    if (status === "error" || status === "interrupted") {
+      return status;
+    }
+  }
+
+  return null;
+}
+
+function sessionTileLabel(state: SessionTileState) {
+  if (state === "error") {
+    return "Session failed";
+  }
+
+  if (state === "interrupted") {
+    return "Session interrupted";
+  }
+
+  if (state === "waiting_approval") {
+    return "Approval required";
+  }
+
+  if (state === "waiting_question") {
+    return "Answer required";
+  }
+
+  return "Session running";
+}
+
+function sessionTileColorClass(state: SessionTileState | null) {
+  if (state === "error") {
+    return "text-[var(--color-danger)]";
+  }
+
+  if (state === "interrupted") {
+    return "text-[#8b9cff]";
+  }
+
+  if (state === "waiting_approval" || state === "waiting_question") {
+    return "text-[#d99a1e]";
+  }
+
+  return "text-[var(--color-text-tertiary)]";
+}
+
 export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
   const draftSessions = useWorkspaceStore((state) => state.draftSessions);
   const projects = useWorkspaceStore((state) => state.projects);
   const pendingToolApprovalsBySessionId = useWorkspaceStore(
     (state) => state.pendingToolApprovalsBySessionId,
+  );
+  const pendingWorkflowQuestionsBySessionId = useWorkspaceStore(
+    (state) => state.pendingWorkflowQuestionsBySessionId,
   );
   const sendingSessionIds = useWorkspaceStore((state) => state.sendingSessionIds);
   const sessionStreamErrors = useWorkspaceStore((state) => state.sessionStreamErrors);
@@ -222,7 +287,7 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
             }}
           >
             {item.icon}
-            <span className="whitespace-nowrap text-[13px] leading-none font-normal tracking-normal">
+            <span className="whitespace-nowrap text-ui-tight font-normal tracking-normal">
               {item.label}
             </span>
           </button>
@@ -242,7 +307,7 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
           <div className="relative z-10 flex items-center gap-3 select-none">
             <LogoMark className="h-7 w-7 object-contain" />
             <div>
-              <p className="text-sm font-semibold text-[var(--color-text)]">Wizzle</p>
+              <p className="text-ui-tight font-semibold text-[var(--color-text)]">Wizzle</p>
             </div>
           </div>
           <button
@@ -264,7 +329,7 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
               }}
             >
               <FolderPlus className="h-4 w-4" />
-              <span className="text-[15px] font-normal leading-[1.1]">
+              <span className="text-ui-tight font-normal">
                 {isAddingProject ? "Selecting project..." : "Add new project"}
               </span>
             </button>
@@ -284,8 +349,8 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
                 <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-[20px] bg-[var(--color-panel-muted)] ring-1 ring-[var(--color-border)]">
                   <FolderOpenDot className="h-6 w-6 text-[var(--color-text-secondary)]" />
                 </div>
-                <p className="text-[15px] font-medium text-[var(--color-text)]">No projects yet</p>
-                <p className="mt-2 text-[13px] leading-6 text-[var(--color-text-secondary)]">
+                <p className="text-ui-tight font-medium text-[var(--color-text)]">No projects yet</p>
+                <p className="mt-2 text-ui text-[var(--color-text-secondary)]">
                   Add a local folder to start a workspace.
                 </p>
                 <button
@@ -295,7 +360,7 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
                     void handleAddProject();
                   }}
                 >
-                  <span className="text-[11px] font-medium leading-none">
+                  <span className="text-tiny font-medium">
                     {isAddingProject ? "Selecting..." : "Add Project"}
                   </span>
                 </button>
@@ -303,7 +368,7 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
             </div>
           ) : (
             <>
-              <div className="mb-1.5 mt-1 px-2 text-[13px] font-medium text-[var(--color-text-tertiary)]">
+              <div className="mb-1.5 mt-1 px-2 text-ui-tight font-medium text-[var(--color-text-tertiary)]">
                 Projects
               </div>
               <div className="space-y-1">
@@ -330,10 +395,10 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
                       onClick={() => toggleProjectExpanded(project.id)}
                     >
                       <Folder className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-secondary)]" />
-                      <span className="min-w-0 truncate text-[15px] font-normal leading-none">
+                      <span className="min-w-0 truncate text-ui-tight font-normal">
                         {project.name}
                       </span>
-                      <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                      <span className="flex h-4 w-4 shrink-0 items-center justify-center opacity-0 transition-opacity duration-150 group-hover/project:opacity-100 group-focus-within/project:opacity-100">
                         <ChevronRight
                         className={[
                             "h-3.5 w-3.5 text-[var(--color-text-secondary)] transition-transform duration-200",
@@ -452,7 +517,7 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
                                   }
                                 }}
                               >
-                                <span className="block truncate text-[15px] font-normal leading-[1.1]">
+                                <span className="block truncate text-ui-tight font-normal">
                                   {draftSession?.title ?? "New session"}
                                 </span>
                               </button>
@@ -513,11 +578,16 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
                           const sessionMenuKey = `${project.id}:${session.id}`;
                           const sessionTileState = sessionStreamErrors[session.id]
                             ? "error"
+                            : pendingWorkflowQuestionsBySessionId[session.id]
+                              ? "waiting_question"
                             : pendingToolApprovalsBySessionId[session.id]
                               ? "waiting_approval"
                               : sendingSessionIds.includes(session.id)
                                 ? "running"
-                                : null;
+                                : resolveSessionTerminalTileState(session);
+                          const sessionTileStatusLabel = sessionTileState
+                            ? sessionTileLabel(sessionTileState)
+                            : undefined;
 
                           return (
                             <div
@@ -549,42 +619,31 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
                                   ].join(" ")}
                                   onClick={() => selectSession(project.id, session.id)}
                                 >
-                                  <span className="block truncate text-[15px] font-normal leading-[1.1]">
+                                  <span className="block truncate text-ui-tight font-normal">
                                     {session.title}
                                   </span>
                                 </button>
                                 <div className="relative ml-auto mr-2 h-8 w-8 shrink-0">
                                   <span
-                                    aria-label={
-                                      sessionTileState === "error"
-                                        ? "Session failed"
-                                        : sessionTileState === "waiting_approval"
-                                          ? "Waiting for approval"
-                                          : sessionTileState === "running"
-                                            ? "Session running"
-                                            : undefined
-                                    }
+                                    aria-label={sessionTileStatusLabel}
                                     className={[
-                                      "pointer-events-none absolute inset-0 flex items-center justify-center text-[13px] text-[var(--color-text-tertiary)] transition-opacity",
+                                      "pointer-events-none absolute inset-0 flex items-center justify-center text-ui-tight transition-opacity",
+                                      sessionTileColorClass(sessionTileState),
                                       menuKey === sessionMenuKey || (isActive && !sessionTileState)
                                         ? "opacity-0"
                                         : "opacity-100 group-hover/session:opacity-0",
                                     ].join(" ")}
                                     role={sessionTileState ? "status" : undefined}
-                                    title={
-                                      sessionTileState === "error"
-                                        ? "Session failed"
-                                        : sessionTileState === "waiting_approval"
-                                          ? "Waiting for approval"
-                                          : sessionTileState === "running"
-                                            ? "Session running"
-                                            : undefined
-                                    }
+                                    title={sessionTileStatusLabel}
                                   >
                                     {sessionTileState === "error" ? (
-                                      <CircleX className="h-[13px] w-[13px] text-red-500" />
+                                      <CircleX className="h-[13px] w-[13px]" />
                                     ) : sessionTileState === "waiting_approval" ? (
-                                      <CircleAlert className="h-[13px] w-[13px] text-red-500" />
+                                      <ShieldAlert className="h-[13px] w-[13px]" />
+                                    ) : sessionTileState === "waiting_question" ? (
+                                      <CircleHelp className="h-[13px] w-[13px]" />
+                                    ) : sessionTileState === "interrupted" ? (
+                                      <CirclePause className="h-[13px] w-[13px]" />
                                     ) : sessionTileState === "running" ? (
                                       <LoaderCircle className="h-[13px] w-[13px] animate-spin" />
                                     ) : (
@@ -683,8 +742,8 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
           >
           <LogoMark className="h-9 w-9 shrink-0" />
           <div className="min-w-0">
-            <p className="truncate text-[15px] font-normal text-[var(--color-text)]">Wizzle</p>
-            <p className="text-[12px] text-[var(--color-text-tertiary)]">Click for settings</p>
+            <p className="truncate text-ui-tight font-normal text-[var(--color-text)] mb-0.5">Wizzle</p>
+            <p className="text-meta-tight text-[var(--color-text-tertiary)]">Click for settings</p>
           </div>
           </button>
         </div>
@@ -704,10 +763,10 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
           <div className="flex items-center gap-3 rounded-[18px] px-3 py-2.5">
             <LogoMark className="h-7 w-7" />
             <div className="min-w-0">
-              <p className="truncate text-[13px] font-normal leading-none tracking-normal text-[var(--color-text)]">
+              <p className="truncate text-ui-tight font-normal tracking-normal text-[var(--color-text)]">
                 Wizzle
               </p>
-              <p className="mt-1 truncate text-[12px] leading-none text-[var(--color-text-tertiary)]">
+              <p className="mt-1 truncate text-meta-tight text-[var(--color-text-tertiary)]">
                 Settings
               </p>
             </div>
@@ -719,7 +778,7 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
           >
             <span className="flex items-center gap-3">
               <Laptop className="h-4 w-4" />
-              <span className="text-[13px] font-normal leading-none tracking-normal">Theme</span>
+              <span className="text-ui-tight font-normal tracking-normal">Theme</span>
             </span>
             <ChevronDown
               className={[
@@ -760,7 +819,7 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
                     >
                       <span className="flex items-center gap-3">
                         <Icon className="h-3.5 w-3.5" />
-                        <span className="text-[13px] font-normal leading-none tracking-normal">
+                        <span className="text-ui-tight font-normal tracking-normal">
                           {option.label}
                         </span>
                       </span>
@@ -790,7 +849,29 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
             }}
           >
             <Settings className="h-4 w-4" />
-            <span className="text-[13px] font-normal leading-none tracking-normal">Providers</span>
+            <span className="text-ui-tight font-normal tracking-normal">Providers</span>
+          </button>
+          <button
+            className="flex w-full items-center gap-3 rounded-[18px] px-3 py-2.5 text-[var(--color-text)] transition hover:bg-[var(--color-panel-hover)]"
+            onClick={() => {
+              setMenu(null);
+              setIsThemeExpanded(false);
+              setDialog({ type: "feedback" });
+            }}
+          >
+            <MessageSquareText className="h-4 w-4" />
+            <span className="text-ui-tight font-normal tracking-normal">Feedback</span>
+          </button>
+          <button
+            className="flex w-full items-center gap-3 rounded-[18px] px-3 py-2.5 text-[var(--color-text)] transition hover:bg-[var(--color-panel-hover)]"
+            onClick={() => {
+              setMenu(null);
+              setIsThemeExpanded(false);
+              setDialog({ type: "about" });
+            }}
+          >
+            <Info className="h-4 w-4" />
+            <span className="text-ui-tight font-normal tracking-normal">About</span>
           </button>
           <div className="mx-3 my-2 h-px bg-[var(--color-border)]" />
           <button
@@ -798,55 +879,32 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
             onClick={() => {
               setMenu(null);
               setIsThemeExpanded(false);
-              setDialog({ type: "confirm-exit" });
+              window.dispatchEvent(new CustomEvent(REQUEST_APP_EXIT_EVENT));
             }}
           >
             <Power className="h-4 w-4" />
-            <span className="text-[13px] font-normal leading-none tracking-normal">Exit Wizzle</span>
+            <span className="text-ui-tight font-normal tracking-normal">Exit Wizzle</span>
           </button>
         </div>,
         document.body,
       ) : null}
 
-      {dialog?.type === "confirm-exit" ? (
-        <AppDialog
-          actions={
-            <>
-              <button
-                className="h-10 rounded-full px-4 text-[14px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
-                onClick={closeDialog}
-              >
-                Cancel
-              </button>
-              <button
-                className="h-10 rounded-full bg-[var(--color-accent)] px-4 text-[14px] font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)]"
-                onClick={async () => {
-                  closeDialog();
-                  await getCurrentWindow().close();
-                }}
-              >
-                Exit
-              </button>
-            </>
-          }
-          description="Close the Wizzle desktop app?"
-          onClose={closeDialog}
-          title="Exit Wizzle?"
-        />
-      ) : null}
+      {dialog?.type === "feedback" ? <FeedbackDialog onClose={closeDialog} /> : null}
+
+      {dialog?.type === "about" ? <AboutDialog onClose={closeDialog} /> : null}
 
       {dialog?.type === "rename-session" ? (
         <AppDialog
           actions={
             <>
               <button
-                className="h-10 rounded-full px-4 text-[14px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                className="h-10 rounded-full px-4 text-ui-tight text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                 onClick={closeDialog}
               >
                 Cancel
               </button>
               <button
-                className="h-10 rounded-full bg-[var(--color-accent)] px-4 text-[14px] font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="h-10 rounded-full bg-[var(--color-accent)] px-4 text-ui-tight font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={!dialog.value.trim()}
                 onClick={() => {
                   if (isDraftSessionId(dialog.sessionId)) {
@@ -867,7 +925,7 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
         >
           <input
             autoFocus
-            className="h-11 w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-4 text-[14px] text-[var(--color-text)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-border-strong)]"
+            className="h-11 w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-4 text-ui-tight text-[var(--color-text)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-border-strong)]"
             onChange={(event) => setDialog({ ...dialog, value: event.currentTarget.value })}
             onKeyDown={(event) => {
               if (event.key === "Enter" && dialog.value.trim()) {
@@ -890,13 +948,13 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
           actions={
             <>
               <button
-                className="h-10 rounded-full px-4 text-[14px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                className="h-10 rounded-full px-4 text-ui-tight text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                 onClick={closeDialog}
               >
                 Cancel
               </button>
               <button
-                className="h-10 rounded-full bg-[var(--color-danger)] px-4 text-[14px] font-medium text-white transition hover:opacity-90"
+                className="h-10 rounded-full bg-[var(--color-danger)] px-4 text-ui-tight font-medium text-white transition hover:opacity-90"
                 onClick={() => {
                   deleteSession(dialog.projectId, dialog.sessionId);
                   closeDialog();
@@ -918,14 +976,14 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
           actions={
             <>
               <button
-                className="h-10 rounded-full px-4 text-[14px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                className="h-10 rounded-full px-4 text-ui-tight text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                 disabled={isRemovingProject}
                 onClick={closeDialog}
               >
                 Cancel
               </button>
               <button
-                className="h-10 rounded-full bg-[var(--color-danger)] px-4 text-[14px] font-medium text-white transition hover:opacity-90"
+                className="h-10 rounded-full bg-[var(--color-danger)] px-4 text-ui-tight font-medium text-white transition hover:opacity-90"
                 disabled={isRemovingProject}
                 onClick={async () => {
                   setIsRemovingProject(true);
