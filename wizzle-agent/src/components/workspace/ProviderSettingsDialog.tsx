@@ -81,16 +81,16 @@ const emptyModelRow: ProviderModelFormRow = {
 };
 
 const fieldClassName =
-  "h-10 w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-3 text-[13px] text-[var(--color-text)] outline-none focus:border-[var(--color-border-strong)]";
+  "h-10 w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-3 text-ui-tight text-[var(--color-text)] outline-none focus:border-[var(--color-border-strong)]";
 
 const modelFieldClassName =
-  "h-9 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-3 text-[12px] text-[var(--color-text)] outline-none focus:border-[var(--color-border-strong)]";
+  "h-9 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-3 text-[13px] text-[var(--color-text)] outline-none focus:border-[var(--color-border-strong)]";
 
-/** Match account-tile settings popup label density (`text-[13px] font-normal …`). */
+/** Match account-tile settings popup label density. */
 const headerButtonClassName =
-  "inline-flex h-9 items-center gap-2 rounded-full border border-[var(--color-border)] px-3 text-[13px] font-normal leading-none tracking-normal text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)] disabled:cursor-not-allowed disabled:opacity-50";
+  "inline-flex h-9 items-center gap-2 rounded-full border border-[var(--color-border)] px-3 text-ui-tight font-normal tracking-normal text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)] disabled:cursor-not-allowed disabled:opacity-50";
 
-const menuItemLabelClassName = "text-[13px] font-normal leading-none tracking-normal";
+const menuItemLabelClassName = "text-ui-tight font-normal tracking-normal";
 
 function resolveTokenizerMode(
   tokenizerJson: string | null | undefined,
@@ -360,7 +360,7 @@ function ReasoningLevelsMultiSelect({
 
                 return (
                   <button
-                    className="flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-left text-[12px] text-[var(--color-text)] transition hover:bg-[var(--color-panel-hover)]"
+                    className="flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] text-[var(--color-text)] transition hover:bg-[var(--color-panel-hover)]"
                     key={level}
                     onClick={() => toggleLevel(level)}
                     type="button"
@@ -479,7 +479,7 @@ function downloadTextFile(fileName: string, content: string) {
 }
 
 function FieldLabel({ children }: { children: string }) {
-  return <label className="mb-1 block text-[11px] font-medium text-[var(--color-text-tertiary)]">{children}</label>;
+  return <label className="mb-1 block text-[12px] font-medium text-[var(--color-text-tertiary)]">{children}</label>;
 }
 
 export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
@@ -867,14 +867,14 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
               type="button"
             >
               <ArrowLeft className="h-3.5 w-3.5 shrink-0" />
-              <span className="text-[13px] font-normal leading-none tracking-normal">
+              <span className="text-ui-tight font-normal tracking-normal">
                 Back to chat
               </span>
             </button>
-            <h1 className="text-[24px] font-semibold tracking-[-0.03em] text-[var(--color-text)]">
+            <h1 className="text-[25px] font-semibold tracking-[-0.03em] text-[var(--color-text)]">
               Providers
             </h1>
-            <p className="mt-1 text-[13px] text-[var(--color-text-secondary)]">
+            <p className="mt-1 text-ui text-[var(--color-text-secondary)]">
               Configure local model providers. API keys stay in the desktop database and are never exported.
             </p>
           </div>
@@ -909,14 +909,14 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
         </div>
 
         {error ? (
-          <p className="rounded-2xl border border-[var(--color-danger)] px-3 py-2 text-[12px] text-[var(--color-danger)]">
+          <p className="rounded-2xl border border-[var(--color-danger)] px-3 py-2 text-[13px] text-[var(--color-danger)]">
             {error}
           </p>
         ) : null}
 
         <section className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr))]">
           {providers.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-[var(--color-border)] p-4 text-[13px] text-[var(--color-text-secondary)]">
+            <div className="rounded-2xl border border-dashed border-[var(--color-border)] p-4 text-ui text-[var(--color-text-secondary)]">
               No providers configured. Use <span className="font-medium text-[var(--color-text)]">Add</span> or{" "}
               <span className="font-medium text-[var(--color-text)]">Import</span> to get started.
             </div>
@@ -928,26 +928,26 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <h2 className="truncate text-[15px] font-medium text-[var(--color-text)]">
+                    <h2 className="truncate text-ui-tight font-medium text-[var(--color-text)]">
                       {provider.name}
                     </h2>
-                    <p className="mt-1 truncate text-[12px] text-[var(--color-text-tertiary)]">
+                    <p className="mt-1 truncate text-[13px] text-[var(--color-text-tertiary)]">
                       {provider.providerType}
                     </p>
                   </div>
-                  <span className="rounded-full border border-[var(--color-border)] px-2 py-1 text-[11px] text-[var(--color-text-secondary)]">
+                  <span className="rounded-full border border-[var(--color-border)] px-2 py-1 text-[12px] text-[var(--color-text-secondary)]">
                     {providerModelCounts.get(provider.id) ?? provider.modelCount} models
                   </span>
                 </div>
-                <p className="mt-3 truncate text-[12px] text-[var(--color-text-secondary)]">
+                <p className="mt-3 truncate text-[13px] text-[var(--color-text-secondary)]">
                   {provider.endpoint}
                 </p>
-                <p className="mt-1 text-[12px] text-[var(--color-text-tertiary)]">
+                <p className="mt-1 text-[13px] text-[var(--color-text-tertiary)]">
                   API key: {provider.hasApiKey ? "Stored locally" : "Not set"}
                 </p>
                 <div className="mt-4 flex flex-wrap gap-2">
                   <button
-                    className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--color-border)] px-3 text-[13px] font-normal leading-none tracking-normal text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--color-border)] px-3 text-ui-tight font-normal tracking-normal text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                     onClick={() => openEditProviderDialog(provider)}
                     type="button"
                   >
@@ -955,7 +955,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                     Edit
                   </button>
                   <button
-                    className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--color-border)] px-3 text-[13px] font-normal leading-none tracking-normal text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--color-border)] px-3 text-ui-tight font-normal tracking-normal text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                     onClick={() => {
                       setError(null);
                       setDialog({
@@ -972,7 +972,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                     Refresh
                   </button>
                   <button
-                    className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[color-mix(in_srgb,var(--color-danger)_45%,transparent)] px-3 text-[13px] font-normal leading-none tracking-normal text-[var(--color-danger)] transition hover:bg-[var(--color-panel-hover)] disabled:opacity-50"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[color-mix(in_srgb,var(--color-danger)_45%,transparent)] px-3 text-ui-tight font-normal tracking-normal text-[var(--color-danger)] transition hover:bg-[var(--color-panel-hover)] disabled:opacity-50"
                     disabled={deletingProviderId !== null}
                     onClick={() => {
                       setError(null);
@@ -1039,7 +1039,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
           actions={
             <>
               <button
-                className="h-10 rounded-full px-4 text-[14px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                className="h-10 rounded-full px-4 text-ui-tight text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                 onClick={closeDialog}
                 disabled={isBusy}
                 type="button"
@@ -1047,7 +1047,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                 Cancel
               </button>
               <button
-                className="h-10 rounded-full bg-[var(--color-accent)] px-4 text-[14px] font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="h-10 rounded-full bg-[var(--color-accent)] px-4 text-ui-tight font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={isBusy || !dialog.value.trim()}
                 onClick={() => {
                   void handleImportUrl(dialog.value);
@@ -1075,7 +1075,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
             value={dialog.value}
           />
           {error ? (
-            <p className="mt-3 rounded-2xl border border-[var(--color-danger)] px-3 py-2 text-[12px] text-[var(--color-danger)]">
+            <p className="mt-3 rounded-2xl border border-[var(--color-danger)] px-3 py-2 text-[13px] text-[var(--color-danger)]">
               {error}
             </p>
           ) : null}
@@ -1088,7 +1088,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
           actions={
             <>
               <button
-                className="h-10 rounded-full px-4 text-[14px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                className="h-10 rounded-full px-4 text-ui-tight text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                 onClick={closeDialog}
                 disabled={isRefreshing}
                 type="button"
@@ -1096,7 +1096,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                 Cancel
               </button>
               <button
-                className="h-10 rounded-full bg-[var(--color-accent)] px-4 text-[14px] font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="h-10 rounded-full bg-[var(--color-accent)] px-4 text-ui-tight font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={isRefreshing || (!dialog.fetchAll && !dialog.removeInvalid)}
                 onClick={() => {
                   void handleConfirmRefresh();
@@ -1112,7 +1112,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
           title="Refresh models"
         >
           <div className="space-y-3">
-            <label className="flex items-start gap-2.5 text-[13px] text-[var(--color-text-secondary)]">
+            <label className="flex items-start gap-2.5 text-ui text-[var(--color-text-secondary)]">
               <input
                 checked={dialog.fetchAll}
                 className="mt-0.5"
@@ -1123,12 +1123,12 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
               />
               <span>
                 <span className="font-medium text-[var(--color-text)]">Fetch all models</span>
-                <span className="mt-0.5 block text-[12px] text-[var(--color-text-tertiary)]">
+                <span className="mt-0.5 block text-[13px] text-[var(--color-text-tertiary)]">
                   Add models that are missing locally. Existing custom metadata is preserved.
                 </span>
               </span>
             </label>
-            <label className="flex items-start gap-2.5 text-[13px] text-[var(--color-text-secondary)]">
+            <label className="flex items-start gap-2.5 text-ui text-[var(--color-text-secondary)]">
               <input
                 checked={dialog.removeInvalid}
                 className="mt-0.5"
@@ -1139,14 +1139,14 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
               />
               <span>
                 <span className="font-medium text-[var(--color-text)]">Remove invalid models</span>
-                <span className="mt-0.5 block text-[12px] text-[var(--color-text-tertiary)]">
+                <span className="mt-0.5 block text-[13px] text-[var(--color-text-tertiary)]">
                   Drop local models, including manual ones, that are not present on the remote catalog.
                 </span>
               </span>
             </label>
           </div>
           {error ? (
-            <p className="mt-3 rounded-2xl border border-[var(--color-danger)] px-3 py-2 text-[12px] text-[var(--color-danger)]">
+            <p className="mt-3 rounded-2xl border border-[var(--color-danger)] px-3 py-2 text-[13px] text-[var(--color-danger)]">
               {error}
             </p>
           ) : null}
@@ -1159,7 +1159,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
           actions={
             <>
               <button
-                className="h-10 rounded-full px-4 text-[14px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                className="h-10 rounded-full px-4 text-ui-tight text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                 disabled={deletingProviderId !== null}
                 onClick={closeDialog}
                 type="button"
@@ -1167,7 +1167,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                 Cancel
               </button>
               <button
-                className="h-10 rounded-full bg-[var(--color-danger)] px-4 text-[14px] font-medium text-white transition disabled:cursor-not-allowed disabled:opacity-50"
+                className="h-10 rounded-full bg-[var(--color-danger)] px-4 text-ui-tight font-medium text-white transition disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={deletingProviderId !== null}
                 onClick={() => void handleDelete(dialog.providerId)}
                 type="button"
@@ -1183,7 +1183,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
           title="Delete provider?"
         >
           {error ? (
-            <p className="rounded-2xl border border-[var(--color-danger)] px-3 py-2 text-[12px] text-[var(--color-danger)]">
+            <p className="rounded-2xl border border-[var(--color-danger)] px-3 py-2 text-[13px] text-[var(--color-danger)]">
               {error}
             </p>
           ) : null}
@@ -1196,7 +1196,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
           actions={
             <>
               <button
-                className="h-10 rounded-full px-4 text-[14px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                className="h-10 rounded-full px-4 text-ui-tight text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                 onClick={() => {
                   resetProviderForm();
                   closeDialog();
@@ -1207,7 +1207,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                 Cancel
               </button>
               <button
-                className="h-10 rounded-full bg-[var(--color-accent)] px-4 text-[14px] font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                className="h-10 rounded-full bg-[var(--color-accent)] px-4 text-ui-tight font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={isBusy || !name.trim() || !endpoint.trim()}
                 onClick={() => {
                   void handleSaveProvider();
@@ -1297,7 +1297,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                 </button>
               </div>
               {dialog.mode === "edit" && hasStoredApiKey ? (
-                <label className="mt-2 flex items-center gap-2 text-[11px] text-[var(--color-text-tertiary)]">
+                <label className="mt-2 flex items-center gap-2 text-[12px] text-[var(--color-text-tertiary)]">
                   <input
                     checked={clearApiKey}
                     onChange={(event) => {
@@ -1339,7 +1339,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
               </div>
             ) : (
               <div className="flex items-end">
-                <p className="pb-2 text-[11px] leading-4 text-[var(--color-text-tertiary)]">
+                <p className="pb-2 text-[12px] leading-4 text-[var(--color-text-tertiary)]">
                   Character heuristic. Model custom tokenizers override this.
                 </p>
               </div>
@@ -1347,7 +1347,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
           </div>
 
           {dialog.mode === "add" ? (
-            <label className="mt-4 flex items-center gap-2 text-[13px] text-[var(--color-text-secondary)]">
+            <label className="mt-4 flex items-center gap-2 text-ui text-[var(--color-text-secondary)]">
               <input
                 checked={onlySpecifiedModels}
                 onChange={(event) => setOnlySpecifiedModels(event.currentTarget.checked)}
@@ -1356,16 +1356,16 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
               Use only the manually specified models below (skip catalog discovery)
             </label>
           ) : (
-            <p className="mt-4 text-[12px] text-[var(--color-text-tertiary)]">
+            <p className="mt-4 text-[13px] text-[var(--color-text-tertiary)]">
               Saving keeps exactly the models listed below. Use Refresh to sync the remote catalog.
             </p>
           )}
 
           <div className="mt-4 space-y-3">
             <div className="flex items-center justify-between">
-              <p className="text-[12px] font-medium text-[var(--color-text-secondary)]">Manual models</p>
+              <p className="text-[13px] font-medium text-[var(--color-text-secondary)]">Manual models</p>
               <button
-                className="rounded-full px-2 py-1 text-[12px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                className="rounded-full px-2 py-1 text-[13px] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                 onClick={() => setModelRows((rows) => [...rows, { ...emptyModelRow }])}
                 type="button"
               >
@@ -1482,7 +1482,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                 ) : null}
                 <div className="flex items-end md:col-span-2">
                   <button
-                    className="h-9 rounded-xl px-3 text-[12px] text-[var(--color-danger)] transition hover:bg-[var(--color-panel-hover)] disabled:cursor-not-allowed disabled:opacity-40"
+                    className="h-9 rounded-xl px-3 text-[13px] text-[var(--color-danger)] transition hover:bg-[var(--color-panel-hover)] disabled:cursor-not-allowed disabled:opacity-40"
                     disabled={isSoleEmptyDraft}
                     onClick={() =>
                       setModelRows((rows) =>
@@ -1502,7 +1502,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
           </div>
 
           {providerFormError ? (
-            <p className="mt-3 rounded-2xl border border-[var(--color-danger)] px-3 py-2 text-[12px] text-[var(--color-danger)]">
+            <p className="mt-3 rounded-2xl border border-[var(--color-danger)] px-3 py-2 text-[13px] text-[var(--color-danger)]">
               {providerFormError}
             </p>
           ) : null}
@@ -1510,7 +1510,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
       ) : null}
 
       {toastMessage ? (
-        <div className="pointer-events-none fixed bottom-6 right-6 z-[420] rounded-2xl border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-panel)_92%,transparent)] px-3.5 py-2 text-[12px] font-medium text-[var(--color-text)] shadow-[0_16px_48px_rgba(0,0,0,0.28)] backdrop-blur-xl">
+        <div className="pointer-events-none fixed bottom-6 right-6 z-[420] rounded-2xl border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-panel)_92%,transparent)] px-3.5 py-2 text-[13px] font-medium text-[var(--color-text)] shadow-[0_16px_48px_rgba(0,0,0,0.28)] backdrop-blur-xl">
           {toastMessage}
         </div>
       ) : null}

@@ -1,8 +1,11 @@
 import morphdom from "morphdom";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 import "katex/dist/katex.min.css";
 
 import { copyText } from "../../utils/clipboard";
+import { resolveExternalWebUrl } from "../../lib/external-url";
+import { frontendLogger } from "../../lib/logger";
 import {
   getStoredThemePreference,
   getThemeChangeEventName,
@@ -95,6 +98,19 @@ export function MarkdownRenderer({ className, content, streaming = false }: Mark
       className={["markdown-body", className].filter(Boolean).join(" ")}
       onClick={(event) => {
         const target = event.target as HTMLElement | null;
+        const anchor = target?.closest<HTMLAnchorElement>("a[href]");
+
+        if (anchor) {
+          const externalUrl = resolveExternalWebUrl(anchor.getAttribute("href") ?? "");
+          if (externalUrl) {
+            event.preventDefault();
+            void openUrl(externalUrl).catch((error) => {
+              frontendLogger.debug("frontend.markdown", "external_link_open_failed", { error });
+            });
+            return;
+          }
+        }
+
         const button = target?.closest<HTMLButtonElement>("[data-copy-code]");
 
         if (!button) {

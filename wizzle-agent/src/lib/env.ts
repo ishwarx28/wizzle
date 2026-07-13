@@ -1,3 +1,5 @@
+import { resolveExternalWebUrl } from "./external-url";
+
 export const clientEnv = __WIZZLE_ENV__;
 
 const DEFAULT_MAX_PROMPT_SIZE = 20_480;
@@ -60,4 +62,19 @@ export function resolveHealthyContextPercent() {
     clientEnv.WIZZLE_HEALTHY_CONTEXT_PERCENT,
     DEFAULT_HEALTHY_CONTEXT_PERCENT,
   );
+}
+
+function resolveContactEmail(value: string | undefined) {
+  const email = value?.trim() ?? "";
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : "";
+}
+
+export function resolveAboutConfig(env: WizzleClientEnv = clientEnv) {
+  return {
+    email: resolveContactEmail(env.WIZZLE_CONTACT_EMAIL),
+    githubUrl: resolveExternalWebUrl(env.WIZZLE_CONTACT_GITHUB_URL?.trim() ?? ""),
+    linkedinUrl: resolveExternalWebUrl(env.WIZZLE_CONTACT_LINKEDIN_URL?.trim() ?? ""),
+    name: env.WIZZLE_CONTACT_NAME?.trim() || "Wizzle",
+    version: env.WIZZLE_APP_VERSION?.trim() || "Unknown",
+  };
 }

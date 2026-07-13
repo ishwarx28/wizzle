@@ -128,9 +128,9 @@ export function AppDialog({
         tabIndex={-1}
       >
         <div className="shrink-0 space-y-1 px-5 pt-5">
-          <h2 className="text-[16px] font-medium text-[var(--color-text)]" id={titleId}>{title}</h2>
+          <h2 className="text-ui-tight font-medium text-[var(--color-text)]" id={titleId}>{title}</h2>
           {description ? (
-            <p className="text-[13px] leading-5 text-[var(--color-text-secondary)]" id={descriptionId}>{description}</p>
+            <p className="text-ui text-[var(--color-text-secondary)]" id={descriptionId}>{description}</p>
           ) : null}
         </div>
 

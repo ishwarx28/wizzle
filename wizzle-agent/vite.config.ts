@@ -6,7 +6,6 @@ import wasm from "vite-plugin-wasm";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
-
 function resolveClientEnv(mode: string) {
   const loadedEnv = loadEnv(mode, process.cwd(), "");
 
@@ -25,12 +24,18 @@ function resolveClientEnv(mode: string) {
     WIZZLE_FRONTEND_LOG_MODE: loadedEnv.VITE_WIZZLE_FRONTEND_LOG_MODE?.trim(),
     WIZZLE_FRONTEND_LOG_RETENTION_DAYS:
       loadedEnv.VITE_WIZZLE_FRONTEND_LOG_RETENTION_DAYS?.trim(),
+    WIZZLE_CONTACT_NAME: loadedEnv.VITE_WIZZLE_CONTACT_NAME?.trim(),
+    WIZZLE_CONTACT_EMAIL: loadedEnv.VITE_WIZZLE_CONTACT_EMAIL?.trim(),
+    WIZZLE_CONTACT_GITHUB_URL: loadedEnv.VITE_WIZZLE_CONTACT_GITHUB_URL?.trim(),
+    WIZZLE_CONTACT_LINKEDIN_URL: loadedEnv.VITE_WIZZLE_CONTACT_LINKEDIN_URL?.trim(),
+    WIZZLE_APP_VERSION: loadedEnv.VITE_WIZZLE_APP_VERSION?.trim(),
   };
 }
 
 // https://vite.dev/config/
 export default defineConfig(async ({ mode }) => ({
   plugins: [tailwindcss(), react(), wasm(), topLevelAwait()],
+  base: "./",
   envPrefix: "WIZZLE_PUBLIC_",
   define: {
     __WIZZLE_ENV__: JSON.stringify(resolveClientEnv(mode)),
@@ -38,7 +43,7 @@ export default defineConfig(async ({ mode }) => ({
   build: {
     chunkSizeWarningLimit: 1250,
     sourcemap: false,
-    target: "esnext",
+    target: "chrome105",
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

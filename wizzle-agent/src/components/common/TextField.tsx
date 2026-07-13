@@ -14,7 +14,7 @@ export function TextField(props: TextFieldProps) {
   const isPasswordField = revealablePassword && type === "password";
   const resolvedType = isPasswordField && isPasswordVisible ? "text" : type;
   const commonClassName =
-    "h-14 w-full rounded-full border border-[var(--color-border-strong)] bg-[var(--color-panel)] text-[15px] text-[var(--color-text)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)] focus:ring-3 focus:ring-[var(--color-accent-soft)] disabled:cursor-not-allowed disabled:opacity-60";
+    "h-14 w-full rounded-full border border-[var(--color-border-strong)] bg-[var(--color-panel)] text-ui-tight text-[var(--color-text)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)] focus:ring-3 focus:ring-[var(--color-accent-soft)] disabled:cursor-not-allowed disabled:opacity-60";
 
   return (
     <label className="flex w-full flex-col gap-2">

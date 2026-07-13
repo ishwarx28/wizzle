@@ -1,11 +1,22 @@
 import { useEffect, useState } from "react";
-import { Copy, FileCode2, FileImage, FileText, PanelRightClose, X } from "lucide-react";
+import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import {
+  ExternalLink,
+  FileCode2,
+  FileImage,
+  FileText,
+  FolderSearch,
+  PanelRightClose,
+  X,
+} from "lucide-react";
 
 import { MarkdownRenderer } from "../common/MarkdownRenderer";
 import { useWindowDrag } from "../../hooks/use-window-drag";
 import { useScrollActivity } from "../../hooks/use-scroll-activity";
+import { isAbsoluteNativePath, resolveFileOpenLabel } from "../../lib/file-preview";
+import { frontendLogger } from "../../lib/logger";
 import { useWorkspaceStore } from "../../store/workspace-store";
-import { copyImage, copyText } from "../../utils/clipboard";
+import { CodePreview } from "./CodePreview";
 
 function fileIcon(kind: "markdown" | "text" | "image" | "other") {
   switch (kind) {
@@ -27,7 +38,7 @@ export function FilePanel() {
   const closeFile = useWorkspaceStore((state) => state.closeFile);
   const openFile = useWorkspaceStore((state) => state.openFile);
   const toggleFilePanel = useWorkspaceStore((state) => state.toggleFilePanel);
-  const [isCopied, setIsCopied] = useState(false);
+  const [fileActionMessage, setFileActionMessage] = useState<string | null>(null);
   const windowDrag = useWindowDrag();
   const tabsScroll = useScrollActivity();
   const contentScroll = useScrollActivity();
@@ -38,40 +49,37 @@ export function FilePanel() {
   const activeFile = previewFiles.find((file) => file.id === activeFileId) ?? openedFiles[0] ?? null;
 
   useEffect(() => {
-    if (!isCopied) {
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      setIsCopied(false);
-    }, 1600);
-
-    return () => {
-      window.clearTimeout(timeoutId);
-    };
-  }, [isCopied]);
-
-  useEffect(() => {
-    setIsCopied(false);
+    setFileActionMessage(null);
   }, [activeFileId]);
 
-  const canCopyActiveFile =
-    activeFile?.kind === "markdown" ||
-    activeFile?.kind === "text" ||
-    (activeFile?.kind === "image" && Boolean(activeFile.imageSrc));
+  const activeRealPath = isAbsoluteNativePath(activeFile?.realPath) ? activeFile?.realPath : null;
+  const activeFileOpenLabel = activeFile ? resolveFileOpenLabel(activeFile) : "Open file";
 
-  async function handleCopyActiveFile() {
-    if (!activeFile) {
+  async function handleOpenActiveFile() {
+    if (!activeRealPath) {
       return;
     }
 
-    const didCopy =
-      activeFile.kind === "image" && activeFile.imageSrc
-        ? await copyImage(activeFile.imageSrc)
-        : await copyText(activeFile.content ?? "");
+    setFileActionMessage(null);
+    try {
+      await openPath(activeRealPath);
+    } catch (error) {
+      frontendLogger.error("frontend.file_panel", "open_file_failed", { error });
+      setFileActionMessage("Wizzle could not open this file with its default app.");
+    }
+  }
 
-    if (didCopy) {
-      setIsCopied(true);
+  async function handleRevealActiveFile() {
+    if (!activeRealPath) {
+      return;
+    }
+
+    setFileActionMessage(null);
+    try {
+      await revealItemInDir(activeRealPath);
+    } catch (error) {
+      frontendLogger.error("frontend.file_panel", "reveal_file_failed", { error });
+      setFileActionMessage("Wizzle could not reveal this file.");
     }
   }
 
@@ -97,7 +105,7 @@ export function FilePanel() {
               return (
                 <div
                   className={[
-                    "flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-[12px] transition",
+                    "flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-[13px] transition",
                     isActive
                       ? "border-[var(--color-border-strong)] bg-[var(--color-panel-active)] text-[var(--color-text)]"
                       : "border-[var(--color-border)] bg-transparent text-[var(--color-text-secondary)] hover:bg-[var(--color-panel-hover)]",
@@ -122,7 +130,7 @@ export function FilePanel() {
               );
             })
           ) : (
-            <div className="flex items-center text-[12px] text-[var(--color-text-tertiary)]">
+            <div className="flex items-center text-[13px] text-[var(--color-text-tertiary)]">
               No opened files
             </div>
           )}
@@ -147,45 +155,51 @@ export function FilePanel() {
           <div>
             <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
               <div className="min-w-0 flex-1">
-                <h2 className="break-words text-[15px] font-medium text-[var(--color-text)]">
+                <h2 className="break-words text-ui-tight font-medium text-[var(--color-text)]">
                   {activeFile.name}
                 </h2>
-                <p className="mt-1 break-all text-[12px] text-[var(--color-text-tertiary)]">
+                <p className="mt-1 break-all text-meta-tight text-[var(--color-text-tertiary)]">
                   {activeFile.path}
                 </p>
               </div>
-              {canCopyActiveFile ? (
-                <button
-                  className={[
-                    "inline-flex shrink-0 items-center gap-1 rounded-full px-1 py-0.5 transition",
-                    isCopied
-                      ? "cursor-default text-[var(--color-text-secondary)]"
-                      : "text-[var(--color-text-tertiary)] hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]",
-                  ].join(" ")}
-                  disabled={isCopied}
-                  onClick={() => {
-                    void handleCopyActiveFile();
-                  }}
-                >
-                  <Copy className="h-3 w-3" />
-                  <span className="text-[11px] font-normal uppercase leading-none tracking-[0.08em]">
-                    {isCopied ? "Copied" : "Copy"}
-                  </span>
-                </button>
-              ) : null}
+              <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+                {activeRealPath ? (
+                  <>
+                    <button
+                      aria-label={activeFileOpenLabel}
+                      className="rounded-full p-1.5 text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                      onClick={() => void handleOpenActiveFile()}
+                      title={activeFileOpenLabel}
+                      type="button"
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      aria-label="Reveal in file manager"
+                      className="rounded-full p-1.5 text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                      onClick={() => void handleRevealActiveFile()}
+                      title="Reveal in file manager"
+                      type="button"
+                    >
+                      <FolderSearch className="h-3.5 w-3.5" />
+                    </button>
+                  </>
+                ) : null}
+              </div>
             </div>
+
+            {fileActionMessage ? (
+              <p className="mb-3 text-[12px] text-[var(--color-danger)]" role="alert">
+                {fileActionMessage}
+              </p>
+            ) : null}
 
             {activeFile.kind === "markdown" ? (
               <MarkdownRenderer content={activeFile.content ?? ""} />
             ) : null}
 
             {activeFile.kind === "text" ? (
-              <pre
-                className="overflow-x-auto whitespace-pre-wrap break-words bg-transparent p-0 font-mono text-[12px] leading-6 text-[var(--color-text)]"
-                data-terminal-output
-              >
-                {activeFile.content ?? ""}
-              </pre>
+              <CodePreview content={activeFile.content ?? ""} language={activeFile.language} />
             ) : null}
 
             {activeFile.kind === "image" ? (
@@ -195,20 +209,20 @@ export function FilePanel() {
                   className="max-h-[340px] w-full object-contain"
                   src={activeFile.imageSrc}
                 />
-                <p className="text-sm leading-6 text-[var(--color-text-secondary)]">
+                <p className="text-ui text-[var(--color-text-secondary)]">
                   {activeFile.summary}
                 </p>
               </div>
             ) : null}
 
             {activeFile.kind === "other" ? (
-              <div className="border border-dashed border-[var(--color-border)] px-4 py-4 text-sm text-[var(--color-text-secondary)]">
+              <div className="border border-dashed border-[var(--color-border)] px-4 py-4 text-ui text-[var(--color-text-secondary)]">
                 {activeFile.summary || "Preview is not available for this file type yet."}
               </div>
             ) : null}
           </div>
         ) : (
-          <div className="flex h-full items-center justify-center border border-dashed border-[var(--color-border)] px-6 py-8 text-center text-sm leading-6 text-[var(--color-text-secondary)]">
+          <div className="flex h-full items-center justify-center border border-dashed border-[var(--color-border)] px-6 py-8 text-center text-ui text-[var(--color-text-secondary)]">
             Open a file from chat to preview it here.
           </div>
         )}

@@ -9,7 +9,7 @@ Wizzle is a local-first desktop AI coding agent. The Tauri application owns the 
 - `opencode-models.yaml`: initial OpenAI-compatible provider and model metadata imported when no providers exist.
 - Local state and provider credentials are stored under `~/.wizzle`.
 
-A project maps to one user-selected local folder, and every stored session belongs to one project. File mutations are confined to that project. Shell commands are clearly disclosed as host-capable and remain subject to the selected session permission mode.
+A project maps to one user-selected local folder, and every stored session belongs to one project. Ordinary mutations stay within that project; approved external mutations and host-capable shell commands remain subject to the selected session permission mode.
 
 ## Quick Start
 

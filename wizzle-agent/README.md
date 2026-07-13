@@ -74,7 +74,7 @@ Useful values:
 
 The initial provider file is `../opencode-models.yaml`. It seeds OpenAI-compatible providers and model metadata when no providers are configured. Additional providers can be added from the Providers page.
 
-Provider records are stored locally. API keys are encrypted before being written to SQLite and are not exposed through frontend provider/model state.
+Provider records are stored locally. API keys are encrypted before being written to SQLite using a private key in Wizzle's local state directory, and are not exposed through frontend provider/model state.
 
 ## Direct Provider Calls
 
@@ -136,8 +136,9 @@ CI is configured in `../.github/workflows/build-desktop-packages.yml`. It runs t
 - The desktop app owns local state and local tool execution.
 - The app launches directly into the workspace without sign-in.
 - MVP permission modes are `manual-approve` and `full-access`.
-- File write/edit tools stay limited to the selected project root.
-- Shell commands are host-capable (not filesystem-sandboxed); `full-access` auto-approves tools while `manual-approve` uses the in-app prompt.
+- Full Access automatically allows ordinary reads and in-project edits. Sensitive reads, non-whitelisted shell commands, dangerous commands, and out-of-project mutations require approval.
+- Manual Approve also requires approval for in-project mutations. In-project reads and whitelisted read-only shell commands run without a prompt.
+- Shell commands are host-capable and are not filesystem-sandboxed.
 
 ## License
 

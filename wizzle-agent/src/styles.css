@@ -32,6 +32,7 @@
   --color-accent-foreground: #111111;
   --color-accent-soft: rgba(255, 255, 255, 0.12);
   --color-danger: #ff8f85;
+  --color-brand-green: #00e85f;
   --color-user-bubble: rgba(35, 35, 35, 0.98);
   --color-composer: rgba(24, 24, 24, 0.98);
   --color-send-button: rgba(245, 245, 245, 1);
@@ -39,6 +40,15 @@
   --color-send-button-foreground: #111111;
   --color-code-bg: rgba(12, 14, 18, 0.92);
   --color-code-text: #c2ffd0;
+  --font-size-ui: 14px;
+  --line-height-ui: 20px;
+  --line-height-ui-tight: 16px;
+  --font-size-meta: 13px;
+  --line-height-meta: 16px;
+  --font-size-tiny: 12px;
+  --line-height-tiny: 14px;
+  --font-size-micro: 11px;
+  --line-height-micro: 12px;
   --titlebar-top-padding: 0px;
   --titlebar-leading-space: 0px;
   background: var(--color-app-bg);
@@ -71,6 +81,7 @@
   --color-accent-foreground: #ffffff;
   --color-accent-soft: rgba(17, 17, 17, 0.08);
   --color-danger: #b43a2d;
+  --color-brand-green: #00e85f;
   --color-user-bubble: rgba(247, 247, 247, 1);
   --color-composer: rgba(255, 255, 255, 1);
   --color-send-button: rgba(17, 17, 17, 1);
@@ -103,6 +114,7 @@
     --color-accent-foreground: #ffffff;
     --color-accent-soft: rgba(17, 17, 17, 0.08);
     --color-danger: #b43a2d;
+    --color-brand-green: #00e85f;
     --color-user-bubble: rgba(247, 247, 247, 1);
     --color-composer: rgba(255, 255, 255, 1);
     --color-send-button: rgba(17, 17, 17, 1);
@@ -130,6 +142,8 @@ body,
 body {
   background: var(--color-app-bg);
   color: var(--color-text);
+  font-size: var(--font-size-ui);
+  line-height: var(--line-height-ui);
 }
 
 a {
@@ -151,6 +165,36 @@ textarea {
 
 button {
   cursor: pointer;
+}
+
+.text-ui {
+  font-size: var(--font-size-ui);
+  line-height: var(--line-height-ui);
+}
+
+.text-ui-tight {
+  font-size: var(--font-size-ui);
+  line-height: var(--line-height-ui-tight);
+}
+
+.text-meta {
+  font-size: var(--font-size-meta);
+  line-height: var(--line-height-meta);
+}
+
+.text-meta-tight {
+  font-size: var(--font-size-meta);
+  line-height: var(--line-height-tiny);
+}
+
+.text-tiny {
+  font-size: var(--font-size-tiny);
+  line-height: var(--line-height-tiny);
+}
+
+.text-micro {
+  font-size: var(--font-size-micro);
+  line-height: var(--line-height-micro);
 }
 
 .app-titlebar-region {
@@ -223,6 +267,8 @@ button {
 
 .markdown-body {
   min-width: 0;
+  font-size: var(--font-size-ui);
+  line-height: var(--line-height-ui);
   overflow-wrap: anywhere;
   word-break: break-word;
 }
@@ -231,7 +277,7 @@ button {
 .markdown-body h2,
 .markdown-body h3 {
   margin: 1.1rem 0 0.5rem;
-  font-size: 1.05rem;
+  font-size: 1.1125rem;
   font-weight: 600;
   letter-spacing: -0.02em;
 }
@@ -247,6 +293,15 @@ button {
 .markdown-body ul,
 .markdown-body ol {
   padding-left: 1.25rem;
+  list-style-position: outside;
+}
+
+.markdown-body ul {
+  list-style-type: disc;
+}
+
+.markdown-body ol {
+  list-style-type: decimal;
 }
 
 .markdown-body li + li {
@@ -277,8 +332,10 @@ button {
 
 .markdown-body table {
   width: 100%;
+  max-width: 100%;
   border-collapse: collapse;
   font-size: 0.96em;
+  table-layout: auto;
 }
 
 .markdown-body thead {
@@ -288,9 +345,12 @@ button {
 .markdown-body th,
 .markdown-body td {
   border: 1px solid var(--color-border);
+  max-width: min(30rem, 72cqi);
+  overflow-wrap: break-word;
   padding: 0.55rem 0.7rem;
   text-align: left;
   vertical-align: top;
+  word-break: normal;
 }
 
 .markdown-body th {
@@ -298,6 +358,7 @@ button {
 }
 
 .markdown-table-wrap {
+  container-type: inline-size;
   max-width: 100%;
   overflow-x: auto;
   border-radius: 1rem;
@@ -350,7 +411,7 @@ button {
 
 .markdown-code-language,
 .markdown-copy-button {
-  font-size: 0.72rem;
+  font-size: 0.7825rem;
   line-height: 1;
 }
 
@@ -380,7 +441,7 @@ button {
   margin: 0 !important;
   background: transparent !important;
   padding: 0.75rem 0.95rem 0.95rem !important;
-  font-size: 13px !important;
+  font-size: 14px !important;
   line-height: 1.75 !important;
   white-space: pre-wrap !important;
   word-break: break-word;

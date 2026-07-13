@@ -26,7 +26,7 @@ export function ToolDiffViewer({
 
   return (
     <div className="overflow-hidden rounded-xl border border-[color-mix(in_srgb,var(--color-border)_80%,transparent)] bg-[color-mix(in_srgb,var(--color-panel-muted)_74%,transparent)]">
-      <div className="flex items-center justify-between border-b border-[var(--color-border)] px-3 py-2 text-[11px] text-[var(--color-text-tertiary)]">
+      <div className="flex items-center justify-between border-b border-[var(--color-border)] px-3 py-2 text-[12px] text-[var(--color-text-tertiary)]">
         <div className="flex min-w-0 items-center gap-2">
           <span className="truncate text-[var(--color-text-secondary)]">{title ?? "Diff"}</span>
           <span className="text-[#36d27c]">+{diff.addedCount}</span>
@@ -36,13 +36,13 @@ export function ToolDiffViewer({
       </div>
       <div className="max-h-[160px] overflow-auto" data-code-block>
         {diff.hunks.length > 0 ? (
-          <div className="min-w-full space-y-2 p-2 font-mono text-[11px] leading-5">
+          <div className="min-w-full space-y-2 p-2 font-mono text-tiny">
             {diff.hunks.map((hunk, hunkIndex) => (
               <div
                 className="overflow-hidden rounded-lg border border-[color-mix(in_srgb,var(--color-border)_55%,transparent)]"
                 key={`${hunk.header}-${hunkIndex}`}
               >
-                <div className="border-b border-[color-mix(in_srgb,var(--color-border)_55%,transparent)] bg-[color-mix(in_srgb,var(--color-panel-muted)_85%,transparent)] px-3 py-1.5 text-[10px] text-[var(--color-text-tertiary)]">
+                <div className="border-b border-[color-mix(in_srgb,var(--color-border)_55%,transparent)] bg-[color-mix(in_srgb,var(--color-panel-muted)_85%,transparent)] px-3 py-1.5 text-[11px] text-[var(--color-text-tertiary)]">
                   {hunk.header}
                 </div>
                 <div>
@@ -117,7 +117,7 @@ export function ToolDiffViewer({
             ))}
           </div>
         ) : (
-          <div className="px-3 py-2 text-[12px] text-[var(--color-text-tertiary)]">
+          <div className="px-3 py-2 text-[13px] text-[var(--color-text-tertiary)]">
             No textual changes available.
           </div>
         )}

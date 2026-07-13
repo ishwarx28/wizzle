@@ -1,5 +1,5 @@
 import DOMPurify from "dompurify";
-import { Marked } from "marked";
+import { Marked, Renderer, type Tokens } from "marked";
 import markedKatex from "marked-katex-extension";
 import markedShiki from "marked-shiki";
 import remend from "remend";
@@ -9,6 +9,7 @@ import { createHighlighterCore } from "shiki/core";
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
 
 import type { EffectiveTheme } from "../utils/theme";
+import { normalizeNestedCodeFences } from "./markdown-normalization";
 
 const SHIKI_THEME_BY_MODE: Record<EffectiveTheme, string> = {
   dark: "github-dark-default",
@@ -171,7 +172,13 @@ function createMarked(theme: EffectiveTheme, isStreaming: boolean) {
     return cached;
   }
 
-  const parser = new Marked({ async: true, breaks: true, gfm: true }).use(
+  const renderer = new Renderer();
+  const renderTable = renderer.table;
+  renderer.table = function table(token: Tokens.Table) {
+    return `<div class="markdown-table-wrap">${renderTable.call(this, token)}</div>`;
+  };
+
+  const parser = new Marked({ async: true, breaks: true, gfm: true, renderer }).use(
     markedKatex({
       nonStandard: true,
       throwOnError: false,
@@ -206,12 +213,13 @@ export async function renderMarkdownToHtml(options: {
   theme: EffectiveTheme;
 }) {
   const isStreaming = Boolean(options.isStreaming);
-  const preparedContent = options.isStreaming
+  const repairedContent = options.isStreaming
     ? remend(options.content, {
         inlineKatex: true,
         linkMode: "text-only",
       })
     : options.content;
+  const preparedContent = normalizeNestedCodeFences(repairedContent);
   const parser = createMarked(options.theme, isStreaming);
   const html = await parser.parse(preparedContent, { async: true });
 
