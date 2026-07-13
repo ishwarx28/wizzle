@@ -12,7 +12,10 @@ use crate::workspace::{
 
 use super::{
     tools::pathing,
-    types::{AgentGlobalSkillFilePayload, AgentInstructionFilePayload, AgentProjectContextPayload},
+    types::{
+        AgentGitEnvironmentPayload, AgentGlobalSkillFilePayload, AgentInstructionFilePayload,
+        AgentProjectContextPayload,
+    },
 };
 
 const INSTRUCTION_FILE_NAMES: [&str; 1] = ["AGENTS.md"];
@@ -70,25 +73,54 @@ fn run_git(project_root: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn resolve_git_tracked_state(project_root: &Path) -> String {
-    match run_git(project_root, &["rev-parse", "--is-inside-work-tree"]) {
-        Some(value) if value == "true" => {}
-        Some(_) => return "Not a Git worktree.".to_string(),
-        None => return "Git status unavailable.".to_string(),
+fn resolve_git_environment(project_root: &Path) -> AgentGitEnvironmentPayload {
+    let available = Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        return AgentGitEnvironmentPayload {
+            available: false,
+            is_worktree: false,
+            status_available: false,
+            tracked_change_count: None,
+        };
     }
 
-    let Some(status) = run_git(project_root, &["status", "--short", "--untracked-files=no"]) else {
-        return "Git worktree; tracked status unavailable.".to_string();
-    };
-    let tracked_change_count = status
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count();
+    let is_worktree = matches!(
+        run_git(project_root, &["rev-parse", "--is-inside-work-tree"]),
+        Some(value) if value == "true"
+    );
+    if !is_worktree {
+        return AgentGitEnvironmentPayload {
+            available: true,
+            is_worktree: false,
+            status_available: false,
+            tracked_change_count: None,
+        };
+    }
 
-    if tracked_change_count == 0 {
-        "Git worktree with no tracked file changes.".to_string()
-    } else {
-        format!("Git worktree with {tracked_change_count} tracked file change(s).")
+    let status = run_git(project_root, &["status", "--short", "--untracked-files=no"]);
+    AgentGitEnvironmentPayload {
+        available: true,
+        is_worktree: true,
+        status_available: status.is_some(),
+        tracked_change_count: status
+            .map(|value| value.lines().filter(|line| !line.trim().is_empty()).count() as u64),
+    }
+}
+
+fn describe_git_environment(environment: &AgentGitEnvironmentPayload) -> String {
+    if !environment.available {
+        return "Git unavailable.".to_string();
+    }
+    if !environment.is_worktree {
+        return "Not a Git worktree.".to_string();
+    }
+    match environment.tracked_change_count {
+        Some(0) => "Git worktree with no tracked file changes.".to_string(),
+        Some(count) => format!("Git worktree with {count} tracked file change(s)."),
+        None => "Git worktree; tracked status unavailable.".to_string(),
     }
 }
 
@@ -277,11 +309,13 @@ pub fn load_agent_project_context(
 ) -> Result<AgentProjectContextPayload, String> {
     let project_root = sqlite_repository::resolve_project_root(&project_id)?;
     let (global_skills_dir, global_skill_files) = load_global_skill_inventory()?;
-    let git_tracked_state = resolve_git_tracked_state(&project_root);
+    let git_environment = resolve_git_environment(&project_root);
+    let git_tracked_state = describe_git_environment(&git_environment);
     let session_cache_dir = resolve_session_cache_dir(session_id)?;
     let instruction_files = discover_instruction_files(&project_root);
 
     Ok(AgentProjectContextPayload {
+        git_environment,
         git_tracked_state,
         global_skill_files,
         global_skills_dir,
@@ -294,7 +328,10 @@ pub fn load_agent_project_context(
 
 #[cfg(test)]
 mod tests {
-    use super::{discover_global_skill_files, discover_instruction_files};
+    use super::{
+        describe_git_environment, discover_global_skill_files, discover_instruction_files,
+    };
+    use crate::agent::types::AgentGitEnvironmentPayload;
     use std::fs;
 
     fn temporary_dir(label: &str) -> std::path::PathBuf {
@@ -351,5 +388,27 @@ mod tests {
             .expect("reviewer skill");
         assert_eq!(reviewer.description.as_deref(), Some("Review code safely"));
         fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn structured_git_environment_has_stable_descriptions() {
+        assert_eq!(
+            describe_git_environment(&AgentGitEnvironmentPayload {
+                available: true,
+                is_worktree: false,
+                status_available: false,
+                tracked_change_count: None,
+            }),
+            "Not a Git worktree."
+        );
+        assert_eq!(
+            describe_git_environment(&AgentGitEnvironmentPayload {
+                available: true,
+                is_worktree: true,
+                status_available: true,
+                tracked_change_count: Some(3),
+            }),
+            "Git worktree with 3 tracked file change(s)."
+        );
     }
 }

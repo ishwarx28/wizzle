@@ -434,6 +434,41 @@ fn resolve_stream_completion(
     }
 }
 
+fn append_utf8_stream_chunk(
+    buffer: &mut String,
+    pending_utf8: &mut Vec<u8>,
+    bytes: &[u8],
+) -> Result<(), String> {
+    pending_utf8.extend_from_slice(bytes);
+
+    loop {
+        match std::str::from_utf8(pending_utf8) {
+            Ok(text) => {
+                buffer.push_str(text);
+                pending_utf8.clear();
+                return Ok(());
+            }
+            Err(error) => {
+                let valid_up_to = error.valid_up_to();
+
+                if valid_up_to > 0 {
+                    let valid_text = std::str::from_utf8(&pending_utf8[..valid_up_to])
+                        .map_err(|_| "Provider stream returned invalid UTF-8.".to_string())?;
+                    buffer.push_str(valid_text);
+                    pending_utf8.drain(..valid_up_to);
+                    continue;
+                }
+
+                if error.error_len().is_some() {
+                    return Err("Provider stream returned invalid UTF-8.".to_string());
+                }
+
+                return Ok(());
+            }
+        }
+    }
+}
+
 fn process_sse_events(
     request_id: &str,
     window: &Window,
@@ -563,6 +598,7 @@ pub async fn stream_chat(
             };
 
         let mut buffer = String::new();
+        let mut pending_utf8 = Vec::new();
         let mut stream = response.bytes_stream();
         let mut saw_done = false;
         let mut finish_reason: Option<String> = None;
@@ -588,9 +624,9 @@ pub async fn stream_chat(
                 Err(error) => return Err(map_provider_error(None, "", Some(&error)).message),
             };
 
-            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            append_utf8_stream_chunk(&mut buffer, &mut pending_utf8, &bytes)?;
 
-            if buffer.len() > MAX_SSE_BUFFER_BYTES {
+            if buffer.len().saturating_add(pending_utf8.len()) > MAX_SSE_BUFFER_BYTES {
                 return Err("Provider stream exceeded the 10 MB safety limit.".to_string());
             }
 
@@ -603,6 +639,10 @@ pub async fn stream_chat(
             if parsed.finish_reason.is_some() {
                 finish_reason = parsed.finish_reason;
             }
+        }
+
+        if !pending_utf8.is_empty() {
+            return Err("Provider stream ended with incomplete UTF-8.".to_string());
         }
 
         if !buffer.trim().is_empty() {
@@ -711,8 +751,9 @@ pub async fn fetch_models(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_request_body, discovered_model, endpoint_with_path, extract_finish_reason,
-        map_provider_error, resolve_reasoning_effort, resolve_stream_completion,
+        append_utf8_stream_chunk, build_request_body, discovered_model, endpoint_with_path,
+        extract_finish_reason, map_provider_error, resolve_reasoning_effort,
+        resolve_stream_completion,
     };
     use crate::providers::types::{
         ProviderModelRecord, ProviderResolvedModel, ProviderSecretRecord,
@@ -865,6 +906,39 @@ mod tests {
         let filtered =
             resolve_stream_completion(false, Some("content_filter"), true).expect_err("filter");
         assert!(filtered.contains("content filter"));
+    }
+
+    #[test]
+    fn utf8_stream_chunk_preserves_split_emoji() {
+        let emoji = '\u{1F600}';
+        let replacement = '\u{FFFD}';
+        let text = "data: {\"choices\":[{\"delta\":{\"content\":\"hello \u{1F600}\"}}]}\n\n";
+        let bytes = text.as_bytes();
+        let emoji_start = text.find(emoji).expect("emoji index");
+        let split = emoji_start + 1;
+        let mut buffer = String::new();
+        let mut pending = Vec::new();
+
+        append_utf8_stream_chunk(&mut buffer, &mut pending, &bytes[..split]).expect("first chunk");
+        assert!(!buffer.contains(replacement));
+        assert!(!pending.is_empty());
+
+        append_utf8_stream_chunk(&mut buffer, &mut pending, &bytes[split..]).expect("second chunk");
+        assert!(pending.is_empty());
+        assert_eq!(buffer, text);
+        assert!(buffer.contains(emoji));
+        assert!(!buffer.contains(replacement));
+    }
+
+    #[test]
+    fn utf8_stream_chunk_keeps_incomplete_tail_pending() {
+        let mut buffer = String::new();
+        let mut pending = Vec::new();
+
+        append_utf8_stream_chunk(&mut buffer, &mut pending, &[0xF0]).expect("partial");
+
+        assert!(buffer.is_empty());
+        assert_eq!(pending, vec![0xF0]);
     }
 
     #[test]

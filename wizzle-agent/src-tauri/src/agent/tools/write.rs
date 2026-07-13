@@ -22,23 +22,40 @@ struct WriteToolArguments {
 pub fn resolve_lock_path(
     project_root: &std::path::Path,
     arguments: &Value,
+    allow_external_paths: bool,
 ) -> Result<PathBuf, String> {
     let arguments: WriteToolArguments = serde_json::from_value(arguments.clone())
         .map_err(|error| format!("Invalid arguments for write: {error}"))?;
-    pathing::resolve_target_tool_path(project_root, &arguments.path)
+    pathing::resolve_target_tool_path_with_approval(
+        project_root,
+        &arguments.path,
+        allow_external_paths,
+    )
 }
 
-pub async fn run(project_root: PathBuf, arguments: Value) -> Result<AgentToolRunPayload, String> {
+pub async fn run(
+    project_root: PathBuf,
+    arguments: Value,
+    allow_external_paths: bool,
+) -> Result<AgentToolRunPayload, String> {
     let arguments: WriteToolArguments = serde_json::from_value(arguments)
         .map_err(|error| format!("Invalid arguments for write: {error}"))?;
-    run_blocking("write", move || execute(project_root, arguments)).await
+    run_blocking("write", move || {
+        execute(project_root, arguments, allow_external_paths)
+    })
+    .await
 }
 
 fn execute(
     project_root: PathBuf,
     arguments: WriteToolArguments,
+    allow_external_paths: bool,
 ) -> Result<AgentToolRunPayload, String> {
-    let path = pathing::resolve_target_tool_path(&project_root, &arguments.path)?;
+    let path = pathing::resolve_target_tool_path_with_approval(
+        &project_root,
+        &arguments.path,
+        allow_external_paths,
+    )?;
     let created = !path.exists();
     if !created {
         let metadata = fs::metadata(&path)

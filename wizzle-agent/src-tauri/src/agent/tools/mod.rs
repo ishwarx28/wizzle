@@ -47,11 +47,23 @@ pub async fn run_agent_tool(
 
     let arguments = serde_json::from_str::<Value>(&input.arguments)
         .map_err(|error| format!("Invalid JSON tool arguments: {error}"))?;
+    // Full Access authorizes host reads. The frontend still asks before shell or
+    // mutation calls that cross the project boundary.
+    let allow_external_paths = input.manual_approval_granted || permission_mode == "full-access";
 
     match input.tool_name.as_str() {
-        "read" => read::run(project_root, arguments, input.image_capable).await,
+        "read" => {
+            read::run(
+                project_root,
+                arguments,
+                input.image_capable,
+                allow_external_paths,
+            )
+            .await
+        }
         "write" => {
-            let lock_path = write::resolve_lock_path(&project_root, &arguments)?;
+            let lock_path =
+                write::resolve_lock_path(&project_root, &arguments, allow_external_paths)?;
             let session_lock = input
                 .session_id
                 .as_deref()
@@ -63,10 +75,11 @@ pub async fn run_agent_tool(
                 None => None,
             };
             let _path_guard = path_lock.lock().await;
-            write::run(project_root, arguments).await
+            write::run(project_root, arguments, allow_external_paths).await
         }
         "edit" => {
-            let lock_path = edit::resolve_lock_path(&project_root, &arguments)?;
+            let lock_path =
+                edit::resolve_lock_path(&project_root, &arguments, allow_external_paths)?;
             let session_lock = input
                 .session_id
                 .as_deref()
@@ -78,17 +91,20 @@ pub async fn run_agent_tool(
                 None => None,
             };
             let _path_guard = path_lock.lock().await;
-            edit::run(project_root, arguments).await
+            edit::run(project_root, arguments, allow_external_paths).await
         }
         "bash" => {
             bash::run(
                 project_root,
                 arguments,
-                input.tool_call_id.as_deref(),
-                &window,
-                runtime,
-                input.session_id.as_deref(),
-                input.turn_id.as_deref(),
+                bash::BashRunContext {
+                    allow_external_paths,
+                    runtime,
+                    session_id: input.session_id.as_deref(),
+                    tool_call_id: input.tool_call_id.as_deref(),
+                    turn_id: input.turn_id.as_deref(),
+                    window: &window,
+                },
             )
             .await
         }

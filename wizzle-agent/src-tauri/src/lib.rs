@@ -19,13 +19,19 @@ use providers::{
 };
 use workspace::{
     add_project_from_path, append_or_update_message, build_attachment_preview_from_bytes,
-    create_session_if_needed, delete_workspace_session, finalize_turn, load_composer_state,
-    load_workspace_session, load_workspace_snapshot, mark_orphaned_processes_on_startup,
-    persist_workspace_session, read_attachment_previews, remove_project_by_id,
-    rename_workspace_session, save_composer_state, save_workspace_settings, set_project_expanded,
+    check_project_root_exists, create_session_if_needed, delete_workspace_session, finalize_turn,
+    load_composer_state, load_todo_state, load_workspace_session, load_workspace_snapshot,
+    mark_orphaned_processes_on_startup, persist_workspace_session, read_attachment_previews,
+    remove_project_by_id, rename_workspace_session, resolve_tool_path_candidates,
+    save_composer_state, save_todo_state, save_workspace_settings, set_project_expanded,
     truncate_session_transcript_to_turns, update_session_selection, update_session_title,
     upsert_session_event, upsert_turn_summary, WorkspaceStorageLock,
 };
+
+#[tauri::command]
+fn exit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -46,6 +52,7 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(ProviderChatRequestStore::default())
         .manage(AgentRuntimeState::default())
         .manage(WorkspaceStorageLock::default())
@@ -72,8 +79,11 @@ pub fn run() {
             load_workspace_session,
             load_composer_state,
             save_composer_state,
+            load_todo_state,
+            save_todo_state,
             add_project_from_path,
             remove_project_by_id,
+            check_project_root_exists,
             save_workspace_settings,
             set_project_expanded,
             rename_workspace_session,
@@ -89,6 +99,7 @@ pub fn run() {
             finalize_turn,
             read_attachment_previews,
             build_attachment_preview_from_bytes,
+            resolve_tool_path_candidates,
             load_agent_project_context,
             run_agent_tool,
             get_session_runtime_state,
@@ -102,6 +113,7 @@ pub fn run() {
             read_agent_process,
             stop_agent_process,
             write_frontend_logs,
+            exit_app,
             list_providers,
             upsert_provider,
             delete_provider,

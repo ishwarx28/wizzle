@@ -31,11 +31,12 @@ pub async fn run(
     project_root: PathBuf,
     arguments: Value,
     image_capable: bool,
+    allow_external_paths: bool,
 ) -> Result<AgentToolRunPayload, String> {
     let arguments: ReadToolArguments = serde_json::from_value(arguments)
         .map_err(|error| format!("Invalid arguments for read: {error}"))?;
     run_blocking("read", move || {
-        execute(project_root, arguments, image_capable)
+        execute(project_root, arguments, image_capable, allow_external_paths)
     })
     .await
 }
@@ -44,8 +45,13 @@ fn execute(
     project_root: PathBuf,
     arguments: ReadToolArguments,
     image_capable: bool,
+    allow_external_paths: bool,
 ) -> Result<AgentToolRunPayload, String> {
-    let path = pathing::resolve_existing_read_path(&project_root, &arguments.path)?;
+    let path = pathing::resolve_existing_read_path_with_approval(
+        &project_root,
+        &arguments.path,
+        allow_external_paths,
+    )?;
     let is_image = is_supported_image_extension(&file_extension(&path.to_string_lossy()));
     if is_image && !image_capable {
         return Ok(output::error(
@@ -285,6 +291,7 @@ mod tests {
                 limit: None,
             },
             true,
+            false,
         )
         .expect("read result");
         let output = parse_output(result.output);
@@ -315,6 +322,7 @@ mod tests {
                 limit: Some(1),
             },
             true,
+            false,
         )
         .expect("read result");
         let output = parse_output(result.output);
@@ -348,6 +356,7 @@ mod tests {
                 limit: None,
             },
             true,
+            false,
         )
         .expect("read result");
         let output = parse_output(result.output);
@@ -380,6 +389,7 @@ mod tests {
                 limit: Some(3_000),
             },
             true,
+            false,
         )
         .expect("read result");
         let output = parse_output(result.output);
@@ -406,6 +416,7 @@ mod tests {
                 limit: Some(1),
             },
             true,
+            false,
         )
         .expect("read result");
         let output = parse_output(result.output);

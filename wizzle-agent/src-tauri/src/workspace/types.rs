@@ -88,6 +88,7 @@ pub struct WorkspaceSessionPayload {
     pub messages_loaded: bool,
     pub model_id: Option<String>,
     pub permission_mode: Option<String>,
+    pub reasoning_level: Option<String>,
     pub compacted_context: Option<WorkspaceCompactedContextPayload>,
     pub events: Vec<WorkspaceSessionEventPayload>,
     pub replay_turn_summaries: Vec<WorkspaceTurnSummaryPayload>,
@@ -172,6 +173,7 @@ pub struct WorkspaceSnapshotPayload {
     pub is_sidebar_open: bool,
     pub model_id: String,
     pub permission_mode: String,
+    pub reasoning_level: String,
     pub preview_files: Vec<AttachmentPreviewPayload>,
     pub projects: Vec<WorkspaceProjectPayload>,
     pub selected_project_id: String,
@@ -202,6 +204,8 @@ pub struct StoredSessionMetadata {
     pub id: String,
     pub model_id: Option<String>,
     pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub reasoning_level: Option<String>,
     pub project_id: String,
     #[serde(default)]
     pub compacted_context: Option<WorkspaceCompactedContextPayload>,
@@ -339,6 +343,7 @@ pub struct SaveWorkspaceSettingsInput {
     pub is_sidebar_open: bool,
     pub model_id: String,
     pub permission_mode: String,
+    pub reasoning_level: String,
     pub selected_project_id: Option<String>,
     pub selected_session_id: Option<String>,
 }
@@ -370,6 +375,28 @@ pub struct DeleteSessionInput {
 pub struct LoadWorkspaceSessionInput {
     pub project_id: String,
     pub session_id: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadTodoStateInput {
+    pub session_id: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveTodoStateInput {
+    pub session_id: String,
+    pub state_json: String,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoStatePayload {
+    pub session_id: String,
+    pub state_json: String,
+    pub updated_at_ms: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -441,6 +468,7 @@ pub struct PersistedSessionMetadataInput {
     pub id: String,
     pub model_id: Option<String>,
     pub permission_mode: Option<String>,
+    pub reasoning_level: Option<String>,
     pub selected_model_uuid: Option<String>,
     pub system_prompt_hash: Option<String>,
     pub title: String,
@@ -462,6 +490,7 @@ pub struct UpdateSessionTitleInput {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateSessionSelectionInput {
     pub permission_mode: Option<String>,
+    pub reasoning_level: Option<String>,
     pub project_id: String,
     pub selected_model_uuid: Option<String>,
     pub session_id: String,
@@ -513,6 +542,8 @@ pub struct PersistedSessionInput {
     pub messages: Vec<PersistedMessageInput>,
     pub model_id: Option<String>,
     pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub reasoning_level: Option<String>,
     #[serde(default)]
     pub compacted_context: Option<WorkspaceCompactedContextPayload>,
     #[serde(default)]
@@ -639,6 +670,27 @@ pub struct PersistedMessageStepInput {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ResolveToolPathCandidatesInput {
+    pub candidates: Vec<String>,
+    pub cwd: Option<String>,
+    pub project_root: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedToolPathCandidatePayload {
+    pub error: Option<String>,
+    pub expanded_path: Option<String>,
+    pub has_unexpanded_variables: bool,
+    pub is_inside_project_root: Option<bool>,
+    pub is_safe_external: bool,
+    pub raw_path: String,
+    pub real_path: Option<String>,
+    pub resolved_path: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PersistedTurnSummaryInput {
     pub completed_at_ms: u64,
     pub estimated_tokens_image_capable: u64,
@@ -657,6 +709,8 @@ pub struct StoredSettingsFile {
     pub is_sidebar_open: bool,
     pub model_id: String,
     pub permission_mode: String,
+    #[serde(default)]
+    pub reasoning_level: String,
     pub selected_project_id: Option<String>,
     pub selected_session_id: Option<String>,
 }
@@ -668,6 +722,7 @@ impl Default for StoredSettingsFile {
             is_sidebar_open: true,
             model_id: "wizzle-1-thinking".to_string(),
             permission_mode: "manual-approve".to_string(),
+            reasoning_level: String::new(),
             selected_project_id: None,
             selected_session_id: None,
         }

@@ -17,7 +17,17 @@ pub struct AgentGlobalSkillFilePayload {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentGitEnvironmentPayload {
+    pub available: bool,
+    pub is_worktree: bool,
+    pub status_available: bool,
+    pub tracked_change_count: Option<u64>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentProjectContextPayload {
+    pub git_environment: AgentGitEnvironmentPayload,
     pub git_tracked_state: String,
     pub global_skill_files: Vec<AgentGlobalSkillFilePayload>,
     pub global_skills_dir: Option<String>,
@@ -34,6 +44,8 @@ pub struct RunAgentToolInput {
     /// When false, image file reads return an error instead of inline image data.
     #[serde(default = "default_image_capable")]
     pub image_capable: bool,
+    #[serde(default)]
+    pub manual_approval_granted: bool,
     pub project_id: String,
     pub session_id: Option<String>,
     pub tool_call_id: Option<String>,

@@ -171,14 +171,27 @@ fn resolve_existing_path_with_boundary(
     Ok(canonical_candidate)
 }
 
-pub fn resolve_existing_path(project_root: &Path, requested_path: &str) -> Result<PathBuf, String> {
-    resolve_existing_path_with_boundary(project_root, requested_path, true)
-}
-
-pub fn resolve_existing_read_path(
+pub fn resolve_existing_path_with_approval(
     project_root: &Path,
     requested_path: &str,
+    allow_external_paths: bool,
 ) -> Result<PathBuf, String> {
+    resolve_existing_path_with_boundary(project_root, requested_path, !allow_external_paths)
+}
+
+pub fn resolve_existing_path(project_root: &Path, requested_path: &str) -> Result<PathBuf, String> {
+    resolve_existing_path_with_approval(project_root, requested_path, false)
+}
+
+pub fn resolve_existing_read_path_with_approval(
+    project_root: &Path,
+    requested_path: &str,
+    allow_external_paths: bool,
+) -> Result<PathBuf, String> {
+    if allow_external_paths {
+        return resolve_existing_path_with_boundary(project_root, requested_path, false);
+    }
+
     let candidate = normalize_candidate_path(project_root, requested_path, false)?;
 
     if path_stays_inside_root(project_root, &candidate) {
@@ -233,11 +246,12 @@ pub fn resolve_existing_read_path(
     Ok(canonical_candidate)
 }
 
-pub fn resolve_existing_tool_path(
+pub fn resolve_existing_tool_path_with_approval(
     project_root: &Path,
     requested_path: &str,
+    allow_external_paths: bool,
 ) -> Result<PathBuf, String> {
-    resolve_existing_path_with_boundary(project_root, requested_path, true)
+    resolve_existing_path_with_boundary(project_root, requested_path, !allow_external_paths)
 }
 
 fn resolve_target_path_with_boundary(
@@ -279,16 +293,20 @@ fn resolve_target_path_with_boundary(
     Ok(parent.join(file_name))
 }
 
-pub fn resolve_target_tool_path(
+pub fn resolve_target_tool_path_with_approval(
     project_root: &Path,
     requested_path: &str,
+    allow_external_paths: bool,
 ) -> Result<PathBuf, String> {
-    resolve_target_path_with_boundary(project_root, requested_path, true)
+    resolve_target_path_with_boundary(project_root, requested_path, !allow_external_paths)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_existing_read_path, resolve_existing_tool_path, resolve_target_tool_path};
+    use super::{
+        resolve_existing_read_path_with_approval, resolve_existing_tool_path_with_approval,
+        resolve_target_tool_path_with_approval,
+    };
     use std::fs;
     use uuid::Uuid;
 
@@ -303,10 +321,41 @@ mod tests {
         let root = temporary_root();
         fs::write(root.join("inside.txt"), "inside").expect("write fixture");
 
-        assert!(resolve_existing_tool_path(&root, "../outside.txt").is_err());
-        assert!(resolve_target_tool_path(&root, "../outside.txt").is_err());
+        assert!(resolve_existing_tool_path_with_approval(&root, "../outside.txt", false).is_err());
+        assert!(resolve_target_tool_path_with_approval(&root, "../outside.txt", false).is_err());
 
         fs::remove_dir_all(root).expect("remove temporary project root");
+    }
+
+    #[test]
+    fn approved_paths_can_escape_project_root() {
+        let root = temporary_root();
+        let outside = std::env::temp_dir().join(format!("wizzle-outside-{}", Uuid::new_v4()));
+        fs::create_dir_all(&outside).expect("create outside directory");
+        let read_path = outside.join("read.txt");
+        let edit_path = outside.join("edit.txt");
+        let write_path = outside.join("write.txt");
+        fs::write(&read_path, "read").expect("write read fixture");
+        fs::write(&edit_path, "edit").expect("write edit fixture");
+
+        assert_eq!(
+            resolve_existing_read_path_with_approval(&root, &read_path.to_string_lossy(), true,)
+                .expect("approved read should resolve"),
+            fs::canonicalize(&read_path).expect("canonical read path"),
+        );
+        assert_eq!(
+            resolve_existing_tool_path_with_approval(&root, &edit_path.to_string_lossy(), true,)
+                .expect("approved edit should resolve"),
+            fs::canonicalize(&edit_path).expect("canonical edit path"),
+        );
+        assert_eq!(
+            resolve_target_tool_path_with_approval(&root, &write_path.to_string_lossy(), true,)
+                .expect("approved write should resolve"),
+            write_path,
+        );
+
+        fs::remove_dir_all(root).expect("remove temporary project root");
+        fs::remove_dir_all(outside).expect("remove outside directory");
     }
 
     #[test]
@@ -320,13 +369,20 @@ mod tests {
         fs::write(&unrelated_path, "secret").expect("write unrelated file");
 
         assert_eq!(
-            resolve_existing_read_path(&project_root, &instruction_path.to_string_lossy())
-                .expect("ancestor instruction should be readable"),
+            resolve_existing_read_path_with_approval(
+                &project_root,
+                &instruction_path.to_string_lossy(),
+                false,
+            )
+            .expect("ancestor instruction should be readable"),
             fs::canonicalize(&instruction_path).expect("canonical instruction path"),
         );
-        assert!(
-            resolve_existing_read_path(&project_root, &unrelated_path.to_string_lossy()).is_err()
-        );
+        assert!(resolve_existing_read_path_with_approval(
+            &project_root,
+            &unrelated_path.to_string_lossy(),
+            false,
+        )
+        .is_err());
 
         fs::remove_dir_all(parent).expect("remove temporary root");
     }
@@ -341,7 +397,7 @@ mod tests {
         fs::create_dir_all(&outside).expect("create outside directory");
         symlink(&outside, root.join("linked")).expect("create symlink");
 
-        assert!(resolve_target_tool_path(&root, "linked/new.txt").is_err());
+        assert!(resolve_target_tool_path_with_approval(&root, "linked/new.txt", false).is_err());
 
         fs::remove_dir_all(root).expect("remove temporary project root");
         fs::remove_dir_all(outside).expect("remove outside directory");

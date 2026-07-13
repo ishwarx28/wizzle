@@ -8,6 +8,20 @@
     "core:window:allow-start-dragging",
     "clipboard-manager:default",
     "dialog:default",
-    "opener:default"
+    "notification:default",
+    "opener:default",
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [
+        {
+          "path": "$HOME/**",
+          "app": null
+        },
+        {
+          "path": "$TEMP/**",
+          "app": null
+        }
+      ]
+    }
   ]
 }

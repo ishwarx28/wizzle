@@ -81,34 +81,28 @@ struct ProcessCompletion {
     timed_out: bool,
 }
 
+pub(super) struct BashRunContext<'a> {
+    pub allow_external_paths: bool,
+    pub runtime: &'a AgentRuntimeState,
+    pub session_id: Option<&'a str>,
+    pub tool_call_id: Option<&'a str>,
+    pub turn_id: Option<&'a str>,
+    pub window: &'a Window,
+}
+
 pub async fn run(
     project_root: PathBuf,
     arguments: Value,
-    tool_call_id: Option<&str>,
-    window: &Window,
-    runtime: &AgentRuntimeState,
-    session_id: Option<&str>,
-    turn_id: Option<&str>,
+    context: BashRunContext<'_>,
 ) -> Result<AgentToolRunPayload, String> {
     let arguments: BashToolArguments = serde_json::from_value(arguments)
         .map_err(|error| format!("Invalid arguments for bash: {error}"))?;
     let action = arguments.action.unwrap_or(BashAction::Run);
 
     match action {
-        BashAction::Run => {
-            run_command(
-                project_root,
-                arguments,
-                tool_call_id,
-                window,
-                runtime,
-                session_id,
-                turn_id,
-            )
-            .await
-        }
+        BashAction::Run => run_command(project_root, arguments, &context).await,
         BashAction::ListProcesses => {
-            let session_id = require_session_id(session_id)?;
+            let session_id = require_session_id(context.session_id)?;
             let processes = sqlite_repository::list_processes(session_id)?;
             Ok(output::success(json!({
                 "ok": true,
@@ -116,7 +110,7 @@ pub async fn run(
             })))
         }
         BashAction::ReadProcess => {
-            let session_id = require_session_id(session_id)?;
+            let session_id = require_session_id(context.session_id)?;
             let process_id = require_process_id(&arguments)?;
             let process = sqlite_repository::read_process(session_id, process_id)?;
             Ok(output::success(json!({
@@ -125,9 +119,12 @@ pub async fn run(
             })))
         }
         BashAction::StopProcess => {
-            let session_id = require_session_id(session_id)?;
+            let session_id = require_session_id(context.session_id)?;
             let process_id = require_process_id(&arguments)?;
-            let process = runtime.stop_process(window, session_id, process_id).await?;
+            let process = context
+                .runtime
+                .stop_process(context.window, session_id, process_id)
+                .await?;
             Ok(output::success(json!({
                 "ok": true,
                 "process": process,
@@ -207,11 +204,16 @@ fn build_shell_command(command: &str) -> Command {
     }
 }
 
-fn resolve_command_cwd(project_root: &Path, cwd: Option<&str>) -> Result<PathBuf, String> {
+fn resolve_command_cwd(
+    project_root: &Path,
+    cwd: Option<&str>,
+    allow_external_paths: bool,
+) -> Result<PathBuf, String> {
     let Some(cwd) = cwd.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(project_root.to_path_buf());
     };
-    let path = pathing::resolve_existing_path(project_root, cwd)?;
+    let path =
+        pathing::resolve_existing_path_with_approval(project_root, cwd, allow_external_paths)?;
 
     if !path.is_dir() {
         return Err(format!(
@@ -424,11 +426,7 @@ async fn collect_output(
 async fn run_command(
     project_root: PathBuf,
     arguments: BashToolArguments,
-    tool_call_id: Option<&str>,
-    window: &Window,
-    runtime: &AgentRuntimeState,
-    session_id: Option<&str>,
-    turn_id: Option<&str>,
+    context: &BashRunContext<'_>,
 ) -> Result<AgentToolRunPayload, String> {
     let command = require_command(&arguments)?;
 
@@ -436,37 +434,42 @@ async fn run_command(
         return Err(message.to_string());
     }
 
-    let cwd = resolve_command_cwd(&project_root, arguments.cwd.as_deref())?;
+    let cwd = resolve_command_cwd(
+        &project_root,
+        arguments.cwd.as_deref(),
+        context.allow_external_paths,
+    )?;
 
     if arguments.background.unwrap_or(false) {
-        let session_id = require_session_id(session_id)?;
-        let lock = runtime.background_process_lock(session_id)?;
+        let session_id = require_session_id(context.session_id)?;
+        let lock = context.runtime.background_process_lock(session_id)?;
         let _guard = lock.lock().await;
         return start_background_process(
             session_id,
             command,
             cwd,
-            window,
-            runtime,
-            turn_id,
-            tool_call_id,
+            context.window,
+            context.runtime,
+            context.turn_id,
+            context.tool_call_id,
         )
         .await;
     }
 
-    let session_key = session_id
+    let session_key = context
+        .session_id
         .map(str::to_string)
         .unwrap_or_else(|| project_root.to_string_lossy().to_string());
-    let lock = runtime.foreground_bash_lock(&session_key)?;
+    let lock = context.runtime.foreground_bash_lock(&session_key)?;
     let _guard = lock.lock().await;
     execute_foreground(
         command,
         cwd,
         arguments.timeout.unwrap_or_default(),
-        tool_call_id,
-        window,
-        runtime,
-        session_id,
+        context.tool_call_id,
+        context.window,
+        context.runtime,
+        context.session_id,
     )
     .await
 }

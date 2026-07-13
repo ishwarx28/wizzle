@@ -22,14 +22,14 @@ use super::{
     },
     types::{
         AppendOrUpdateMessageInput, AttachmentPreviewPayload, DeleteSessionInput,
-        FinalizeTurnInput, LoadComposerStateInput, LoadWorkspaceSessionInput,
+        FinalizeTurnInput, LoadComposerStateInput, LoadTodoStateInput, LoadWorkspaceSessionInput,
         PersistSessionMetadataInput, PersistWorkspaceSessionInput, PersistedMessageInput,
         PersistedPreviewFileInput, PersistedQueuedMessageInput, PersistedSessionMetadataInput,
         PersistedToolCallInput, PersistedToolResultInput, PersistedTurnSummaryInput,
-        RenameSessionInput, SaveComposerStateInput, SaveWorkspaceSettingsInput,
+        RenameSessionInput, SaveComposerStateInput, SaveTodoStateInput, SaveWorkspaceSettingsInput,
         SetProjectExpandedInput, StoredAttachmentRecord, StoredMessageRecord,
         StoredMessageStepRecord, StoredProjectRecord, StoredSessionMetadata, StoredSettingsFile,
-        StoredToolCallRecord, StoredToolResultRecord, StoredTurnSummaryRecord,
+        StoredToolCallRecord, StoredToolResultRecord, StoredTurnSummaryRecord, TodoStatePayload,
         TruncateSessionTranscriptInput, UpdateSessionSelectionInput, UpdateSessionTitleInput,
         UpsertSessionEventInput, UpsertTurnSummaryInput, WorkspaceCompactedContextPayload,
         WorkspaceComposerStatePayload, WorkspaceMessagePayload, WorkspaceMessageStepPayload,
@@ -40,7 +40,7 @@ use super::{
     MAX_ATTACHMENT_BYTES,
 };
 
-const MIGRATION_VERSION: i64 = 1;
+const MIGRATION_VERSION: i64 = 2;
 const PROCESS_TAIL_BYTES: usize = 60_000;
 static MIGRATED_DATABASES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 static CONNECTION_POOL: OnceLock<Mutex<Option<(PathBuf, Connection)>>> = OnceLock::new();
@@ -405,6 +405,8 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
         ensure_process_link_columns(conn)?;
         ensure_tokenizer_json_columns(conn)?;
         ensure_session_events_table(conn)?;
+        ensure_todo_states_table(conn)?;
+        drop_legacy_workflow_states_table(conn)?;
         repair_self_parent_tool_calls(conn)?;
         return Ok(());
     }
@@ -601,8 +603,15 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
           is_sidebar_open INTEGER NOT NULL,
           model_id TEXT NOT NULL,
           permission_mode TEXT NOT NULL,
+          reasoning_level TEXT NOT NULL DEFAULT '',
           selected_project_id TEXT NULL,
           selected_session_id TEXT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS todo_states (
+          session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+          state_json TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_turns_session_index
@@ -635,15 +644,17 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
           is_sidebar_open,
           model_id,
           permission_mode,
+          reasoning_level,
           selected_project_id,
           selected_session_id
-        ) VALUES (1, ?1, ?2, ?3, ?4, NULL, NULL)
+        ) VALUES (1, ?1, ?2, ?3, ?4, ?5, NULL, NULL)
         ",
         params![
             bool_to_i64(defaults.is_file_panel_open),
             bool_to_i64(defaults.is_sidebar_open),
             defaults.model_id,
-            defaults.permission_mode
+            defaults.permission_mode,
+            defaults.reasoning_level
         ],
     )
     .map_err(|error| db_error("Could not initialize Wizzle settings", error))?;
@@ -666,6 +677,8 @@ fn run_migrations(conn: &mut Connection) -> Result<(), String> {
     ensure_process_link_columns(conn)?;
     ensure_tokenizer_json_columns(conn)?;
     ensure_session_events_table(conn)?;
+    ensure_todo_states_table(conn)?;
+    drop_legacy_workflow_states_table(conn)?;
     repair_self_parent_tool_calls(conn)?;
     Ok(())
 }
@@ -706,6 +719,22 @@ fn ensure_session_events_table(conn: &Connection) -> Result<(), String> {
         ",
     )
     .map_err(|error| db_error("Could not initialize Wizzle session events", error))
+}
+
+fn drop_legacy_workflow_states_table(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch("DROP TABLE IF EXISTS workflow_states;")
+        .map_err(|error| db_error("Could not remove legacy workflow state storage", error))
+}
+
+fn ensure_todo_states_table(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS todo_states (
+          session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+          state_json TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );",
+    )
+    .map_err(|error| db_error("Could not initialize TODO state storage", error))
 }
 
 /// Link background processes to the turn/tool that spawned them (#75).
@@ -859,6 +888,22 @@ fn rebuild_turn_parts_for_nullable_content(conn: &Connection) -> Result<(), Stri
 }
 
 fn ensure_session_metadata_columns(conn: &Connection) -> Result<(), String> {
+    if !table_has_column(conn, "workspace_settings", "reasoning_level")? {
+        conn.execute(
+            "ALTER TABLE workspace_settings ADD COLUMN reasoning_level TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|error| db_error("Could not update Wizzle workspace settings", error))?;
+    }
+
+    if !table_has_column(conn, "sessions", "selected_reasoning_level")? {
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN selected_reasoning_level TEXT NULL",
+            [],
+        )
+        .map_err(|error| db_error("Could not update Wizzle session metadata", error))?;
+    }
+
     if !table_has_column(conn, "sessions", "selected_provider_id")? {
         conn.execute(
             "ALTER TABLE sessions ADD COLUMN selected_provider_id TEXT NULL REFERENCES providers(id) ON DELETE SET NULL",
@@ -1303,7 +1348,7 @@ fn read_settings(conn: &Connection) -> Result<StoredSettingsFile, String> {
         .query_row(
             "
             SELECT is_file_panel_open, is_sidebar_open, model_id, permission_mode,
-                   selected_project_id, selected_session_id
+                   reasoning_level, selected_project_id, selected_session_id
             FROM workspace_settings
             WHERE id = 1
             ",
@@ -1314,8 +1359,9 @@ fn read_settings(conn: &Connection) -> Result<StoredSettingsFile, String> {
                     is_sidebar_open: i64_to_bool(row.get::<_, i64>(1)?),
                     model_id: row.get(2)?,
                     permission_mode: row.get(3)?,
-                    selected_project_id: row.get(4)?,
-                    selected_session_id: row.get(5)?,
+                    reasoning_level: row.get(4)?,
+                    selected_project_id: row.get(5)?,
+                    selected_session_id: row.get(6)?,
                 })
             },
         )
@@ -1334,14 +1380,16 @@ fn write_settings(conn: &Connection, settings: &StoredSettingsFile) -> Result<()
           is_sidebar_open,
           model_id,
           permission_mode,
+          reasoning_level,
           selected_project_id,
           selected_session_id
-        ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
+        ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
         ON CONFLICT(id) DO UPDATE SET
           is_file_panel_open = excluded.is_file_panel_open,
           is_sidebar_open = excluded.is_sidebar_open,
           model_id = excluded.model_id,
           permission_mode = excluded.permission_mode,
+          reasoning_level = excluded.reasoning_level,
           selected_project_id = excluded.selected_project_id,
           selected_session_id = excluded.selected_session_id
         ",
@@ -1350,6 +1398,7 @@ fn write_settings(conn: &Connection, settings: &StoredSettingsFile) -> Result<()
             bool_to_i64(settings.is_sidebar_open),
             settings.model_id,
             settings.permission_mode,
+            settings.reasoning_level,
             settings.selected_project_id,
             settings.selected_session_id
         ],
@@ -1714,6 +1763,7 @@ fn build_workspace_session_summary(metadata: StoredSessionMetadata) -> Workspace
         messages_loaded: false,
         model_id: metadata.model_id,
         permission_mode: metadata.permission_mode,
+        reasoning_level: metadata.reasoning_level,
         compacted_context: metadata.compacted_context,
         events: Vec::new(),
         replay_turn_summaries: Vec::new(),
@@ -1861,7 +1911,7 @@ fn read_session_metadata(
         SELECT
           id, project_id, title, selected_model_uuid, model_id, permission_mode, created_at, updated_at,
           system_prompt_hash, tokenizer_kind, tool_def_tokens, tool_defs_hash,
-          last_compacted_summary, last_compacted_tokens, last_compacted_at
+          selected_reasoning_level, last_compacted_summary, last_compacted_tokens, last_compacted_at
         FROM sessions
         WHERE id = ?1
         ",
@@ -1882,7 +1932,8 @@ fn read_session_metadata(
                 tokenizer_kind: row.get(9)?,
                 tool_def_tokens: row.get::<_, i64>(10).ok().map(|value| value.max(0) as u64),
                 tool_defs_hash: row.get(11)?,
-                compacted_context: read_compacted_context_from_row(row, 12, 13, 14)?,
+                reasoning_level: row.get(12)?,
+                compacted_context: read_compacted_context_from_row(row, 13, 14, 15)?,
             })
         },
     )
@@ -1900,7 +1951,7 @@ fn load_project_sessions(
             SELECT
               id, project_id, title, selected_model_uuid, model_id, permission_mode, created_at, updated_at,
               system_prompt_hash, tokenizer_kind, tool_def_tokens, tool_defs_hash,
-              last_compacted_summary, last_compacted_tokens, last_compacted_at
+              selected_reasoning_level, last_compacted_summary, last_compacted_tokens, last_compacted_at
             FROM sessions
             WHERE project_id = ?1
             ORDER BY updated_at DESC, created_at DESC
@@ -1924,7 +1975,8 @@ fn load_project_sessions(
                 tokenizer_kind: row.get(9)?,
                 tool_def_tokens: row.get::<_, i64>(10).ok().map(|value| value.max(0) as u64),
                 tool_defs_hash: row.get(11)?,
-                compacted_context: read_compacted_context_from_row(row, 12, 13, 14)?,
+                reasoning_level: row.get(12)?,
+                compacted_context: read_compacted_context_from_row(row, 13, 14, 15)?,
             })
         })
         .map_err(|error| db_error("Could not read Wizzle sessions", error))?;
@@ -2093,6 +2145,13 @@ fn load_session_history(
                     message.tool_call_id =
                         part.tool_call_id.clone().or(message.tool_call_id.clone());
                     message.tool_name = part.name.clone().or(message.tool_name.clone());
+                } else if let Some(part) = message
+                    .parts
+                    .iter()
+                    .find(|part| part.r#type == "subagent_response")
+                {
+                    message.content = part.content.clone().unwrap_or_default();
+                    message.tool_name = Some("subagent_response".to_string());
                 }
             }
             _ => {}
@@ -2443,6 +2502,7 @@ fn load_workspace_session_payload(
         messages_loaded: true,
         model_id: metadata.model_id,
         permission_mode: metadata.permission_mode,
+        reasoning_level: metadata.reasoning_level,
         compacted_context: metadata.compacted_context,
         events,
         replay_turn_summaries: summaries
@@ -2543,6 +2603,7 @@ pub fn build_workspace_snapshot() -> Result<WorkspaceSnapshotPayload, String> {
         is_sidebar_open: settings.is_sidebar_open,
         model_id: settings.model_id,
         permission_mode: settings.permission_mode,
+        reasoning_level: settings.reasoning_level,
         preview_files: preview_files.into_values().collect(),
         projects,
         selected_project_id,
@@ -2950,6 +3011,7 @@ pub fn save_workspace_settings(input: SaveWorkspaceSettingsInput) -> Result<(), 
         is_sidebar_open: input.is_sidebar_open,
         model_id: input.model_id,
         permission_mode: input.permission_mode,
+        reasoning_level: input.reasoning_level,
         selected_project_id: input.selected_project_id,
         selected_session_id: input.selected_session_id,
     };
@@ -3730,7 +3792,7 @@ fn insert_normalized_message_steps(
         let part_index = resolve_stable_part_index(tx, turn_indexes, turn_id, &step.id)?;
         let content = step_content(step);
         let content_text = match step.r#type.as_str() {
-            "activity_content" | "content" => step.content.clone(),
+            "activity_content" | "content" | "subagent_response" => step.content.clone(),
             _ => None,
         };
         let metadata = step_metadata(message, step);
@@ -4137,6 +4199,7 @@ fn build_session_metadata(
         id: input.id,
         model_id: None,
         permission_mode: input.permission_mode,
+        reasoning_level: input.reasoning_level,
         project_id,
         selected_model_uuid: input.selected_model_uuid.or(input.model_id),
         system_prompt_hash: input.system_prompt_hash,
@@ -4158,8 +4221,8 @@ fn upsert_session_metadata(
           id, project_id, title, selected_provider_id, selected_model_uuid, selected_model_id,
           tokenizer_kind, system_prompt_hash, tool_def_tokens, tool_defs_hash, model_id,
           permission_mode, last_compacted_summary, last_compacted_tokens, last_compacted_at,
-          max_context, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, (SELECT provider_id FROM models WHERE id = ?4), ?4, NULL, ?5, COALESCE(?6, ''), ?7, COALESCE(?8, ''), NULL, ?9, ?10, ?11, ?12, 128000, ?13, ?14)
+          max_context, created_at, updated_at, selected_reasoning_level
+        ) VALUES (?1, ?2, ?3, (SELECT provider_id FROM models WHERE id = ?4), ?4, NULL, ?5, COALESCE(?6, ''), ?7, COALESCE(?8, ''), NULL, ?9, ?10, ?11, ?12, 128000, ?13, ?14, ?15)
         ON CONFLICT(id) DO UPDATE SET
           project_id = excluded.project_id,
           title = excluded.title,
@@ -4175,6 +4238,7 @@ fn upsert_session_metadata(
           last_compacted_summary = excluded.last_compacted_summary,
           last_compacted_tokens = excluded.last_compacted_tokens,
           last_compacted_at = excluded.last_compacted_at,
+          selected_reasoning_level = excluded.selected_reasoning_level,
           updated_at = excluded.updated_at
         ",
         params![
@@ -4198,7 +4262,8 @@ fn upsert_session_metadata(
                 .as_ref()
                 .map(|context| context.updated_at_ms as i64),
             metadata.created_at as i64,
-            metadata.updated_at as i64
+            metadata.updated_at as i64,
+            metadata.reasoning_level
         ],
     )
     .map_err(|error| db_error("Could not save the Wizzle session", error))?;
@@ -4321,9 +4386,10 @@ pub fn update_session_selection(input: UpdateSessionSelectionInput) -> Result<()
             tokenizer_kind = ?3,
             tool_def_tokens = ?4,
             tool_defs_hash = COALESCE(?5, ''),
-            updated_at = MAX(updated_at, ?6)
-        WHERE id = ?7
-          AND project_id = ?8
+            selected_reasoning_level = ?6,
+            updated_at = MAX(updated_at, ?7)
+        WHERE id = ?8
+          AND project_id = ?9
         ",
         params![
             input.selected_model_uuid,
@@ -4331,6 +4397,7 @@ pub fn update_session_selection(input: UpdateSessionSelectionInput) -> Result<()
             input.tokenizer_kind,
             input.tool_def_tokens.map(|value| value as i64).unwrap_or(0),
             input.tool_defs_hash,
+            input.reasoning_level,
             input.updated_at_ms as i64,
             input.session_id,
             input.project_id
@@ -4430,6 +4497,62 @@ pub fn upsert_session_event(input: UpsertSessionEventInput) -> Result<(), String
     .map_err(|error| db_error("Could not update the Wizzle session event timestamp", error))?;
     tx.commit()
         .map_err(|error| db_error("Could not finish session event persistence", error))
+}
+
+pub fn save_todo_state(input: SaveTodoStateInput) -> Result<(), String> {
+    ensure_workspace_storage()?;
+    let conn = open_database()?;
+    save_todo_state_with_conn(&conn, &input)
+}
+
+fn save_todo_state_with_conn(conn: &Connection, input: &SaveTodoStateInput) -> Result<(), String> {
+    validate_storage_id("session", &input.session_id)?;
+    if input.state_json.len() > 1_000_000 {
+        return Err("Could not save TODO state larger than 1 MB.".to_string());
+    }
+    serde_json::from_str::<Value>(&input.state_json)
+        .map_err(|_| "Could not save invalid TODO state JSON.".to_string())?;
+    if input.state_json == "null" {
+        conn.execute(
+            "DELETE FROM todo_states WHERE session_id = ?1",
+            params![input.session_id],
+        )
+        .map_err(|error| db_error("Could not clear TODO state", error))?;
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO todo_states (session_id, state_json, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(session_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at",
+        params![input.session_id, input.state_json, input.updated_at_ms as i64],
+    )
+    .map_err(|error| db_error("Could not save TODO state", error))?;
+    Ok(())
+}
+
+pub fn load_todo_state(input: LoadTodoStateInput) -> Result<Option<TodoStatePayload>, String> {
+    ensure_workspace_storage()?;
+    let conn = open_database()?;
+    load_todo_state_with_conn(&conn, &input)
+}
+
+fn load_todo_state_with_conn(
+    conn: &Connection,
+    input: &LoadTodoStateInput,
+) -> Result<Option<TodoStatePayload>, String> {
+    validate_storage_id("session", &input.session_id)?;
+    conn.query_row(
+        "SELECT session_id, state_json, updated_at FROM todo_states WHERE session_id = ?1",
+        params![input.session_id],
+        |row| {
+            Ok(TodoStatePayload {
+                session_id: row.get(0)?,
+                state_json: row.get(1)?,
+                updated_at_ms: row.get::<_, i64>(2)?.max(0) as u64,
+            })
+        },
+    )
+    .optional()
+    .map_err(|error| db_error("Could not load TODO state", error))
 }
 
 fn resolve_finalize_turn_result(
@@ -4566,6 +4689,7 @@ pub fn persist_session(input: PersistWorkspaceSessionInput) -> Result<(), String
         id: session_id.clone(),
         model_id: session_input.model_id,
         permission_mode: session_input.permission_mode,
+        reasoning_level: session_input.reasoning_level,
         compacted_context: session_input.compacted_context,
         project_id: input.project_id.clone(),
         selected_model_uuid: session_input.selected_model_uuid,
@@ -4601,8 +4725,8 @@ pub fn persist_session(input: PersistWorkspaceSessionInput) -> Result<(), String
               id, project_id, title, selected_provider_id, selected_model_uuid, selected_model_id,
               tokenizer_kind, system_prompt_hash, tool_def_tokens, tool_defs_hash, model_id,
               permission_mode, last_compacted_summary, last_compacted_tokens, last_compacted_at,
-              max_context, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, (SELECT provider_id FROM models WHERE id = ?4), ?4, NULL, ?5, COALESCE(?6, ''), ?7, COALESCE(?8, ''), NULL, ?9, ?10, ?11, ?12, 128000, ?13, ?14)
+              max_context, created_at, updated_at, selected_reasoning_level
+            ) VALUES (?1, ?2, ?3, (SELECT provider_id FROM models WHERE id = ?4), ?4, NULL, ?5, COALESCE(?6, ''), ?7, COALESCE(?8, ''), NULL, ?9, ?10, ?11, ?12, 128000, ?13, ?14, ?15)
             ON CONFLICT(id) DO UPDATE SET
               project_id = excluded.project_id,
               title = excluded.title,
@@ -4618,6 +4742,7 @@ pub fn persist_session(input: PersistWorkspaceSessionInput) -> Result<(), String
               last_compacted_summary = excluded.last_compacted_summary,
               last_compacted_tokens = excluded.last_compacted_tokens,
               last_compacted_at = excluded.last_compacted_at,
+              selected_reasoning_level = excluded.selected_reasoning_level,
               updated_at = excluded.updated_at
             ",
             params![
@@ -4641,7 +4766,8 @@ pub fn persist_session(input: PersistWorkspaceSessionInput) -> Result<(), String
                     .as_ref()
                     .map(|context| context.updated_at_ms as i64),
                 metadata.created_at as i64,
-                metadata.updated_at as i64
+                metadata.updated_at as i64,
+                metadata.reasoning_level
             ],
         )
         .map_err(|error| db_error("Could not save the Wizzle session", error))?;
@@ -4808,6 +4934,7 @@ mod tests {
             "turn_parts",
             "files",
             "processes",
+            "todo_states",
             "workspace_settings",
         ] {
             assert!(table_exists(&conn, table_name), "{table_name} should exist");
@@ -4818,6 +4945,38 @@ mod tests {
         assert!(settings.is_sidebar_open);
         assert_eq!(settings.model_id, "wizzle-1-thinking");
         assert_eq!(settings.permission_mode, "manual-approve");
+        assert_eq!(settings.reasoning_level, "");
+        assert!(table_has_column(&conn, "workspace_settings", "reasoning_level").unwrap());
+        assert!(table_has_column(&conn, "sessions", "selected_reasoning_level").unwrap());
+        assert!(!table_exists(&conn, "workflow_states"));
+
+        let mut updated = settings;
+        updated.reasoning_level = "max".to_string();
+        write_settings(&conn, &updated).expect("save reasoning preference");
+        assert_eq!(
+            read_settings(&conn)
+                .expect("reload settings")
+                .reasoning_level,
+            "max"
+        );
+    }
+
+    #[test]
+    fn current_migration_removes_legacy_workflow_state_storage() {
+        let mut conn = migrated_memory_db();
+        conn.execute_batch(
+            "CREATE TABLE workflow_states (
+              session_id TEXT NOT NULL,
+              turn_id TEXT NOT NULL,
+              state_json TEXT NOT NULL,
+              PRIMARY KEY(session_id, turn_id)
+            );",
+        )
+        .expect("create legacy workflow table");
+
+        run_migrations(&mut conn).expect("re-run current migration");
+        assert!(!table_exists(&conn, "workflow_states"));
+        assert!(table_exists(&conn, "todo_states"));
     }
 
     #[test]
@@ -4837,6 +4996,35 @@ mod tests {
     }
 
     #[test]
+    fn session_reasoning_level_round_trips() {
+        let mut conn = migrated_memory_db();
+        let now = now_unix_ms();
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES ('project-reasoning', 'Project', '/tmp/project', ?1, ?1)",
+            params![now as i64],
+        )
+        .expect("insert project");
+        let metadata = StoredSessionMetadata {
+            created_at: now,
+            id: "session-reasoning".to_string(),
+            permission_mode: Some("manual-approve".to_string()),
+            project_id: "project-reasoning".to_string(),
+            reasoning_level: Some("max".to_string()),
+            title: "Reasoning".to_string(),
+            updated_at: now,
+            ..StoredSessionMetadata::default()
+        };
+        let tx = conn.transaction().expect("start session write");
+        upsert_session_metadata(&tx, &metadata).expect("save session reasoning");
+        tx.commit().expect("commit session reasoning");
+
+        let loaded = read_session_metadata(&conn, "session-reasoning")
+            .expect("read session")
+            .expect("session exists");
+        assert_eq!(loaded.reasoning_level.as_deref(), Some("max"));
+    }
+
+    #[test]
     fn project_ids_are_uuid_backed_and_unique() {
         let mut project_ids = (0..32)
             .map(|_| std::thread::spawn(new_project_id))
@@ -4850,6 +5038,48 @@ mod tests {
             assert!(project_id.starts_with("project-"));
             Uuid::parse_str(project_id.trim_start_matches("project-")).expect("parse project UUID");
         }
+    }
+
+    #[test]
+    fn todo_state_round_trips_updates_and_clears_per_session() {
+        let conn = migrated_memory_db();
+        insert_test_session(&conn);
+        let mut input = SaveTodoStateInput {
+            session_id: "session-1".to_string(),
+            state_json: r#"{"version":1,"type":"fixing_bugs","items":[]}"#.to_string(),
+            updated_at_ms: 100,
+        };
+
+        save_todo_state_with_conn(&conn, &input).expect("save TODO state");
+        let loaded = load_todo_state_with_conn(
+            &conn,
+            &LoadTodoStateInput {
+                session_id: "session-1".to_string(),
+            },
+        )
+        .expect("load TODO state")
+        .expect("TODO exists");
+        assert_eq!(loaded.updated_at_ms, 100);
+        assert!(loaded.state_json.contains("fixing_bugs"));
+
+        input.state_json = r#"{"version":1,"type":"adding_features","items":[]}"#.to_string();
+        input.updated_at_ms = 200;
+        save_todo_state_with_conn(&conn, &input).expect("update TODO state");
+        assert_eq!(row_count(&conn, "todo_states"), 1);
+        let updated = load_todo_state_with_conn(
+            &conn,
+            &LoadTodoStateInput {
+                session_id: "session-1".to_string(),
+            },
+        )
+        .expect("reload TODO state")
+        .expect("TODO exists");
+        assert_eq!(updated.updated_at_ms, 200);
+        assert!(updated.state_json.contains("adding_features"));
+
+        input.state_json = "null".to_string();
+        save_todo_state_with_conn(&conn, &input).expect("clear TODO state");
+        assert_eq!(row_count(&conn, "todo_states"), 0);
     }
 
     #[test]
@@ -4912,6 +5142,11 @@ mod tests {
             params![now],
         )
         .expect("insert file");
+        conn.execute(
+            "INSERT INTO todo_states (session_id, state_json, updated_at) VALUES ('session-1', '{}', ?1)",
+            params![now],
+        )
+        .expect("insert TODO state");
 
         conn.execute("DELETE FROM sessions WHERE id = 'session-1'", [])
             .expect("delete session");
@@ -4924,6 +5159,7 @@ mod tests {
             "turns",
             "turn_parts",
             "files",
+            "todo_states",
         ] {
             assert_eq!(
                 row_count(&conn, table_name),
@@ -5473,6 +5709,59 @@ mod tests {
             )
             .expect("read parent after reupsert");
         assert_eq!(parent_after.as_deref(), Some(tool_call_part_id.as_str()));
+    }
+
+    #[test]
+    fn subagent_response_content_survives_sqlite_reload() {
+        let mut conn = migrated_memory_db();
+        let now = now_unix_ms();
+        insert_test_session(&conn);
+        let content =
+            "Subagent response injection\nTask ID: subagent-1\nStatus: completed\n\nFinding";
+        let message = StoredMessageRecord {
+            content: content.to_string(),
+            completed_at_ms: Some(now + 1),
+            created_at: now,
+            id: "message-subagent-1".to_string(),
+            role: "tool".to_string(),
+            status: Some("done".to_string()),
+            tool_name: Some("subagent_response".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            parts: vec![StoredMessageStepRecord {
+                content: Some(content.to_string()),
+                created_at_ms: Some(now),
+                id: "message-subagent-1-response".to_string(),
+                status: Some("done".to_string()),
+                r#type: "subagent_response".to_string(),
+                ..StoredMessageStepRecord::default()
+            }],
+            ..StoredMessageRecord::default()
+        };
+
+        {
+            let tx = conn.transaction().expect("start subagent response write");
+            let mut turn_indexes = load_turn_indexes(&tx, "session-1").expect("indexes");
+            let mut inserted = HashSet::new();
+            insert_message_part(
+                &tx,
+                &mut inserted,
+                "session-1",
+                &mut turn_indexes,
+                &message,
+                Some("running"),
+            )
+            .expect("insert subagent response");
+            tx.commit().expect("commit subagent response");
+        }
+
+        let (messages, _) = load_session_history(&conn, "session-1").expect("reload history");
+        let loaded = messages
+            .iter()
+            .find(|entry| entry.id == "message-subagent-1")
+            .expect("subagent response message");
+        assert_eq!(loaded.content, content);
+        assert_eq!(loaded.tool_name.as_deref(), Some("subagent_response"));
+        assert_eq!(loaded.parts[0].content.as_deref(), Some(content));
     }
 
     #[test]
