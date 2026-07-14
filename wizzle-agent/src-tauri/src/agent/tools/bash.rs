@@ -19,7 +19,10 @@ use super::{
     shared::{truncate_text, ToolTimeout, MAX_COMMAND_OUTPUT_BYTES},
 };
 use crate::{
-    agent::{runtime::terminate_pid, types::AgentToolRunPayload, AgentRuntimeState},
+    agent::{
+        process_command::hide_tokio_console, runtime::terminate_pid, types::AgentToolRunPayload,
+        AgentRuntimeState,
+    },
     workspace::sqlite_repository::{self, NewProcessRecord, WorkspaceProcessPayload},
 };
 
@@ -190,6 +193,7 @@ fn command_looks_unsafe(command: &str) -> Option<&'static str> {
 fn build_shell_command(command: &str) -> Command {
     if cfg!(target_os = "windows") {
         let mut process = Command::new("cmd");
+        hide_tokio_console(&mut process);
         process.args(["/C", command]);
         process
     } else {

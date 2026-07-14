@@ -11,6 +11,7 @@ use crate::workspace::{
 };
 
 use super::{
+    process_command::hide_std_console,
     tools::pathing,
     types::{
         AgentGitEnvironmentPayload, AgentGlobalSkillFilePayload, AgentInstructionFilePayload,
@@ -59,7 +60,9 @@ fn resolve_session_cache_dir(session_id: Option<String>) -> Result<Option<String
 }
 
 fn run_git(project_root: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    hide_std_console(&mut command);
+    let output = command
         .arg("-C")
         .arg(project_root)
         .args(args)
@@ -74,7 +77,9 @@ fn run_git(project_root: &Path, args: &[&str]) -> Option<String> {
 }
 
 fn resolve_git_environment(project_root: &Path) -> AgentGitEnvironmentPayload {
-    let available = Command::new("git")
+    let mut command = Command::new("git");
+    hide_std_console(&mut command);
+    let available = command
         .arg("--version")
         .output()
         .is_ok_and(|output| output.status.success());

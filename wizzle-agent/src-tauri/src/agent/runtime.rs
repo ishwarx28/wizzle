@@ -16,6 +16,9 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::workspace::sqlite_repository;
 
+#[cfg(target_os = "windows")]
+use super::process_command::hide_tokio_console;
+
 const SESSION_RUNTIME_STATE_EVENT: &str = "session-runtime-state";
 const AGENT_PROCESS_EVENT: &str = "agent-process-updated";
 const DELETE_WAIT_ATTEMPTS: usize = 120;
@@ -211,7 +214,9 @@ fn lock_for_key(
 pub(crate) async fn terminate_pid(pid: u32) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let status = tokio::process::Command::new("taskkill")
+        let mut command = tokio::process::Command::new("taskkill");
+        hide_tokio_console(&mut command);
+        let status = command
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .status()
             .await

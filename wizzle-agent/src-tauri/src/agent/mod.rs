@@ -1,4 +1,5 @@
 mod context;
+mod process_command;
 mod runtime;
 pub(crate) mod tools;
 mod types;
