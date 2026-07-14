@@ -18,11 +18,7 @@ function pad(value: number) {
 }
 
 function formatClock(date: Date) {
-  const hour = date.getHours();
-  const displayHour = hour % 12 || 12;
-  const meridiem = hour >= 12 ? "PM" : "AM";
-
-  return `${pad(displayHour)}:${pad(date.getMinutes())} ${meridiem}`;
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function isSameLocalDate(left: Date, right: Date) {
