@@ -1,10 +1,12 @@
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from "@tauri-apps/plugin-notification";
 
+import {
+  isNativeNotificationPermissionGranted,
+  type NotificationCommandInvoker,
+  requestNativeNotificationPermission,
+  sendNativeNotification,
+} from "./desktop-notification-native";
 import { frontendLogger } from "./logger";
 
 type DesktopNotificationOptions = {
@@ -14,6 +16,9 @@ type DesktopNotificationOptions = {
 };
 
 let didRequestNotificationPermission = false;
+
+const invokeNotificationCommand: NotificationCommandInvoker = (command, args) =>
+  invoke(command, args);
 
 async function isAppBackgrounded() {
   const domBackgrounded =
@@ -32,10 +37,6 @@ async function isAppBackgrounded() {
   }
 }
 
-function hasNotificationApi() {
-  return typeof window !== "undefined" && "Notification" in window;
-}
-
 function notificationIdForTag(tag: string) {
   let hash = 0;
   for (let index = 0; index < tag.length; index += 1) {
@@ -44,39 +45,44 @@ function notificationIdForTag(tag: string) {
   return ((hash >>> 0) % 2_147_483_647) || 1;
 }
 
-export function requestNotificationPermissionForUserGesture() {
-  if (!hasNotificationApi()) {
-    return Promise.resolve(false);
+export async function requestNotificationPermissionForUserGesture() {
+  try {
+    if (await isNativeNotificationPermissionGranted(invokeNotificationCommand)) {
+      return true;
+    }
+  } catch (error) {
+    frontendLogger.debug("frontend.notification", "notification_permission_check_failed", {
+      error,
+    });
   }
 
-  if (Notification.permission === "granted") {
-    return Promise.resolve(true);
-  }
-
-  if (Notification.permission === "denied" || didRequestNotificationPermission) {
-    return Promise.resolve(false);
+  if (didRequestNotificationPermission) {
+    return false;
   }
 
   didRequestNotificationPermission = true;
 
   try {
-    return requestPermission().then((permission) => permission === "granted");
+    return await requestNativeNotificationPermission(invokeNotificationCommand);
   } catch (error) {
+    didRequestNotificationPermission = false;
     frontendLogger.debug("frontend.notification", "notification_permission_request_failed", {
       error,
     });
-    return Promise.resolve(false);
+    return false;
   }
 }
 
 export async function notifyWhenAppBackgrounded(options: DesktopNotificationOptions) {
-  if (!hasNotificationApi() || !(await isAppBackgrounded())) {
+  if (!(await isAppBackgrounded())) {
     return;
   }
 
   let permissionGranted = false;
   try {
-    permissionGranted = await isPermissionGranted();
+    permissionGranted = await isNativeNotificationPermissionGranted(
+      invokeNotificationCommand,
+    );
   } catch (error) {
     frontendLogger.debug("frontend.notification", "notification_permission_check_failed", {
       error,
@@ -88,7 +94,7 @@ export async function notifyWhenAppBackgrounded(options: DesktopNotificationOpti
   }
 
   try {
-    sendNotification({
+    await sendNativeNotification(invokeNotificationCommand, {
       body: options.body,
       id: options.tag ? notificationIdForTag(options.tag) : undefined,
       title: options.title,
