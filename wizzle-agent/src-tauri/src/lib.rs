@@ -33,6 +33,35 @@ fn exit_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+fn schedule_provider_key_migration() {
+    let spawn_result = std::thread::Builder::new()
+        .name("provider-key-migration".to_string())
+        .spawn(|| match migrate_provider_api_key_encryption() {
+            Ok(count) if count > 0 => log_desktop_event(
+                "info",
+                "desktop.provider",
+                "provider_keys_migrated",
+                serde_json::json!({ "count": count }),
+            ),
+            Ok(_) => {}
+            Err(error) => log_desktop_event(
+                "warn",
+                "desktop.provider",
+                "provider_key_migration_failed",
+                serde_json::json!({ "error": error }),
+            ),
+        });
+
+    if let Err(error) = spawn_result {
+        log_desktop_event(
+            "warn",
+            "desktop.provider",
+            "provider_key_migration_schedule_failed",
+            serde_json::json!({ "error": error.to_string() }),
+        );
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = dotenvy::dotenv();
@@ -57,21 +86,7 @@ pub fn run() {
         .manage(AgentRuntimeState::default())
         .manage(WorkspaceStorageLock::default())
         .setup(|_| {
-            match migrate_provider_api_key_encryption() {
-                Ok(count) if count > 0 => log_desktop_event(
-                    "info",
-                    "desktop.provider",
-                    "provider_keys_migrated",
-                    serde_json::json!({ "count": count }),
-                ),
-                Ok(_) => {}
-                Err(error) => log_desktop_event(
-                    "warn",
-                    "desktop.provider",
-                    "provider_key_migration_failed",
-                    serde_json::json!({ "error": error }),
-                ),
-            }
+            schedule_provider_key_migration();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

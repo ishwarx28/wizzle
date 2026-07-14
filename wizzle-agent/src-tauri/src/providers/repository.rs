@@ -48,9 +48,9 @@ pub fn migrate_provider_api_key_encryption() -> Result<usize, String> {
         .into_iter()
         .filter(|(_, payload)| !payload.is_empty() && payload_needs_migration(payload))
         .map(|(provider_id, payload)| {
-            let api_key = decrypt_api_key(Some(payload))?
+            let api_key = decrypt_api_key(Some(payload.clone()))?
                 .ok_or_else(|| "Could not migrate an empty provider API key.".to_string())?;
-            Ok((provider_id, encrypt_api_key(&api_key)?))
+            Ok((provider_id, payload, encrypt_api_key(&api_key)?))
         })
         .collect::<Result<Vec<_>, String>>()?;
 
@@ -58,15 +58,16 @@ pub fn migrate_provider_api_key_encryption() -> Result<usize, String> {
         return Ok(0);
     }
 
-    let migration_count = migrations.len();
     let tx = conn
         .transaction()
         .map_err(|error| db_error("Could not start provider key migration", error))?;
-    for (provider_id, payload) in migrations {
-        tx.execute(
-            "UPDATE providers SET api_key_encrypted = ?1 WHERE id = ?2",
-            params![payload, provider_id],
-        )
+    let mut migration_count = 0;
+    for (provider_id, previous_payload, next_payload) in migrations {
+        migration_count += tx
+            .execute(
+                "UPDATE providers SET api_key_encrypted = ?1 WHERE id = ?2 AND api_key_encrypted = ?3",
+                params![next_payload, provider_id, previous_payload],
+            )
         .map_err(|error| db_error("Could not migrate a provider key", error))?;
     }
     tx.commit()

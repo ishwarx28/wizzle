@@ -1,8 +1,6 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
-import topLevelAwait from "vite-plugin-top-level-await";
-import wasm from "vite-plugin-wasm";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -34,7 +32,7 @@ function resolveClientEnv(mode: string) {
 
 // https://vite.dev/config/
 export default defineConfig(async ({ mode }) => ({
-  plugins: [tailwindcss(), react(), wasm(), topLevelAwait()],
+  plugins: [tailwindcss(), react()],
   base: "./",
   envPrefix: "WIZZLE_PUBLIC_",
   define: {
