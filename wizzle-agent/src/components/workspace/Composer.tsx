@@ -1728,8 +1728,8 @@ export function Composer({
                   ].join(" ")}
                   title={
                     permissionMode === "full-access"
-                      ? "Automatically allows ordinary reads and in-project edits. Sensitive reads, non-whitelisted shell commands, dangerous commands, and out-of-project changes require approval."
-                      : "Requires approval for mutations and non-whitelisted shell commands. In-project reads and basic read-only shell commands run automatically."
+                      ? "Automatically allows ordinary direct reads, in-project edits, and all unsandboxed shell commands. Sensitive direct reads and out-of-project edit/write calls require approval; catastrophic shell commands are blocked."
+                      : "Automatically allows in-project reads and basic inspection commands. Mutations, external reads, and other shell commands require approval."
                   }
                 >
                   {permissionModeLabel}

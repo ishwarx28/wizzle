@@ -41,8 +41,11 @@ async function main() {
     "pwd",
     "ls -la",
     "find . -type f",
+    "find ./lib -type f | sort",
+    "find ./lib -type f | grep '.env' | sort",
     "grep TODO src/main.ts",
     "grep 'TODO.*' src/main.ts",
+    "sort package.json",
   ]) {
     const request = await approvalRequest({
       arguments: JSON.stringify({ command }),
@@ -54,17 +57,20 @@ async function main() {
 
   const unsafeFind = await approvalRequest({
     arguments: JSON.stringify({ command: "find . -delete" }),
-    permissionMode: "full-access",
+    permissionMode: "manual-approve",
     toolName: "bash",
   });
-  assert(unsafeFind?.warning?.kind === "dangerous-command", "find -delete requires approval");
+  assert(
+    unsafeFind?.warning?.kind === "dangerous-command",
+    "manual mode asks before find mutations",
+  );
 
   const hiddenSearch = await approvalRequest({
     arguments: JSON.stringify({ command: "rg --hidden TOKEN ." }),
-    permissionMode: "full-access",
+    permissionMode: "manual-approve",
     toolName: "bash",
   });
-  assert(hiddenSearch !== null, "searches that can read hidden files require approval");
+  assert(hiddenSearch !== null, "manual mode asks before searches that can read hidden files");
 
   const globRead = await approvalRequest({
     arguments: JSON.stringify({ command: "cat *.txt" }),
@@ -85,14 +91,17 @@ async function main() {
     permissionMode: "full-access",
     toolName: "bash",
   });
-  assert(ordinaryCommand !== null, "non-whitelisted shell commands require approval in full access");
+  assert(ordinaryCommand === null, "full access allows non-whitelisted shell commands");
 
   const privilegedRead = await approvalRequest({
     arguments: JSON.stringify({ command: "sudo ls" }),
     permissionMode: "full-access",
     toolName: "bash",
   });
-  assert(privilegedRead !== null, "privileged wrappers are not whitelisted");
+  assert(
+    privilegedRead === null,
+    "full access delegates catastrophic command blocking to the native runner",
+  );
 
   const outputWritingSort = await approvalRequest({
     arguments: JSON.stringify({ command: "sort input.txt -o output.txt" }),
@@ -106,28 +115,48 @@ async function main() {
     permissionMode: "full-access",
     toolName: "bash",
   });
-  assert(outsideCommand?.warning?.kind === "external-path", "outside shell paths require approval");
+  assert(outsideCommand === null, "full access allows shell commands with external paths");
+
+  const manualOutsideCommand = await approvalRequest({
+    arguments: JSON.stringify({ command: "ls /etc" }),
+    permissionMode: "manual-approve",
+    toolName: "bash",
+  });
+  assert(
+    manualOutsideCommand?.warning?.kind === "external-path",
+    "manual mode asks before shell commands with external paths",
+  );
+
+  const manualPipelineOutsideCommand = await approvalRequest({
+    arguments: JSON.stringify({ command: "find . -type f | cat /etc/hosts" }),
+    permissionMode: "manual-approve",
+    toolName: "bash",
+  });
+  assert(
+    manualPipelineOutsideCommand?.warning?.kind === "external-path",
+    "manual mode checks paths in every inspection pipeline stage",
+  );
 
   const outsideCwd = await approvalRequest({
     arguments: JSON.stringify({ command: "ls", cwd: "/etc" }),
     permissionMode: "full-access",
     toolName: "bash",
   });
-  assert(outsideCwd?.warning?.kind === "external-path", "outside shell cwd requires approval");
+  assert(outsideCwd === null, "full access allows an external shell cwd");
 
   const dynamicTarget = await approvalRequest({
     arguments: JSON.stringify({ command: "ls $WIZZLE_TARGET" }),
     permissionMode: "full-access",
     toolName: "bash",
   });
-  assert(dynamicTarget?.warning?.kind === "external-path", "unresolved path variables require approval");
+  assert(dynamicTarget === null, "full access allows shell path variables");
 
   const dangerousCommand = await approvalRequest({
     arguments: JSON.stringify({ command: "rm -rf ." }),
     permissionMode: "full-access",
     toolName: "bash",
   });
-  assert(dangerousCommand?.warning?.kind === "dangerous-command", "destructive commands require approval");
+  assert(dangerousCommand === null, "full access allows deletion inside the project");
 
   const sensitiveRead = await approvalRequest({
     arguments: JSON.stringify({ path: ".env.production" }),

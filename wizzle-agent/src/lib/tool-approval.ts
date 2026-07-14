@@ -129,10 +129,11 @@ export async function createToolApprovalRequest(input: {
   });
 
   const canRunWithoutApproval =
-    !warning &&
-    ((toolName === "bash" && isWhitelistedBashCommand(command ?? "")) ||
-      (toolName !== "bash" &&
-        (input.permissionMode === "full-access" || toolName === "read")));
+    (toolName === "bash" && input.permissionMode === "full-access") ||
+    (!warning &&
+      ((toolName === "bash" && isWhitelistedBashCommand(command ?? "")) ||
+        (toolName !== "bash" &&
+          (input.permissionMode === "full-access" || toolName === "read"))));
 
   if (canRunWithoutApproval) {
     return null;

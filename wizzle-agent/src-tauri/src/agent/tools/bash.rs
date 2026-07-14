@@ -713,6 +713,38 @@ fn _serialize_process_for_tests(process: WorkspaceProcessPayload) -> Value {
     json!(process)
 }
 
+#[cfg(test)]
+mod safety_tests {
+    use super::command_looks_unsafe;
+
+    #[test]
+    fn blocks_catastrophic_commands_but_allows_project_relative_deletion() {
+        for command in [
+            "sudo rm -rf ./build",
+            "shutdown /s /t 0",
+            "reboot",
+            "mkfs.ext4 /dev/sda",
+            "dd if=/dev/zero of=/dev/sda",
+            "diskutil eraseDisk APFS Empty /dev/disk2",
+            "rm -rf /",
+            "rm -rf ~",
+            ":(){ :|:& };:",
+        ] {
+            assert!(
+                command_looks_unsafe(command).is_some(),
+                "expected catastrophic command to be blocked: {command}",
+            );
+        }
+
+        for command in ["rm -rf .", "rm -rf ./build", "rm -f src/generated.ts"] {
+            assert!(
+                command_looks_unsafe(command).is_none(),
+                "expected project-relative deletion to be allowed: {command}",
+            );
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use std::{

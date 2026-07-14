@@ -49,6 +49,7 @@ const MANUAL_APPROVAL_BASH_ALLOWLIST = new Set([
   "ls",
   "pwd",
   "rg",
+  "sort",
   "stat",
   "tail",
   "wc",
@@ -532,8 +533,7 @@ function buildNonPathOperandIndexes(commandName: string, tokens: string[]) {
   return skipIndexes;
 }
 
-function collectBashPathCandidates(command: string) {
-  const candidates = new Set<string>();
+function collectBashStagePathCandidates(command: string, candidates: Set<string>) {
   const tokens = unwrapCommandTokens(extractShellTokens(command));
   const commandName = getCommandName(tokens[0] ?? "");
   const nonPathOperandIndexes = buildNonPathOperandIndexes(commandName, tokens);
@@ -562,6 +562,15 @@ function collectBashPathCandidates(command: string) {
         candidates.add(value);
       }
     }
+  }
+}
+
+function collectBashPathCandidates(command: string) {
+  const candidates = new Set<string>();
+  const stages = splitInspectionPipeline(command.trim()) ?? [command];
+
+  for (const stage of stages) {
+    collectBashStagePathCandidates(stage, candidates);
   }
 
   return [...candidates];
@@ -651,7 +660,9 @@ function isShellVariableReference(value: string) {
   );
 }
 
-function hasShellControlSyntax(command: string) {
+function splitInspectionPipeline(command: string) {
+  const stages: string[] = [];
+  let current = "";
   let quote: '"' | "'" | null = null;
   let escaped = false;
 
@@ -659,42 +670,64 @@ function hasShellControlSyntax(command: string) {
     const character = command[index] ?? "";
 
     if (escaped) {
+      current += character;
       escaped = false;
       continue;
     }
 
     if (character === "\\" && quote !== "'") {
+      current += character;
       escaped = true;
       continue;
     }
 
     if (quote) {
+      current += character;
       if (character === quote) {
         quote = null;
       } else if (
         quote === '"' &&
         (character === "`" || (character === "$" && command[index + 1] === "("))
       ) {
-        return true;
+        return null;
       }
       continue;
     }
 
     if (character === "'" || character === '"') {
       quote = character;
+      current += character;
       continue;
     }
 
-    if (character === "`" || ";|&<>{}\n\r".includes(character)) {
-      return true;
+    if (character === "|") {
+      const stage = current.trim();
+      if (!stage || command[index + 1] === "|") {
+        return null;
+      }
+      stages.push(stage);
+      current = "";
+      continue;
+    }
+
+    if (character === "`" || ";&<>{}\n\r".includes(character)) {
+      return null;
     }
 
     if (character === "$" && command[index + 1] === "(") {
-      return true;
+      return null;
     }
+
+    current += character;
   }
 
-  return false;
+  const finalStage = current.trim();
+  if (!finalStage || quote || escaped) {
+    return null;
+  }
+
+  stages.push(finalStage);
+  return stages;
 }
 
 function hasUnquotedGlob(command: string) {
@@ -767,14 +800,8 @@ function searchCanReadHiddenFiles(commandName: string, tokens: string[]) {
   });
 }
 
-export function isWhitelistedBashCommand(command: string) {
-  const normalizedCommand = command.trim();
-
-  if (!normalizedCommand || hasShellControlSyntax(normalizedCommand)) {
-    return false;
-  }
-
-  const rawTokens = extractShellTokens(normalizedCommand);
+function isWhitelistedBashStage(command: string) {
+  const rawTokens = extractShellTokens(command);
 
   if (getCommandName(rawTokens[0] ?? "") === "sudo") {
     return false;
@@ -787,7 +814,7 @@ export function isWhitelistedBashCommand(command: string) {
     return false;
   }
 
-  if (hasUnquotedGlob(normalizedCommand)) {
+  if (hasUnquotedGlob(command)) {
     return false;
   }
 
@@ -795,7 +822,23 @@ export function isWhitelistedBashCommand(command: string) {
     return false;
   }
 
+  if (
+    commandName === "sort" &&
+    tokens.slice(1).some((token) =>
+      token === "-o" ||
+      token.startsWith("--output=") ||
+      (/^-[^-]+/.test(token) && token.slice(1).includes("o")),
+    )
+  ) {
+    return false;
+  }
+
   return !searchCanReadHiddenFiles(commandName, tokens);
+}
+
+export function isWhitelistedBashCommand(command: string) {
+  const stages = splitInspectionPipeline(command.trim());
+  return Boolean(stages?.every(isWhitelistedBashStage));
 }
 
 function wildcardToRegExp(pattern: string) {
