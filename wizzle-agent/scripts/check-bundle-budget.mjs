@@ -2,12 +2,22 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const MAX_JAVASCRIPT_CHUNK_BYTES = 1_250_000;
+const MAX_STARTUP_ENTRY_BYTES = 20_000;
 const distDirectory = resolve("dist");
 const indexHtml = await readFile(resolve(distDirectory, "index.html"), "utf8");
 const entryPath = indexHtml.match(/<script[^>]+src="([^"]+\.js)"/)?.[1];
 
 if (!entryPath) {
   throw new Error("Could not find the JavaScript entry chunk in dist/index.html.");
+}
+
+const entryBytes = await stat(
+  resolve(distDirectory, entryPath.replace(/^\.?\//, "")),
+).then((entryStat) => entryStat.size);
+if (entryBytes > MAX_STARTUP_ENTRY_BYTES) {
+  throw new Error(
+    `Startup entry is ${entryBytes.toLocaleString()} bytes; budget is ${MAX_STARTUP_ENTRY_BYTES.toLocaleString()} bytes. Keep the fallible app bootstrap behind its dynamic import.`,
+  );
 }
 
 const assetNames = await readdir(resolve(distDirectory, "assets"));
