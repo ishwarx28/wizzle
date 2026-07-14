@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { clientEnv } from "./env";
+import { parseFrontendLogMode } from "./logger-config";
 
 type FrontendLogLevel = "error" | "info" | "debug";
 
@@ -11,11 +12,9 @@ type FrontendLogEntry = {
   timestampMs: number;
 };
 
-type FrontendLogMode = "off" | "error" | "info" | "debug";
-
 const FLUSH_INTERVAL_MS = 500;
 const MAX_BATCH_SIZE = 50;
-const FRONTEND_LOG_MODE = parseMode(clientEnv.WIZZLE_FRONTEND_LOG_MODE);
+const FRONTEND_LOG_MODE = parseFrontendLogMode(clientEnv.WIZZLE_FRONTEND_LOG_MODE);
 const FRONTEND_LOG_RETENTION_DAYS = parseRetentionDays(
   clientEnv.WIZZLE_FRONTEND_LOG_RETENTION_DAYS,
 );
@@ -23,18 +22,6 @@ const FRONTEND_LOG_RETENTION_DAYS = parseRetentionDays(
 let flushTimerId: number | null = null;
 let pendingEntries: FrontendLogEntry[] = [];
 let isFlushing = false;
-
-function parseMode(rawValue: string | undefined): FrontendLogMode {
-  switch ((rawValue ?? "debug").trim().toLowerCase()) {
-    case "off":
-    case "error":
-    case "info":
-    case "debug":
-      return rawValue!.trim().toLowerCase() as FrontendLogMode;
-    default:
-      return "debug";
-  }
-}
 
 function parseRetentionDays(rawValue: string | undefined) {
   const parsedValue = Number.parseInt(rawValue ?? "7", 10);
