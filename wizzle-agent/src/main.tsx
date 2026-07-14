@@ -25,10 +25,11 @@ function showStartupError(rootElement: HTMLElement) {
 const rootElement = document.getElementById("root");
 
 if (rootElement) {
-  void import("./bootstrap")
-    .then(({ mountApp }) => mountApp(rootElement))
-    .catch((error: unknown) => {
-      console.error("Wizzle frontend startup failed", error);
-      showStartupError(rootElement);
-    });
+  try {
+    mountApp(rootElement);
+  } catch (error) {
+    console.error("Wizzle frontend startup failed", error);
+    showStartupError(rootElement);
+  }
 }
+import { mountApp } from "./bootstrap";

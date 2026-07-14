@@ -1,8 +1,6 @@
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
-const currentWindow = getCurrentWindow();
-
 function isInteractiveTarget(target: EventTarget | null) {
   if (!(target instanceof Element)) {
     return false;
@@ -30,7 +28,7 @@ export function useWindowDrag() {
       return;
     }
 
-    void currentWindow.startDragging().catch(() => undefined);
+    void getCurrentWindow().startDragging().catch(() => undefined);
   }
 
   return { onPointerDownCapture };
