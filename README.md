@@ -1,6 +1,6 @@
 # Wizzle
 
-Wizzle is a local-first desktop AI coding agent. The Tauri application owns the workspace UI, project/session state, tool execution, and direct calls to configured OpenAI-compatible model providers. This checkout does not require a separate proxy or sign-in service.
+Wizzle is a local-first desktop AI coding agent. The Tauri application owns the workspace UI, project/session state, tool execution, and direct calls to configured OpenAI-compatible, Anthropic, and Google Gemini model providers. This checkout does not require a separate proxy or sign-in service.
 
 ## Architecture
 

@@ -61,7 +61,7 @@ pub struct ProviderRequestError {
 }
 
 impl ProviderRequestError {
-    fn new(message: String, retryable: bool) -> Self {
+    pub(crate) fn new(message: String, retryable: bool) -> Self {
         Self { message, retryable }
     }
 }
@@ -173,6 +173,8 @@ fn extract_error_fields(body: &str) -> (Option<String>, Option<String>) {
         error
             .get("code")
             .and_then(Value::as_str)
+            .or_else(|| error.get("type").and_then(Value::as_str))
+            .or_else(|| error.get("status").and_then(Value::as_str))
             .map(str::to_string),
         error
             .get("message")
@@ -217,6 +219,31 @@ pub fn map_provider_error(
             "Prompt is too long for the selected model.".to_string(),
             false,
         );
+    }
+
+    if code_text.contains("authentication")
+        || code_text.contains("unauthenticated")
+        || code_text.contains("permission_denied")
+        || code_text.contains("invalid_api_key")
+    {
+        return ProviderRequestError::new(
+            "Provider authentication failed. Check the configured API key.".to_string(),
+            false,
+        );
+    }
+
+    if code_text.contains("rate_limit") || code_text.contains("resource_exhausted") {
+        return ProviderRequestError::new(
+            "Provider rate limit reached. Try again shortly.".to_string(),
+            true,
+        );
+    }
+
+    if code_text.contains("overloaded")
+        || code_text.contains("service_unavailable")
+        || code_text.contains("internal")
+    {
+        return ProviderRequestError::new("Provider is temporarily unavailable.".to_string(), true);
     }
 
     match status_code.unwrap_or_default() {
@@ -808,6 +835,27 @@ mod tests {
             "Provider authentication failed. Check the configured API key."
         );
         assert!(!error.retryable);
+    }
+
+    #[test]
+    fn maps_native_provider_error_codes() {
+        let anthropic = map_provider_error(
+            None,
+            r#"{"error":{"type":"authentication_error","message":"secret details"}}"#,
+            None,
+        );
+        let google = map_provider_error(
+            None,
+            r#"{"error":{"status":"RESOURCE_EXHAUSTED","message":"quota details"}}"#,
+            None,
+        );
+
+        assert!(anthropic.message.contains("authentication failed"));
+        assert_eq!(
+            google.message,
+            "Provider rate limit reached. Try again shortly."
+        );
+        assert!(google.retryable);
     }
 
     #[test]

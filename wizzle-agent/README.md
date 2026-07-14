@@ -87,7 +87,7 @@ The app no longer depends on a separate proxy process for model discovery, chat 
 - `complete_provider_chat`
 - `cancel_provider_chat`
 
-OpenAI-compatible providers are supported by the current adapter. Unsupported provider protocols are shown as unavailable and cannot be saved until a dedicated adapter exists.
+The provider layer supports OpenAI-compatible chat completions, Anthropic's native Messages API, and Google's native Gemini GenerateContent API. Use an API base URL in provider settings; Wizzle adds the protocol-specific model and generation paths. Each adapter normalizes text, reasoning, images, tool calls, streaming events, errors, and model discovery into the same internal format.
 
 ## Agent Prompt and Skills
 

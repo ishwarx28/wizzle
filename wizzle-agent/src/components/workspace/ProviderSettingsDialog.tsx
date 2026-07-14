@@ -69,6 +69,37 @@ type DialogState =
 
 const EXPORT_FILE_NAME = "wizzle-providers.yaml";
 
+const PROVIDER_PRESETS = {
+  anthropic: {
+    endpoint: "https://api.anthropic.com",
+    label: "Anthropic",
+    modelPlaceholder: "claude-sonnet-4-6",
+    name: "Anthropic",
+  },
+  google: {
+    endpoint: "https://generativelanguage.googleapis.com",
+    label: "Google Gemini",
+    modelPlaceholder: "gemini-2.5-pro",
+    name: "Google Gemini",
+  },
+  openai_compatible: {
+    endpoint: "https://api.openai.com",
+    label: "OpenAI compatible",
+    modelPlaceholder: "gpt-4o",
+    name: "OpenAI",
+  },
+} as const;
+
+type ProviderPresetType = keyof typeof PROVIDER_PRESETS;
+
+function providerPreset(providerType: string) {
+  return PROVIDER_PRESETS[providerType as ProviderPresetType] ?? PROVIDER_PRESETS.openai_compatible;
+}
+
+function providerTypeLabel(providerType: string) {
+  return providerPreset(providerType).label;
+}
+
 const emptyModelRow: ProviderModelFormRow = {
   capabilities: "text",
   displayName: "",
@@ -636,6 +667,22 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
     setApiKeyVisible(false);
   }
 
+  function handleProviderTypeChange(nextProviderType: string) {
+    const nextPreset = providerPreset(nextProviderType);
+    const knownEndpoints = Object.values(PROVIDER_PRESETS).map((preset) => preset.endpoint);
+    const knownNames = Object.values(PROVIDER_PRESETS).map((preset) => preset.name);
+
+    if (dialog?.type === "provider-form" && dialog.mode === "add") {
+      if (!endpoint.trim() || knownEndpoints.includes(endpoint.trim() as (typeof knownEndpoints)[number])) {
+        setEndpoint(nextPreset.endpoint);
+      }
+      if (!name.trim() || knownNames.includes(name.trim() as (typeof knownNames)[number])) {
+        setName(nextPreset.name);
+      }
+    }
+    setProviderType(nextProviderType);
+  }
+
   async function handleSaveProvider() {
     if (isBusy || dialog?.type !== "provider-form") {
       return;
@@ -932,7 +979,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
                       {provider.name}
                     </h2>
                     <p className="mt-1 truncate text-[13px] text-[var(--color-text-tertiary)]">
-                      {provider.providerType}
+                      {providerTypeLabel(provider.providerType)}
                     </p>
                   </div>
                   <span className="rounded-full border border-[var(--color-border)] px-2 py-1 text-[12px] text-[var(--color-text-secondary)]">
@@ -1221,7 +1268,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
           description={
             dialog.mode === "edit"
               ? "Update endpoint, models, and optional tokenizer settings."
-              : "Add an OpenAI-compatible provider."
+              : "Add an OpenAI-compatible, Anthropic, or Google Gemini provider."
           }
           onClose={() => {
             resetProviderForm();
@@ -1237,7 +1284,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
               <input
                 className={fieldClassName}
                 onChange={(event) => setName(event.currentTarget.value)}
-                placeholder="OpenAI"
+                placeholder={providerPreset(providerType).name}
                 value={name}
               />
             </div>
@@ -1245,12 +1292,12 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
               <FieldLabel>Provider type</FieldLabel>
               <select
                 className={fieldClassName}
-                onChange={(event) => setProviderType(event.currentTarget.value)}
+                onChange={(event) => handleProviderTypeChange(event.currentTarget.value)}
                 value={providerType}
               >
                 <option value="openai_compatible">OpenAI compatible</option>
-                <option disabled value="anthropic">Anthropic (not yet supported)</option>
-                <option disabled value="google">Google (not yet supported)</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="google">Google Gemini</option>
               </select>
             </div>
             <div className="md:col-span-2">
@@ -1258,7 +1305,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
               <input
                 className={fieldClassName}
                 onChange={(event) => setEndpoint(event.currentTarget.value)}
-                placeholder="https://api.openai.com"
+                placeholder={providerPreset(providerType).endpoint}
                 value={endpoint}
               />
             </div>
@@ -1267,7 +1314,7 @@ export function ProviderSettingsPage({ onBack }: ProviderSettingsPageProps) {
               <input
                 className={fieldClassName}
                 onChange={(event) => setDefaultModelId(event.currentTarget.value)}
-                placeholder="gpt-4o"
+                placeholder={providerPreset(providerType).modelPlaceholder}
                 value={defaultModelId}
               />
             </div>

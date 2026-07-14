@@ -8,8 +8,9 @@ use uuid::Uuid;
 use crate::workspace::sqlite_repository::{db_error, now_unix_ms, open_database};
 
 use super::{
+    anthropic,
     crypto::{decrypt_api_key, encrypt_api_key, payload_needs_migration},
-    openai_compatible,
+    google, openai_compatible,
     tokenizer_assets::{
         self, cleanup_provider_tokenizers, clear_tokenizer, materialize_tokenizer,
         normalize_tokenizer_source, resolve_local_path_if_present, TokenizerScope,
@@ -100,6 +101,8 @@ fn normalize_provider_type(provider_type: &str) -> Option<&'static str> {
         "custom" | "custom_openai" | "custom-openai-compatible" => Some("custom_openai_compatible"),
         "openai-compatible" | "openai_compatible" => Some("openai_compatible"),
         "openai" => Some("openai"),
+        "anthropic" | "claude" => Some("anthropic"),
+        "google" | "gemini" | "google_gemini" | "google-gemini" => Some("google"),
         _ => None,
     }
 }
@@ -107,7 +110,9 @@ fn normalize_provider_type(provider_type: &str) -> Option<&'static str> {
 fn validate_provider_type(provider_type: &str) -> Result<String, String> {
     normalize_provider_type(provider_type)
         .map(str::to_string)
-        .ok_or_else(|| "Choose an OpenAI-compatible provider type.".to_string())
+        .ok_or_else(|| {
+            "Choose an OpenAI-compatible, Anthropic, or Google provider type.".to_string()
+        })
 }
 
 fn validate_endpoint(endpoint: &str) -> Result<String, String> {
@@ -129,9 +134,14 @@ fn validate_endpoint(endpoint: &str) -> Result<String, String> {
     }
 
     let endpoint_path = url.path().trim_end_matches('/').to_ascii_lowercase();
-    if endpoint_path.ends_with("/models") || endpoint_path.ends_with("/chat/completions") {
+    if endpoint_path.ends_with("/models")
+        || endpoint_path.ends_with("/chat/completions")
+        || endpoint_path.ends_with("/messages")
+        || endpoint_path.ends_with(":generatecontent")
+        || endpoint_path.ends_with(":streamgeneratecontent")
+    {
         return Err(
-            "Provider endpoint must be an API base URL, not a models or chat-completions URL."
+            "Provider endpoint must be an API base URL, not a model or generation endpoint."
                 .to_string(),
         );
     }
@@ -742,14 +752,14 @@ pub async fn refresh_provider_models(
 
     let provider = load_provider_secret(&input.provider_id)?;
 
-    if !matches!(
-        provider.provider_type.as_str(),
-        "openai" | "openai_compatible" | "custom_openai_compatible"
-    ) {
-        return Err("Model refresh is not available for this provider type yet.".to_string());
-    }
-
-    let remote_models = openai_compatible::fetch_models(&provider).await?;
+    let remote_models = match provider.provider_type.as_str() {
+        "anthropic" => anthropic::fetch_models(&provider).await?,
+        "google" => google::fetch_models(&provider).await?,
+        "openai" | "openai_compatible" | "custom_openai_compatible" => {
+            openai_compatible::fetch_models(&provider).await?
+        }
+        _ => return Err("Model refresh is not available for this provider type.".to_string()),
+    };
     let conn = open_database()?;
     let remote_ids: HashSet<String> = remote_models
         .iter()
@@ -1250,9 +1260,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unimplemented_and_unknown_provider_types() {
-        assert!(validate_provider_type("anthropic").is_err());
-        assert!(validate_provider_type("google").is_err());
+    fn accepts_native_and_openai_compatible_provider_types() {
+        assert_eq!(
+            validate_provider_type("anthropic").as_deref(),
+            Ok("anthropic")
+        );
+        assert_eq!(validate_provider_type("claude").as_deref(), Ok("anthropic"));
+        assert_eq!(validate_provider_type("google").as_deref(), Ok("google"));
+        assert_eq!(validate_provider_type("gemini").as_deref(), Ok("google"));
         assert!(validate_provider_type("openai_compatble").is_err());
         assert_eq!(
             validate_provider_type("openai-compatible").as_deref(),
@@ -1268,6 +1283,11 @@ mod tests {
         assert!(validate_endpoint("ftp://localhost/models").is_err());
         assert!(validate_endpoint("http://api.example.test/v1").is_err());
         assert!(validate_endpoint("https://user:secret@example.test/v1").is_err());
+        assert!(validate_endpoint("https://api.anthropic.com/v1/messages").is_err());
+        assert!(validate_endpoint(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini:generateContent"
+        )
+        .is_err());
         assert!(validate_endpoint("https://api.example.test/v1?key=secret").is_err());
         assert!(validate_endpoint("https://api.example.test/v1/models").is_err());
         assert!(validate_endpoint("https://api.example.test/v1/chat/completions").is_err());

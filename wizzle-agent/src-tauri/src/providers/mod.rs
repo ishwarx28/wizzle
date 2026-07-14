@@ -1,17 +1,21 @@
+mod anthropic;
 mod crypto;
+mod google;
+mod native_transport;
 mod openai_compatible;
 mod repository;
 mod tokenizer_assets;
 mod types;
 
 use futures_util::future::{AbortHandle, Abortable, Aborted};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Mutex};
 use tauri::{State, Window};
 use uuid::Uuid;
 
 use crate::agent::{AgentRuntimeState, SessionRuntimeStateKind};
 use crate::logging::log_desktop_event;
+use types::ProviderResolvedModel;
 
 pub use types::{
     CancelProviderChatInput, DeleteProviderInput, ImportProviderYamlInput,
@@ -20,6 +24,45 @@ pub use types::{
 };
 
 const INTERRUPTED_ERROR: &str = "__WIZZLE_PROVIDER_CHAT_INTERRUPTED__";
+
+async fn dispatch_completion(
+    client: &reqwest::Client,
+    model: &ProviderResolvedModel,
+    body: Value,
+    reasoning_level: Option<&str>,
+) -> Result<String, String> {
+    match model.provider.provider_type.as_str() {
+        "anthropic" => anthropic::complete_chat(client, model, body, reasoning_level).await,
+        "google" => google::complete_chat(client, model, body, reasoning_level).await,
+        "openai" | "openai_compatible" | "custom_openai_compatible" => {
+            openai_compatible::complete_chat(client, model, body, reasoning_level).await
+        }
+        _ => Err("This provider type is not supported.".to_string()),
+    }
+}
+
+async fn dispatch_stream(
+    client: &reqwest::Client,
+    window: Window,
+    request_id: &str,
+    model: &ProviderResolvedModel,
+    body: Value,
+    reasoning_level: Option<&str>,
+) -> Result<(), String> {
+    match model.provider.provider_type.as_str() {
+        "anthropic" => {
+            anthropic::stream_chat(client, window, request_id, model, body, reasoning_level).await
+        }
+        "google" => {
+            google::stream_chat(client, window, request_id, model, body, reasoning_level).await
+        }
+        "openai" | "openai_compatible" | "custom_openai_compatible" => {
+            openai_compatible::stream_chat(client, window, request_id, model, body, reasoning_level)
+                .await
+        }
+        _ => Err("This provider type is not supported.".to_string()),
+    }
+}
 
 pub fn migrate_provider_api_key_encryption() -> Result<usize, String> {
     repository::migrate_provider_api_key_encryption()
@@ -121,7 +164,7 @@ pub async fn complete_provider_chat(
     }
 
     let completion_result = Abortable::new(
-        openai_compatible::complete_chat(
+        dispatch_completion(
             &client,
             &resolved_model,
             input.body,
@@ -189,7 +232,7 @@ pub async fn stream_provider_chat(
     }
 
     let stream_result = Abortable::new(
-        openai_compatible::stream_chat(
+        dispatch_stream(
             &client,
             window.clone(),
             &request_id,
