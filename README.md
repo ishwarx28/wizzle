@@ -11,6 +11,8 @@ Wizzle is a local-first desktop AI coding agent. The Tauri application owns the 
 
 A project maps to one user-selected local folder, and every stored session belongs to one project. Ordinary mutations stay within that project; approved external mutations and host-capable shell commands remain subject to the selected session permission mode.
 
+After in-project write, edit, or foreground shell mutations, Wizzle runs bounded stack-aware verification and returns normalized diagnostics directly to the agent. Built-in adapters cover web/TypeScript, Python with Pyright and Ruff, Flutter/Dart, Rust, Go, JVM via Gradle/Maven, native Android/Gradle, native iOS/Swift/Xcode, and .NET; project-specific direct commands can be declared in `.wizzle.yaml`.
+
 ## Quick Start
 
 Wizzle uses Node.js 22, declared in `wizzle-agent/.nvmrc`.

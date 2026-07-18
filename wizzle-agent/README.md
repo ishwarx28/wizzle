@@ -10,6 +10,7 @@
 - Discover flat global skills and `<skill>/SKILL.md` manifests for the agent prompt
 - Handle local file access inside the selected project root
 - Run host shell commands with the project as the working directory (not OS-sandboxed)
+- Attach stack-aware verification diagnostics after in-project write, edit, and foreground shell mutations
 - Call configured AI providers directly from the Tauri backend
 
 ## Stack
@@ -93,6 +94,29 @@ The provider layer supports OpenAI-compatible chat completions, Anthropic's nati
 ## Agent Prompt and Skills
 
 The frontend builds the agent system prompt from the validated remote prompt catalog, discovered `AGENTS.md` paths, and global skill metadata. Dedicated remote prompts cover title generation, enhancement, compaction, context pressure, subagents, and final-response recovery. For project work, the main agent first creates a durable Markdown implementation plan with approaches, affected files, ordered steps, and verification, then stops for user review. The plan opens in the in-app file sidebar through the Read plan tile; execution resumes from the user's next plain-language response and advances one completed step at a time. The agent reads applicable instruction files before relying on their rules; the closest scoped file takes precedence. Replay history is trimmed by `src/lib/context-budget.ts` before model calls so large sessions stay inside the selected model's context budget.
+
+## Automatic Mutation Verification
+
+Successful in-project `write` and `edit` calls verify their target file. Foreground `shell` calls use a scoped filesystem watcher to collect changed source paths; the watcher is always stopped before the tool returns. Background processes are not watched continuously. Wizzle detects TypeScript/JavaScript, Python/Pyright/Ruff, Flutter/Dart, Rust, Go, JVM/Android Gradle and Maven, Swift/SwiftPM/Xcode, and .NET projects, runs installed fast verifiers without installing dependencies, and appends normalized diagnostics to the tool result. Verifiers have bounded output and timeouts; timed-out process trees are terminated.
+
+Projects can customize verification with one root file, `.wizzle.yaml` or `.wizzle.yml`:
+
+```yaml
+verification:
+  enabled: true
+  builtins: true
+  timeoutSeconds: 45
+  maxDiagnostics: 50
+  commands:
+    - id: project-check
+      command: ./scripts/check
+      args: ["--machine"]
+      cwd: .
+      extensions: [foo]
+      parser: generic
+```
+
+Custom commands execute directly rather than through a command shell. Supported parsers are `generic`, `pyright`, `ruff`, `eslint`, `cargo`, `dart`, and `flutter`.
 
 ## Package Builds
 
