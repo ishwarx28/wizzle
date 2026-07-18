@@ -4,6 +4,7 @@ pub(crate) mod pathing;
 mod read;
 mod shared;
 mod shell;
+mod verification;
 mod write;
 
 use serde_json::Value;
@@ -75,7 +76,18 @@ pub async fn run_agent_tool(
                 None => None,
             };
             let _path_guard = path_lock.lock().await;
-            write::run(project_root, arguments, allow_external_paths).await
+            let payload = write::run(project_root.clone(), arguments, allow_external_paths).await?;
+            if runtime.is_interrupted(session_id) {
+                return Ok(payload);
+            }
+            Ok(verification::attach_for_changes(
+                payload,
+                &project_root,
+                vec![lock_path],
+                runtime,
+                session_id,
+            )
+            .await)
         }
         "edit" => {
             let lock_path =
@@ -91,7 +103,18 @@ pub async fn run_agent_tool(
                 None => None,
             };
             let _path_guard = path_lock.lock().await;
-            edit::run(project_root, arguments, allow_external_paths).await
+            let payload = edit::run(project_root.clone(), arguments, allow_external_paths).await?;
+            if runtime.is_interrupted(session_id) {
+                return Ok(payload);
+            }
+            Ok(verification::attach_for_changes(
+                payload,
+                &project_root,
+                vec![lock_path],
+                runtime,
+                session_id,
+            )
+            .await)
         }
         "shell" => {
             shell::run(

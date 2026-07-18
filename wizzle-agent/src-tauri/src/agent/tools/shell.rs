@@ -17,6 +17,7 @@ use uuid::Uuid;
 use super::{
     output, pathing,
     shared::{truncate_text, ToolTimeout, MAX_COMMAND_OUTPUT_BYTES},
+    verification,
 };
 use crate::{
     agent::{
@@ -640,7 +641,8 @@ async fn run_command(
         .unwrap_or_else(|| project_root.to_string_lossy().to_string());
     let lock = context.runtime.foreground_shell_lock(&session_key)?;
     let _guard = lock.lock().await;
-    execute_foreground(
+    let tracker = verification::ChangeTracker::start(&project_root);
+    let result = execute_foreground(
         command,
         cwd,
         arguments.timeout.unwrap_or_default(),
@@ -649,7 +651,31 @@ async fn run_command(
         context.runtime,
         context.session_id,
     )
-    .await
+    .await;
+    let tracking = match tracker {
+        Ok(tracker) => Ok(tracker.finish().await),
+        Err(error) => Err(error),
+    };
+    let payload = result?;
+    let Some(session_id) = context.session_id else {
+        return Ok(payload);
+    };
+    if payload.status == "interrupted" || context.runtime.is_interrupted(session_id) {
+        return Ok(payload);
+    }
+    Ok(match tracking {
+        Ok(paths) => {
+            verification::attach_for_changes(
+                payload,
+                &project_root,
+                paths,
+                context.runtime,
+                session_id,
+            )
+            .await
+        }
+        Err(error) => verification::attach_unavailable(payload, error),
+    })
 }
 
 async fn execute_foreground(
