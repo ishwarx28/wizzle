@@ -47,6 +47,23 @@ function main() {
   assert(JSON.parse(textRead).content === "hello world", "small text kept");
   assert(JSON.parse(textRead).imageSrcOmitted === undefined, "no omit on text");
 
+  const verifiedMutation = sanitizeToolResultContentForStorage(
+    JSON.stringify({
+      ok: true,
+      path: "/project/main.py",
+      verification: {
+        status: "failed",
+        newDiagnosticCount: 1,
+        diagnostics: [{ source: "pyright", message: "Unknown name" }],
+      },
+    }),
+    { toolName: "write" },
+  );
+  assert(
+    JSON.parse(verifiedMutation).verification?.newDiagnosticCount === 1,
+    "automatic verification survives durable tool-result storage",
+  );
+
   console.log("tool-result-storage tests passed");
 }
 

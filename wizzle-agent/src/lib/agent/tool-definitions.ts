@@ -7,7 +7,7 @@ import {
   TOOL_TIMEOUT_OPTIONS,
 } from "./tool-timeouts";
 
-export const TOOL_SCHEMA_VERSION = 18;
+export const TOOL_SCHEMA_VERSION = 19;
 
 type JsonSchema = Record<string, unknown>;
 
@@ -92,7 +92,7 @@ export const READ_TOOL: WizzleToolDefinition = buildReadToolDefinition(true);
 
 export const WRITE_TOOL: WizzleToolDefinition = {
   description:
-    "Create or fully replace a text file inside the selected project. Use this when you want to write the complete file contents.",
+    "Create or fully replace a text file inside the selected project. Use this when you want to write the complete file contents. Successful in-project mutations may include an automatic verification report; inspect and resolve newly introduced diagnostics.",
   name: "write",
   parameters: {
     additionalProperties: false,
@@ -114,7 +114,7 @@ export const WRITE_TOOL: WizzleToolDefinition = {
 
 export const EDIT_TOOL: WizzleToolDefinition = {
   description:
-    "Edit an existing text file by replacing an exact snippet. Prefer this over write when making a targeted change.",
+    "Edit an existing text file by replacing an exact snippet. Prefer this over write when making a targeted change. Successful in-project mutations may include an automatic verification report; inspect and resolve newly introduced diagnostics.",
   name: "edit",
   parameters: {
     additionalProperties: false,
@@ -142,7 +142,7 @@ export const EDIT_TOOL: WizzleToolDefinition = {
 
 export const SHELL_TOOL: WizzleToolDefinition = {
   description:
-    "Run or manage commands in the host command shell shown in Runtime Environment: Command Prompt (cmd.exe /C) on Windows and POSIX shell (sh -lc) on macOS/Linux. The selected project is the default working directory. Commands are not sandboxed. Every call must choose a type. Use type \"foreground\" only when the command is finite, non-interactive, and expected to exit within its timeout, including git inspection, searches, builds, tests, and formatting. Use type \"background\" for any server, watcher, follow/tail command, or process intended to keep running; the call returns a process ID immediately, which you must inspect with read_process and stop with stop_process when no longer needed. Wizzle may automatically promote a clearly persistent foreground command to background. Use type \"foreground\" for list_processes, read_process, and stop_process actions.",
+    "Run or manage commands in the host command shell shown in Runtime Environment: Command Prompt (cmd.exe /C) on Windows and POSIX shell (sh -lc) on macOS/Linux. The selected project is the default working directory. Commands are not sandboxed. Every call must choose a type. Use type \"foreground\" only when the command is finite, non-interactive, and expected to exit within its timeout, including git inspection, searches, builds, tests, and formatting. Foreground project mutations may include an automatic verification report; inspect and resolve newly introduced diagnostics. Use type \"background\" for any server, watcher, follow/tail command, or process intended to keep running; the call returns a process ID immediately, which you must inspect with read_process and stop with stop_process when no longer needed. Wizzle may automatically promote a clearly persistent foreground command to background. Use type \"foreground\" for list_processes, read_process, and stop_process actions.",
   name: "shell",
   parameters: {
     additionalProperties: false,

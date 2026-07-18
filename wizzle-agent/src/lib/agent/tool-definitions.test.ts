@@ -14,11 +14,15 @@ function assert(condition: unknown, message: string): asserts condition {
 }
 
 function main() {
-  assert(TOOL_SCHEMA_VERSION === 18, "implementation planner schema bump");
+  assert(TOOL_SCHEMA_VERSION === 19, "automatic verification schema bump");
   assert(SHELL_TOOL.name === "shell", "host command tool uses the platform-neutral shell name");
   assert(
     SHELL_TOOL.description.includes("cmd.exe /C") && SHELL_TOOL.description.includes("sh -lc"),
     "shell tool describes both supported host command shells",
+  );
+  assert(
+    SHELL_TOOL.description.includes("automatic verification report"),
+    "shell tool tells the agent to inspect automatic diagnostics",
   );
   const shellProperties = SHELL_TOOL.parameters.properties as Record<string, { description?: string; enum?: string[] }>;
   assert(
