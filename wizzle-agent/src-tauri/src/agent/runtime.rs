@@ -1,13 +1,10 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::Path,
     process::Stdio,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
-
-#[cfg(test)]
-use std::collections::HashSet;
 
 use futures_util::future::AbortHandle;
 use serde::{Deserialize, Serialize};
@@ -175,6 +172,7 @@ struct AgentRuntimeInner {
     provider_request_sessions: Mutex<HashMap<String, String>>,
     runtime_states: Mutex<HashMap<String, RuntimeEntry>>,
     session_write_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    verification_baselines: Mutex<HashMap<String, HashSet<String>>>,
     write_path_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
 }
 
@@ -275,6 +273,24 @@ pub(crate) async fn terminate_pid(pid: u32) -> Result<(), String> {
 }
 
 impl AgentRuntimeState {
+    pub(crate) fn replace_verification_baseline(
+        &self,
+        key: &str,
+        diagnostics: HashSet<String>,
+    ) -> Result<Option<HashSet<String>>, String> {
+        let mut baselines = self
+            .inner
+            .verification_baselines
+            .lock()
+            .map_err(|_| "Could not access verification baselines.".to_string())?;
+        if baselines.len() >= 256 && !baselines.contains_key(key) {
+            if let Some(oldest_key) = baselines.keys().next().cloned() {
+                baselines.remove(&oldest_key);
+            }
+        }
+        Ok(baselines.insert(key.to_string(), diagnostics))
+    }
+
     pub fn background_process_lock(&self, session_id: &str) -> Result<Arc<AsyncMutex<()>>, String> {
         lock_for_key(
             &self.inner.background_process_locks,
