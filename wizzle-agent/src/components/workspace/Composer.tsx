@@ -15,7 +15,15 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 import { useScrollActivity } from "../../hooks/use-scroll-activity";
 import {
@@ -34,12 +42,17 @@ import {
   drainComposerSessionQueue,
   getComposerSessionQueue,
   hydrateComposerSessionQueue,
+  inferComposerQueueItemKind,
   selectVisibleComposerQueueItems,
   setComposerSessionQueue,
   subscribeComposerSessionQueue,
   type ComposerQueueItem,
 } from "../../lib/composer-session-queue";
-import { MAX_REPLAY_INPUT, selectReplayHistoryWithinBudget } from "../../lib/context-budget";
+import {
+  FALLBACK_CONTEXT_LIMIT,
+  resolveMaxReplayInput,
+  selectReplayHistoryWithinBudget,
+} from "../../lib/context-budget";
 import { requestNotificationPermissionForUserGesture } from "../../lib/desktop-notifications";
 import { loadComposerState, saveComposerState } from "../../lib/local-workspace";
 import { isImageAttachment, modelSupportsImages } from "../../lib/image-capability";
@@ -50,22 +63,31 @@ import {
   resolvePromptMaxChars,
 } from "../../lib/prompt-size";
 import { SESSION_RUN_WAKE_EVENT } from "../../lib/session-run-wake";
-import { resolveEffectiveTokenizer } from "../../lib/tokenizer-resolve";
-import { activateTokenizer } from "../../lib/tokenizer-runtime";
+import {
+  encodeReasoningSelection,
+  modelReasoningDropdownVariants,
+  normalizeReasoningSelection,
+  reasoningVariantDisplayLabel,
+} from "../../lib/reasoning-config";
 import { useWorkspaceStore } from "../../store/workspace-store";
 import type {
   MessageEditState,
   ModelCapability,
+  ModelId,
   PermissionMode,
   PreviewFile,
 } from "../../types/workspace";
-import { SessionTodoOverlay } from "./SessionTodoOverlay";
+import { SessionImplementationPlanOverlay } from "./SessionImplementationPlanOverlay";
 
 interface ComposerProps {
   expanded?: boolean;
+  modelSelectionExcludedModelId?: ModelId;
+  modelSelectionRequestKey?: number;
+  onRequestedModelSelect?: (modelId: ModelId) => void;
+  onRequestedModelSelectCancel?: () => void;
   placeholder: string;
   showFloatingEnhanceAction?: boolean;
-  showFloatingTodoAction?: boolean;
+  showFloatingPlanAction?: boolean;
 }
 
 type QueuedSubmission = ComposerQueueItem;
@@ -156,16 +178,6 @@ function fileIcon(kind: PreviewFile["kind"]) {
     default:
       return <FileCode2 className="h-3.5 w-3.5" />;
   }
-}
-
-/** First letter capital, rest lower — not ALL CAPS (e.g. xhigh → Xhigh). */
-function formatReasoningLevelLabel(level: string) {
-  const trimmed = level.trim();
-  if (!trimmed) {
-    return trimmed;
-  }
-
-  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
 }
 
 /** Same density as model id under model name in the selector list. */
@@ -309,13 +321,20 @@ function formatTokenCount(value: number) {
   return Math.round(value).toLocaleString();
 }
 
-function resolveActiveTurnId(messages: Array<{ status?: string; turnId?: string }>) {
+function resolveActiveTurnId(
+  messages: Array<{ status?: string; turnId?: string }>,
+  isSending: boolean,
+) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
 
     if (message?.status === "streaming") {
       return message.turnId;
     }
+  }
+
+  if (isSending) {
+    return messages[messages.length - 1]?.turnId;
   }
 
   return undefined;
@@ -335,9 +354,13 @@ function resolveBudgetColor(usageRatio: number) {
 
 export function Composer({
   expanded = false,
+  modelSelectionExcludedModelId,
+  modelSelectionRequestKey,
+  onRequestedModelSelect,
+  onRequestedModelSelectCancel,
   placeholder,
   showFloatingEnhanceAction = true,
-  showFloatingTodoAction = true,
+  showFloatingPlanAction = true,
 }: ComposerProps) {
   const activeMessageEdit = useWorkspaceStore((state) => state.activeMessageEdit);
   const cancelMessageEdit = useWorkspaceStore((state) => state.cancelMessageEdit);
@@ -349,12 +372,14 @@ export function Composer({
   const permissionMode = useWorkspaceStore((state) => state.permissionMode);
   const previewFiles = useWorkspaceStore((state) => state.previewFiles);
   const projects = useWorkspaceStore((state) => state.projects);
-  const providers = useWorkspaceStore((state) => state.providers);
   const providerModels = useWorkspaceStore((state) => state.providerModels);
   const reasoningLevel = useWorkspaceStore((state) => state.reasoningLevel);
   const selectedProjectId = useWorkspaceStore((state) => state.selectedProjectId);
   const selectedSessionId = useWorkspaceStore((state) => state.selectedSessionId);
   const sendingSessionIds = useWorkspaceStore((state) => state.sendingSessionIds);
+  const runtimeContextBudget = useWorkspaceStore((state) =>
+    selectedSessionId ? state.sessionContextBudgets[selectedSessionId] : undefined,
+  );
   // Always derive from selection + per-session run set (never a stale global flag).
   const isSendingMessage = Boolean(
     selectedSessionId && sendingSessionIds.includes(selectedSessionId),
@@ -368,6 +393,7 @@ export function Composer({
   const [attachments, setAttachments] = useState<PreviewFile[]>([]);
   const [isEnhancingPrompt, setIsEnhancingPrompt] = useState(false);
   const [isModelSelectorOpen, setIsModelSelectorOpen] = useState(false);
+  const [isReasoningSelectorOpen, setIsReasoningSelectorOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
   const [renderFloatingEnhanceAction, setRenderFloatingEnhanceAction] = useState(false);
   const [showFloatingEnhanceActionState, setShowFloatingEnhanceActionState] = useState(false);
@@ -421,7 +447,12 @@ export function Composer({
   );
 
   const shimmerOverlayRef = useRef<HTMLDivElement | null>(null);
+  const modelListRef = useRef<HTMLDivElement | null>(null);
+  const selectedModelOptionRef = useRef<HTMLButtonElement | null>(null);
   const modelSelectorRef = useRef<HTMLDivElement | null>(null);
+  const handledModelSelectionRequestRef = useRef<number | null>(null);
+  const pendingModelSelectionRequestRef = useRef<number | null>(null);
+  const reasoningSelectorRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const queuedSubmissionsRef = useRef<QueuedSubmission[]>([]);
   const attachmentsRef = useRef<PreviewFile[]>([]);
@@ -447,16 +478,8 @@ export function Composer({
   const hasEnhanceableDraft = draft.trim().length > 0;
   const shouldShowInterrupt = isSendingMessage && !hasDraftContent;
   const selectedProviderModel = providerModels.find((model) => model.id === modelId) ?? null;
-  const selectedProvider = providers.find((provider) => provider.id === selectedProviderModel?.providerId) ?? null;
-  const effectiveTokenizer = useMemo(
-    () => resolveEffectiveTokenizer(selectedProviderModel, selectedProvider),
-    [selectedProvider, selectedProviderModel],
-  );
   const isModelMissing = !selectedProviderModel;
 
-  useEffect(() => {
-    void activateTokenizer(effectiveTokenizer.localPath);
-  }, [effectiveTokenizer.localPath]);
   const isDisabled = isEnhancingPrompt || isModelMissing || (!isSendingMessage && !hasDraftContent);
   const shouldShowFloatingEnhanceAction =
     showFloatingEnhanceAction && hasEnhanceableDraft && !isEnhancingPrompt && !isSendingMessage;
@@ -468,17 +491,23 @@ export function Composer({
     selectedProviderModel?.displayName ??
     selectedProviderModel?.modelId ??
     (providerModels.length > 0 ? "Choose model" : "No models");
-  const selectedReasoningLevels = selectedProviderModel?.reasoningLevels ?? [];
-  const selectedReasoningLevel =
-    selectedReasoningLevels.includes(reasoningLevel)
-      ? reasoningLevel
-      : selectedReasoningLevels[0] ?? "";
-  const reasoningLevelLabel = selectedReasoningLevel
-    ? formatReasoningLevelLabel(selectedReasoningLevel)
+  const selectedReasoningVariants = modelReasoningDropdownVariants(
+    selectedProviderModel?.reasoning,
+  );
+  const selectedReasoningSelection = normalizeReasoningSelection(
+    reasoningLevel,
+    selectedProviderModel?.reasoning,
+  );
+  const selectedReasoningLevel = selectedReasoningSelection.variantId;
+  const selectedReasoningVariant = selectedReasoningVariants.find(
+    (variant) => variant.id === selectedReasoningLevel,
+  );
+  const reasoningLevelLabel = selectedReasoningVariant
+    ? reasoningVariantDisplayLabel(selectedReasoningVariant)
     : "Default";
   const modelCapabilities = selectedProviderModel?.capabilities ?? ["text"];
   const modelSupportsImageAttachments = modelSupportsImages(modelCapabilities);
-  const modelContextLimit = selectedProviderModel?.maxContext ?? MAX_REPLAY_INPUT;
+  const modelContextLimit = selectedProviderModel?.maxContext ?? FALLBACK_CONTEXT_LIMIT;
 
   // Drop image drafts if the user switches to a text-only model (#40).
   useEffect(() => {
@@ -512,13 +541,7 @@ export function Composer({
       .map(([providerName, models]) => [
         providerName,
         models.filter((model) =>
-          [
-            providerName,
-            model.displayName ?? "",
-            model.modelId,
-            model.providerType,
-            ...model.reasoningLevels,
-          ]
+          [providerName, model.displayName ?? "", model.modelId, model.providerType]
             .join(" ")
             .toLowerCase()
             .includes(query),
@@ -553,20 +576,44 @@ export function Composer({
     [previewFiles],
   );
   const budgetUsage = useMemo(() => {
-    if (!currentSession?.messagesLoaded) {
+    const fromSnapshot = (
+      snapshot: NonNullable<typeof runtimeContextBudget>,
+    ) => {
+      const used = snapshot.compactionRequired
+        ? snapshot.preCompactionTokens
+        : snapshot.requestTokens;
+      const total = snapshot.budget.inputBudget;
+      const ratio = total > 0 ? Math.min(used / total, 1) : 1;
+
       return {
-        percentage: 0,
-        ratio: 0,
-        total: modelContextLimit,
-        used: 0,
+        compactionRequired: snapshot.compactionRequired,
+        percentage: Math.round(ratio * 100),
+        ratio,
+        reservedOutput: snapshot.budget.reservedOutputTokens,
+        target: snapshot.budget.postCompactionTarget,
+        total,
+        trigger: snapshot.budget.compactionTrigger,
+        used,
       };
+    };
+
+    if (isSendingMessage && runtimeContextBudget) {
+      return fromSnapshot(runtimeContextBudget);
     }
 
-    if (currentSession.messages.length === 0) {
+    const fallbackTotal = resolveMaxReplayInput(
+      modelContextLimit,
+      selectedProviderModel?.maxOutputTokens,
+    );
+    if (!currentSession?.messagesLoaded) {
       return {
+        compactionRequired: false,
         percentage: 0,
         ratio: 0,
-        total: modelContextLimit,
+        reservedOutput: 0,
+        target: 0,
+        total: fallbackTotal,
+        trigger: 0,
         used: 0,
       };
     }
@@ -574,44 +621,43 @@ export function Composer({
     try {
       const selection = selectReplayHistoryWithinBudget({
         compactedContext: currentSession.compactedContext ?? null,
-        currentTurnId: resolveActiveTurnId(currentSession.messages),
+        currentTurnId: resolveActiveTurnId(currentSession.messages, isSendingMessage),
         history: currentSession.messages,
         maxContext: selectedProviderModel?.maxContext ?? modelContextLimit,
         maxOutputTokens: selectedProviderModel?.maxOutputTokens ?? null,
         modelCapabilities,
+        modelReasoning: selectedProviderModel?.reasoning,
         previewFileMap,
         selectedModelUuid: modelId,
         systemPrompt: "",
-        tokenizerKind: effectiveTokenizer.kind,
+        systemPromptTokens: currentSession.systemPromptTokens,
+        toolDefinitionTokens: currentSession.toolDefTokens,
         turnSummaries: currentSession.replayTurnSummaries ?? [],
       });
-      const used = selection.estimatedTokens;
-      const ratio = Math.min(used / modelContextLimit, 1);
-
-      return {
-        percentage: Math.round(ratio * 100),
-        ratio,
-        total: modelContextLimit,
-        used,
-      };
+      return fromSnapshot(selection.snapshot);
     } catch {
       return {
+        compactionRequired: false,
         percentage: 100,
         ratio: 1,
-        total: modelContextLimit,
-        used: modelContextLimit,
+        reservedOutput: 0,
+        target: 0,
+        total: fallbackTotal,
+        trigger: 0,
+        used: fallbackTotal,
       };
     }
   }, [
     currentSession,
-    effectiveTokenizer.kind,
-    effectiveTokenizer.localPath,
     modelCapabilities,
     modelContextLimit,
     modelId,
     previewFileMap,
+    runtimeContextBudget,
+    isSendingMessage,
     selectedProviderModel?.maxContext,
     selectedProviderModel?.maxOutputTokens,
+    selectedProviderModel?.reasoning,
   ]);
   const budgetColor = budgetUsage.ratio === 0 ? "var(--color-text-tertiary)" : resolveBudgetColor(budgetUsage.ratio);
   const budgetRingSize = 30;
@@ -658,8 +704,7 @@ export function Composer({
           setDraft(partialDraft, { notifyIfTruncated: true });
         },
         projectId: selectedProjectId,
-        reasoningLevel: selectedReasoningLevel,
-        reasoningLevels: selectedProviderModel?.reasoningLevels,
+        reasoningSelection: selectedReasoningSelection,
       });
       if (enhanceRequestIdRef.current !== requestId) {
         return;
@@ -692,7 +737,7 @@ export function Composer({
     modelId,
     selectedProjectId,
     selectedReasoningLevel,
-    selectedProviderModel?.reasoningLevels,
+    selectedReasoningVariants,
   ]);
 
   const cancelEnhancement = useCallback(() => {
@@ -1080,6 +1125,7 @@ export function Composer({
           composerState.queuedMessages.map((message) => ({
             attachments: message.attachments,
             id: message.id,
+            kind: inferComposerQueueItemKind(message.content),
             prompt: message.content,
             status:
               message.status === "sending" || message.status === "failed"
@@ -1284,35 +1330,90 @@ export function Composer({
     };
   }, [toastMessage]);
 
+  useLayoutEffect(() => {
+    if (!isModelSelectorOpen || modelSearch) {
+      return;
+    }
+
+    const list = modelListRef.current;
+    const selectedOption = selectedModelOptionRef.current;
+    if (!list || !selectedOption) {
+      return;
+    }
+
+    const listBounds = list.getBoundingClientRect();
+    const optionBounds = selectedOption.getBoundingClientRect();
+    list.scrollTop +=
+      optionBounds.top - listBounds.top - (list.clientHeight - optionBounds.height) / 2;
+  }, [isModelSelectorOpen, modelId, modelSearch]);
+
   useEffect(() => {
-    if (!isModelSelectorOpen) {
+    if (
+      modelSelectionRequestKey == null ||
+      handledModelSelectionRequestRef.current === modelSelectionRequestKey
+    ) {
+      return;
+    }
+
+    handledModelSelectionRequestRef.current = modelSelectionRequestKey;
+    pendingModelSelectionRequestRef.current = modelSelectionRequestKey;
+    setModelSearch("");
+    setIsReasoningSelectorOpen(false);
+    setIsModelSelectorOpen(true);
+  }, [modelSelectionRequestKey]);
+
+  useEffect(() => {
+    setIsReasoningSelectorOpen(false);
+  }, [modelId]);
+
+  useEffect(() => {
+    pendingModelSelectionRequestRef.current = null;
+    setIsModelSelectorOpen(false);
+    setIsReasoningSelectorOpen(false);
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    if (!isModelSelectorOpen && !isReasoningSelectorOpen) {
       return;
     }
 
     function handlePointerDown(event: PointerEvent) {
-      if (modelSelectorRef.current?.contains(event.target as Node)) {
+      if (
+        modelSelectorRef.current?.contains(event.target as Node) ||
+        reasoningSelectorRef.current?.contains(event.target as Node)
+      ) {
         return;
       }
 
       setIsModelSelectorOpen(false);
+      setIsReasoningSelectorOpen(false);
+      if (pendingModelSelectionRequestRef.current != null) {
+        onRequestedModelSelectCancel?.();
+      }
+      pendingModelSelectionRequestRef.current = null;
     }
 
-    function handleModelSelectorEscape(event: KeyboardEvent) {
+    function handleSelectorEscape(event: KeyboardEvent) {
       if (event.key !== "Escape") {
         return;
       }
 
       setIsModelSelectorOpen(false);
+      setIsReasoningSelectorOpen(false);
+      if (pendingModelSelectionRequestRef.current != null) {
+        onRequestedModelSelectCancel?.();
+      }
+      pendingModelSelectionRequestRef.current = null;
     }
 
     window.addEventListener("pointerdown", handlePointerDown);
-    window.addEventListener("keydown", handleModelSelectorEscape);
+    window.addEventListener("keydown", handleSelectorEscape);
 
     return () => {
       window.removeEventListener("pointerdown", handlePointerDown);
-      window.removeEventListener("keydown", handleModelSelectorEscape);
+      window.removeEventListener("keydown", handleSelectorEscape);
     };
-  }, [isModelSelectorOpen]);
+  }, [isModelSelectorOpen, isReasoningSelectorOpen]);
 
   useEffect(() => {
     function handleGlobalKeyDown(event: KeyboardEvent) {
@@ -1559,7 +1660,7 @@ export function Composer({
               </span>
             </button>
           ) : null}
-          {showFloatingTodoAction ? <SessionTodoOverlay /> : null}
+          {showFloatingPlanAction ? <SessionImplementationPlanOverlay /> : null}
         </div>
         <div className="rounded-[24px] border border-[var(--color-border)] bg-[var(--color-composer)]">
           {activeMessageEdit ? (
@@ -1798,7 +1899,7 @@ export function Composer({
                 </button>
                 <div className="pointer-events-none absolute right-0 bottom-full z-20 mb-2 w-[220px] translate-y-1 rounded-[18px] border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-panel)_94%,transparent)] p-3 text-left opacity-0 shadow-[0_14px_36px_rgba(0,0,0,0.22)] backdrop-blur-xl transition-all duration-150 group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:translate-y-0 group-focus-within:opacity-100">
                   <p className="text-[13px] font-medium text-[var(--color-text)]">
-                    Replay Budget
+                    {budgetUsage.compactionRequired ? "Compaction needed" : "Replay Budget"}
                   </p>
                   <div className="mt-2 space-y-1 text-[12px] text-[var(--color-text-secondary)]">
                     <div className="flex items-center justify-between gap-3">
@@ -1808,11 +1909,35 @@ export function Composer({
                       </span>
                     </div>
                     <div className="flex items-center justify-between gap-3">
-                      <span>Total</span>
+                      <span>Safe input</span>
                       <span className="text-[var(--color-text)]">
                         {formatTokenCount(budgetUsage.total)}
                       </span>
                     </div>
+                    {budgetUsage.trigger > 0 ? (
+                      <div className="flex items-center justify-between gap-3">
+                        <span>Compact at</span>
+                        <span className="text-[var(--color-text)]">
+                          {formatTokenCount(budgetUsage.trigger)}
+                        </span>
+                      </div>
+                    ) : null}
+                    {budgetUsage.target > 0 ? (
+                      <div className="flex items-center justify-between gap-3">
+                        <span>After compact</span>
+                        <span className="text-[var(--color-text)]">
+                          {formatTokenCount(budgetUsage.target)}
+                        </span>
+                      </div>
+                    ) : null}
+                    {budgetUsage.reservedOutput > 0 ? (
+                      <div className="flex items-center justify-between gap-3">
+                        <span>Reply reserve</span>
+                        <span className="text-[var(--color-text)]">
+                          {formatTokenCount(budgetUsage.reservedOutput)}
+                        </span>
+                      </div>
+                    ) : null}
                     <div className="flex items-center justify-between gap-3">
                       <span>Usage</span>
                       <span className="text-[var(--color-text)]">
@@ -1829,72 +1954,60 @@ export function Composer({
               >
                 <button
                   aria-expanded={isModelSelectorOpen}
+                  aria-haspopup="dialog"
                   className="inline-flex max-w-[260px] items-center gap-1.5 rounded-full px-2 py-1 text-ui-tight font-normal tracking-[0.01em] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
                   disabled={providerModels.length === 0}
                   onClick={() => {
+                    if (isModelSelectorOpen) {
+                      if (pendingModelSelectionRequestRef.current != null) {
+                        onRequestedModelSelectCancel?.();
+                      }
+                      pendingModelSelectionRequestRef.current = null;
+                    }
                     setIsModelSelectorOpen((current) => !current);
+                    setIsReasoningSelectorOpen(false);
                     setModelSearch("");
                   }}
                   type="button"
                 >
                   <span className="min-w-0 truncate">{modelIdLabel}</span>
-                  {selectedReasoningLevel ? (
-                    <span
-                      className={`hidden shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 sm:inline ${MODEL_META_TEXT_CLASS}`}
-                    >
-                      {reasoningLevelLabel}
-                    </span>
-                  ) : null}
                   <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-secondary)]" />
                 </button>
 
                 {isModelSelectorOpen ? (
-                  <div className="absolute right-0 bottom-full z-30 mb-2 w-[340px] max-w-[calc(100vw-32px)] overflow-hidden rounded-[20px] border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-panel)_96%,transparent)] shadow-[0_18px_48px_rgba(0,0,0,0.26)] backdrop-blur-xl">
+                  <div
+                    aria-label={
+                      pendingModelSelectionRequestRef.current === modelSelectionRequestKey
+                        ? "Choose a different model and retry"
+                        : "Choose model"
+                    }
+                    className="absolute right-0 bottom-full z-30 mb-2 w-[380px] max-w-[calc(100vw-32px)] overflow-hidden rounded-[20px] border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-panel)_96%,transparent)] shadow-[0_18px_48px_rgba(0,0,0,0.26)] backdrop-blur-xl"
+                    role="dialog"
+                  >
                     <div className="border-b border-[var(--color-border)] p-2.5">
                       <label className="flex h-9 items-center gap-2 rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel-muted)] px-3 text-[13px] text-[var(--color-text-tertiary)]">
                         <Search className="h-3.5 w-3.5 shrink-0" />
                         <input
+                          autoCapitalize="none"
+                          autoComplete="off"
+                          autoCorrect="off"
                           autoFocus
                           className="min-w-0 flex-1 bg-transparent text-ui-tight text-[var(--color-text)] outline-none placeholder:text-[var(--color-text-tertiary)]"
+                          data-1p-ignore
+                          data-form-type="other"
+                          data-lpignore="true"
                           onChange={(event) => setModelSearch(event.currentTarget.value)}
                           placeholder="Search models or providers"
+                          spellCheck={false}
                           value={modelSearch}
                         />
                       </label>
                     </div>
 
-                    {selectedReasoningLevels.length > 0 ? (
-                      <div className="border-b border-[var(--color-border)] px-3 py-2">
-                        <div className="mb-1.5 text-[11px] font-medium text-[var(--color-text-tertiary)]">
-                          Reasoning
-                        </div>
-                        <div className="flex flex-wrap gap-1">
-                          {selectedReasoningLevels.map((level) => {
-                            const isSelectedLevel = level === selectedReasoningLevel;
-
-                            return (
-                              <button
-                                className={[
-                                  "rounded-full border px-2 py-0.5 transition",
-                                  isSelectedLevel
-                                    ? "border-[var(--color-border-strong)] bg-[var(--color-accent)] text-[var(--color-accent-foreground)]"
-                                    : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]",
-                                ].join(" ")}
-                                key={level}
-                                onClick={() => setReasoningLevel(level)}
-                                type="button"
-                              >
-                                <span className="text-[12px] font-normal leading-none">
-                                  {formatReasoningLevelLabel(level)}
-                                </span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    ) : null}
-
-                    <div className="auto-hide-scrollbar max-h-[320px] overflow-y-auto py-1">
+                    <div
+                      className="auto-hide-scrollbar max-h-[320px] overflow-y-auto py-1"
+                      ref={modelListRef}
+                    >
                       {filteredModelsByProvider.length === 0 ? (
                         <div className="px-3 py-5 text-center text-ui text-[var(--color-text-tertiary)]">
                           No models match that search.
@@ -1908,22 +2021,48 @@ export function Composer({
                             <div className="space-y-0.5 px-1.5">
                               {models.map((model) => {
                                 const isSelectedModel = model.id === modelId;
+                                const isExcludedRequestedModel =
+                                  modelSelectionRequestKey != null &&
+                                  pendingModelSelectionRequestRef.current ===
+                                    modelSelectionRequestKey &&
+                                  model.id === modelSelectionExcludedModelId;
 
                                 return (
                                   <button
+                                    aria-label={
+                                      isExcludedRequestedModel
+                                        ? `${model.displayName ?? model.modelId}, failed model; choose another model`
+                                        : undefined
+                                    }
                                     className={[
                                       "flex w-full items-center gap-2 rounded-2xl px-2.5 py-2 text-left transition",
-                                      isSelectedModel
+                                      isExcludedRequestedModel
+                                        ? "cursor-not-allowed text-[var(--color-text-tertiary)] opacity-55"
+                                        : isSelectedModel
                                         ? "bg-[var(--color-panel-active)] text-[var(--color-text)]"
                                         : "text-[var(--color-text-secondary)] hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]",
                                     ].join(" ")}
+                                    disabled={isExcludedRequestedModel}
                                     key={model.id}
                                     onClick={() => {
+                                      const completesRequestedSelection =
+                                        modelSelectionRequestKey != null &&
+                                        pendingModelSelectionRequestRef.current ===
+                                          modelSelectionRequestKey;
+                                      pendingModelSelectionRequestRef.current = null;
                                       setModelId(model.id);
-                                      setReasoningLevel(model.reasoningLevels[0] ?? "");
+                                      setReasoningLevel(
+                                        encodeReasoningSelection(
+                                          normalizeReasoningSelection(null, model.reasoning),
+                                        ),
+                                      );
                                       setIsModelSelectorOpen(false);
                                       setModelSearch("");
+                                      if (completesRequestedSelection) {
+                                        onRequestedModelSelect?.(model.id);
+                                      }
                                     }}
+                                    ref={isSelectedModel ? selectedModelOptionRef : undefined}
                                     type="button"
                                   >
                                     <div className="min-w-0 flex-1">
@@ -1932,17 +2071,9 @@ export function Composer({
                                       </div>
                                       <div className={`mt-0.5 truncate ${MODEL_META_TEXT_CLASS}`}>
                                         {model.modelId}
+                                        {isExcludedRequestedModel ? " · Failed model" : ""}
                                       </div>
                                     </div>
-                                    {model.reasoningLevels.length > 0 ? (
-                                      <span
-                                        className={`shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 ${MODEL_META_TEXT_CLASS}`}
-                                      >
-                                        {model.reasoningLevels
-                                          .map(formatReasoningLevelLabel)
-                                          .join(", ")}
-                                      </span>
-                                    ) : null}
                                     {isSelectedModel ? (
                                       <Check className="h-3.5 w-3.5 shrink-0 text-[var(--color-text)]" />
                                     ) : null}
@@ -1957,6 +2088,73 @@ export function Composer({
                   </div>
                 ) : null}
               </div>
+
+              {selectedReasoningVariants.length > 0 ? (
+                <div
+                  className="relative"
+                  data-reasoning-selector
+                  ref={reasoningSelectorRef}
+                >
+                  <button
+                    aria-expanded={isReasoningSelectorOpen}
+                    aria-haspopup="listbox"
+                    aria-label={`Reasoning: ${reasoningLevelLabel}`}
+                    className="inline-flex max-w-[160px] items-center gap-1.5 rounded-full px-2 py-1 text-ui-tight font-normal tracking-[0.01em] text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
+                    onClick={() => {
+                      setIsReasoningSelectorOpen((current) => !current);
+                      setIsModelSelectorOpen(false);
+                    }}
+                    type="button"
+                  >
+                    <span className="min-w-0 truncate">{reasoningLevelLabel}</span>
+                    <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-secondary)]" />
+                  </button>
+
+                  {isReasoningSelectorOpen ? (
+                    <div
+                      aria-label={`Reasoning for ${modelIdLabel}`}
+                      className="absolute right-0 bottom-full z-30 mb-2 min-w-[190px] overflow-hidden rounded-[16px] border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-panel)_96%,transparent)] p-1.5 shadow-[0_18px_48px_rgba(0,0,0,0.26)] backdrop-blur-xl"
+                      role="listbox"
+                    >
+                      {selectedReasoningVariants.map((variant) => {
+                        const isSelectedLevel = variant.id === selectedReasoningLevel;
+                        const label = reasoningVariantDisplayLabel(variant);
+
+                        return (
+                          <button
+                            aria-selected={isSelectedLevel}
+                            className={[
+                              "flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-ui-tight transition",
+                              isSelectedLevel
+                                ? "bg-[var(--color-panel-active)] text-[var(--color-text)]"
+                                : "text-[var(--color-text-secondary)] hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]",
+                            ].join(" ")}
+                            key={variant.id}
+                            onClick={() => {
+                              setReasoningLevel(
+                                encodeReasoningSelection({
+                                  inputs: Object.fromEntries(
+                                    variant.inputs.map((input) => [input.id, input.default]),
+                                  ),
+                                  variantId: variant.id,
+                                }),
+                              );
+                              setIsReasoningSelectorOpen(false);
+                            }}
+                            role="option"
+                            type="button"
+                          >
+                            <span className="min-w-0 flex-1 truncate">{label}</span>
+                            {isSelectedLevel ? (
+                              <Check className="h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
+                            ) : null}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
 
               <button
                 className={[

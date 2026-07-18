@@ -45,18 +45,18 @@ function main() {
   );
 
   // --- #22 name merge ---
-  assert(mergeStreamedToolNameFragment("", "ba") === "ba", "empty + delta");
-  assert(mergeStreamedToolNameFragment("ba", "sh") === "bash", "token deltas");
-  assert(mergeStreamedToolNameFragment("ba", "bas") === "bas", "cumulative extend");
-  assert(mergeStreamedToolNameFragment("bas", "bash") === "bash", "cumulative full");
-  assert(mergeStreamedToolNameFragment("bash", "bash") === "bash", "full name repeat");
-  assert(mergeStreamedToolNameFragment("bash", "bas") === "bash", "stale shorter prefix");
-  // Blind += would produce "bashbash"
+  assert(mergeStreamedToolNameFragment("", "sh") === "sh", "empty + delta");
+  assert(mergeStreamedToolNameFragment("sh", "ell") === "shell", "token deltas");
+  assert(mergeStreamedToolNameFragment("sh", "she") === "she", "cumulative extend");
+  assert(mergeStreamedToolNameFragment("she", "shell") === "shell", "cumulative full");
+  assert(mergeStreamedToolNameFragment("shell", "shell") === "shell", "full name repeat");
+  assert(mergeStreamedToolNameFragment("shell", "she") === "shell", "stale shorter prefix");
+  // Blind += would produce "shellshell"
   let name = "";
-  for (const delta of ["bash", "bash", "bash"]) {
+  for (const delta of ["shell", "shell", "shell"]) {
     name = mergeStreamedToolNameFragment(name, delta);
   }
-  assert(name === "bash", "repeated full name stays bash not bashbash");
+  assert(name === "shell", "repeated full name stays shell not shellshell");
 
   // --- #21 arguments ---
   assert(normalizeStreamedToolArguments("").arguments === "{}", "empty → {}");
@@ -84,11 +84,17 @@ function main() {
 
   // --- normalizeStreamedToolCalls ---
   const ready = normalizeStreamedToolCalls(
-    [toolCall({ id: "c1", name: "bash", arguments: '{"command":"pwd"}' })],
+    [toolCall({ id: "c1", name: "shell", arguments: '{"command":"pwd"}' })],
     0,
   );
-  assert(ready.items.length === 1 && ready.items[0]?.kind === "ready", "ready bash");
+  assert(ready.items.length === 1 && ready.items[0]?.kind === "ready", "ready shell");
   assert(ready.hadToolCallIntents, "intent true");
+
+  const legacyName = normalizeStreamedToolCalls(
+    [toolCall({ id: "legacy", name: "bash", arguments: '{"command":"pwd"}' })],
+    0,
+  );
+  assert(legacyName.items[0]?.kind === "invalid", "legacy bash name has no compatibility alias");
 
   const emptyArgs = normalizeStreamedToolCalls(
     [toolCall({ id: "c2", name: "read", arguments: "" })],
@@ -107,11 +113,11 @@ function main() {
   );
   assert(subagent.items[0]?.kind === "ready", "subagent is a recognized agent tool");
 
-  const todo = normalizeStreamedToolCalls(
-    [toolCall({ id: "todo-1", name: "todo", arguments: '{"action":"status"}' })],
+  const plan = normalizeStreamedToolCalls(
+    [toolCall({ id: "plan-1", name: "implementation_plan", arguments: '{"action":"status"}' })],
     0,
   );
-  assert(todo.items[0]?.kind === "ready", "TODO is a recognized agent tool");
+  assert(plan.items[0]?.kind === "ready", "implementation planner is a recognized agent tool");
 
   const clarify = normalizeStreamedToolCalls(
     [toolCall({ id: "clarify-1", name: "clarify", arguments: '{"kind":"doubt","prompt":"Which target?"}' })],
@@ -120,7 +126,7 @@ function main() {
   assert(clarify.items[0]?.kind === "ready", "clarify is a recognized agent tool");
 
   const badJson = normalizeStreamedToolCalls(
-    [toolCall({ id: "c3", name: "bash", arguments: '{"command":' })],
+    [toolCall({ id: "c3", name: "shell", arguments: '{"command":' })],
     0,
   );
   assert(badJson.items[0]?.kind === "invalid", "bad json invalid not ready");
@@ -149,18 +155,18 @@ function main() {
   assert(noise.items.length === 0, "noise dropped");
 
   const previews = buildStreamingToolCallPreviews([
-    toolCall({ id: "p1", name: "bash", arguments: '{"command":"' }),
+    toolCall({ id: "p1", name: "shell", arguments: '{"command":"' }),
     toolCall({ id: "p2", name: "", arguments: '{"path":"x"}' }),
     toolCall({ id: "", name: "read", arguments: '{"path":"x"}' }),
   ]);
   assert(previews.length === 1, "preview requires id and name");
   assert(previews[0]?.id === "p1", "preview keeps tool id");
-  assert(previews[0]?.function.name === "bash", "preview keeps tool name");
+  assert(previews[0]?.function.name === "shell", "preview keeps tool name");
   assert(previews[0]?.function.arguments === "", "preview buffers streamed arguments");
 
   const mixed = normalizeStreamedToolCalls(
     [
-      toolCall({ id: "a", name: "bash", arguments: "NOT_JSON" }),
+      toolCall({ id: "a", name: "shell", arguments: "NOT_JSON" }),
       toolCall({ id: "b", name: "read", arguments: '{"path":"x"}' }),
     ],
     1,

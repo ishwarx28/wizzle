@@ -93,8 +93,8 @@ export function filterProcessesForSession(
   return processes.filter((process) => process.sessionId === sessionId);
 }
 
-/** Bash tool result is a background spawn when payload.background is true. */
-export function isBackgroundBashPayload(payload: {
+/** Shell tool result is a background spawn when payload.background is true. */
+export function isBackgroundShellPayload(payload: {
   background?: boolean;
   process?: { id?: string } | null;
 } | null) {

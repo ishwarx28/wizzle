@@ -147,12 +147,12 @@ function main() {
       type: "tool_group",
       runs: [
         {
-          call: { id: "c1", name: "bash" },
+          call: { id: "c1", name: "shell" },
           callPayload: null,
           detailLabel: "Ran",
           id: "c1",
           isExpandable: true,
-          kind: "bash",
+          kind: "shell",
           resultPayload: null,
           status: "done",
         },

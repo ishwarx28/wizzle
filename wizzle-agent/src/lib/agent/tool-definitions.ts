@@ -7,11 +7,18 @@ import {
   TOOL_TIMEOUT_OPTIONS,
 } from "./tool-timeouts";
 
-export const TOOL_SCHEMA_VERSION = 14;
+export const TOOL_SCHEMA_VERSION = 18;
 
 type JsonSchema = Record<string, unknown>;
 
-type ToolName = "bash" | "clarify" | "edit" | "read" | "subagent" | "todo" | "write";
+type ToolName =
+  | "shell"
+  | "clarify"
+  | "edit"
+  | "implementation_plan"
+  | "read"
+  | "subagent"
+  | "write";
 
 export type ToolProviderFormat = "anthropic" | "google" | "openai_compatible";
 
@@ -53,9 +60,9 @@ export function buildReadToolDefinition(imageCapable: boolean): WizzleToolDefini
       additionalProperties: false,
       properties: {
         limit: {
-          default: 2000,
+          default: 400,
           description:
-            "Maximum number of lines to return. Capped at 2000.",
+            "Maximum number of lines to return. Defaults to 400 and is capped at 2000.",
           maximum: 2000,
           minimum: 1,
           type: "integer",
@@ -133,10 +140,10 @@ export const EDIT_TOOL: WizzleToolDefinition = {
   schemaVersion: TOOL_SCHEMA_VERSION,
 };
 
-export const BASH_TOOL: WizzleToolDefinition = {
+export const SHELL_TOOL: WizzleToolDefinition = {
   description:
-    "Run or manage host shell commands with the selected project as the working directory. Shell commands are not filesystem- or network-sandboxed and can access anything permitted to the Wizzle OS user. Use action \"run\" for git inspection, rg searches, tests, formatting, and other terminal tasks. Use background: true only for long-running dev servers or watchers, then inspect with list_processes/read_process and stop with stop_process.",
-  name: "bash",
+    "Run or manage commands in the host command shell shown in Runtime Environment: Command Prompt (cmd.exe /C) on Windows and POSIX shell (sh -lc) on macOS/Linux. The selected project is the default working directory. Commands are not sandboxed. Every call must choose a type. Use type \"foreground\" only when the command is finite, non-interactive, and expected to exit within its timeout, including git inspection, searches, builds, tests, and formatting. Use type \"background\" for any server, watcher, follow/tail command, or process intended to keep running; the call returns a process ID immediately, which you must inspect with read_process and stop with stop_process when no longer needed. Wizzle may automatically promote a clearly persistent foreground command to background. Use type \"foreground\" for list_processes, read_process, and stop_process actions.",
+  name: "shell",
   parameters: {
     additionalProperties: false,
     properties: {
@@ -144,10 +151,6 @@ export const BASH_TOOL: WizzleToolDefinition = {
         default: "run",
         enum: ["run", "list_processes", "read_process", "stop_process"],
         type: "string",
-      },
-      background: {
-        default: false,
-        type: "boolean",
       },
       command: {
         description: "Shell command to run when action is run.",
@@ -168,47 +171,147 @@ export const BASH_TOOL: WizzleToolDefinition = {
         type: "string",
       },
       timeout: createTimeoutProperty(),
+      type: {
+        description:
+          "Required execution type. Use foreground only for finite non-interactive work. Use background for servers, watchers, follow/tail commands, and anything intended to keep running. Process-management actions use foreground.",
+        enum: ["foreground", "background"],
+        type: "string",
+      },
     },
-    required: [],
+    required: ["action", "type"],
     type: "object",
   },
   schemaVersion: TOOL_SCHEMA_VERSION,
 };
 
-export const TODO_TOOL: WizzleToolDefinition = {
+const PLAN_STEP_SCHEMA = {
+  additionalProperties: false,
+  properties: {
+    details: {
+      description: "Concrete implementation or verification details, including relevant checks or constraints.",
+      type: "string",
+    },
+    title: { description: "Concise ordered step title.", type: "string" },
+  },
+  required: ["title", "details"],
+  type: "object",
+} as const;
+
+export const IMPLEMENTATION_PLAN_TOOL: WizzleToolDefinition = {
   description:
-    "Maintain the single durable TODO list for this session. Create it before multi-step coding work, update one item at a time, and finish every active item before replying. Recognized create types are creating_project, fixing_bugs, and adding_features; these automatically receive recommended items in the proper positions. Other type strings remain valid. Creating another list is rejected while unfinished items exist.",
-  name: "todo",
+    "Create and execute the session's durable Markdown implementation plan. For project implementation, fixes, debugging, reviews, and new projects: inspect first without mutating the project, then call create as the only tool call and stop for user review. Create/revise requires one to three approaches, affected files, ordered implementation steps, and verification steps; bug_fix/debugging also require rootCause and intendedFix. The user approves in their next message without an approval UI: call resume with the selected approach, then start and complete exactly one ordered step at a time. Revise stops again for review. The generated path is returned for the Read plan tile.",
+  name: "implementation_plan",
   parameters: {
     additionalProperties: false,
     properties: {
       action: {
-        enum: ["create", "add", "update", "status", "clear"],
+        enum: ["create", "revise", "resume", "start_step", "complete_step", "status"],
         type: "string",
       },
-      type: {
-        description:
-          "Create only. Prefer creating_project, fixing_bugs, or adding_features when matched so the library can enrich the list; otherwise use a short descriptive type.",
+      title: {
+        description: "Create/revise only. Clear title for the Markdown plan.",
         type: "string",
       },
-      items: {
-        description: "Create only. One to thirty initial task titles in execution order.",
+      goal: {
+        description: "Create/revise only. User outcome this plan must achieve.",
+        type: "string",
+      },
+      summary: {
+        description: "Create/revise only. Concise technical strategy based on inspection.",
+        type: "string",
+      },
+      taskType: {
+        description: "Create/revise only. Classify the requested project task.",
+        enum: ["bug_fix", "debugging", "implementation", "new_project", "review", "other"],
+        type: "string",
+      },
+      findings: {
+        description: "Create/revise only. Concrete facts learned during project inspection.",
         items: { type: "string" },
+        maxItems: 50,
+        type: "array",
+      },
+      rootCause: {
+        description: "Create/revise. Required for bug_fix/debugging; evidence-backed cause of the behavior.",
+        type: "string",
+      },
+      intendedFix: {
+        description: "Create/revise. Required for bug_fix/debugging; the root fix and why it addresses the cause.",
+        type: "string",
+      },
+      approaches: {
+        description: "Create/revise only. One to three viable approaches for user review.",
+        items: {
+          additionalProperties: false,
+          properties: {
+            summary: { type: "string" },
+            title: { type: "string" },
+            tradeoffs: {
+              items: { type: "string" },
+              maxItems: 8,
+              type: "array",
+            },
+          },
+          required: ["title", "summary", "tradeoffs"],
+          type: "object",
+        },
+        maxItems: 3,
+        minItems: 1,
+        type: "array",
+      },
+      recommendedApproach: {
+        description: "Create/revise only. Zero-based index of the recommended approach.",
+        maximum: 2,
+        minimum: 0,
+        type: "integer",
+      },
+      affectedFiles: {
+        description: "Create/revise only. Existing or planned files affected, each with its reason.",
+        items: {
+          additionalProperties: false,
+          properties: {
+            path: { type: "string" },
+            reason: { type: "string" },
+          },
+          required: ["path", "reason"],
+          type: "object",
+        },
+        maxItems: 100,
+        minItems: 1,
+        type: "array",
+      },
+      concerns: {
+        description: "Create/revise only. Risks and concerns to preserve in the plan.",
+        items: { type: "string" },
+        maxItems: 30,
+        type: "array",
+      },
+      gaps: {
+        description: "Create/revise only. Known gaps or uncertainties; use an empty array when none remain.",
+        items: { type: "string" },
+        maxItems: 30,
+        type: "array",
+      },
+      implementationSteps: {
+        description: "Create/revise only. One to thirty implementation steps in strict execution order.",
+        items: PLAN_STEP_SCHEMA,
         maxItems: 30,
         minItems: 1,
         type: "array",
       },
-      item: {
-        description: "Add only. New task title; inserted before final verification or review items.",
+      verificationSteps: {
+        description: "Create/revise only. One to ten final verification steps in strict execution order.",
+        items: PLAN_STEP_SCHEMA,
+        maxItems: 10,
+        minItems: 1,
+        type: "array",
+      },
+      approachId: {
+        description: "Resume only. Approach ID returned by create/revise, chosen by the user or recommended by the plan.",
         type: "string",
       },
-      itemId: {
-        description: "Update only. Item ID from the current session TODO.",
-        type: "string",
-      },
-      status: {
-        description: "Update only. Cancel only when the user removed or replaced that scope.",
-        enum: ["pending", "in_progress", "completed", "cancelled"],
+      stepId: {
+        description: "Start/complete step only. Step ID from the current implementation plan.",
         type: "string",
       },
     },
@@ -220,7 +323,7 @@ export const TODO_TOOL: WizzleToolDefinition = {
 
 export const CLARIFY_TOOL: WizzleToolDefinition = {
   description:
-    "Ask exactly one blocking user decision and continue the same agent turn with the answer. Use doubt for missing information and approach for implementation choices. Omit choices for freeform; with choices, omit allowCustomAnswer or set it true for mixed answers, and set it false for selection-only. Do not stop and ask in assistant text.",
+    "Ask exactly one blocking user decision and continue the same agent turn with the answer. Use doubt for missing information. Use approach only for non-project decisions; project implementation approaches must go in implementation_plan for review on the next turn. Omit choices for freeform; with choices, omit allowCustomAnswer or set it true for mixed answers, and set it false for selection-only. Do not stop and ask in assistant text.",
   name: "clarify",
   parameters: {
     additionalProperties: false,
@@ -307,12 +410,12 @@ export function resolveVersionedAgentToolDefinitions(options?: {
     (options?.modelCapabilities ? options.modelCapabilities.includes("image") : true);
 
   return [
-    TODO_TOOL,
+    IMPLEMENTATION_PLAN_TOOL,
     CLARIFY_TOOL,
     buildReadToolDefinition(imageCapable),
     WRITE_TOOL,
     EDIT_TOOL,
-    BASH_TOOL,
+    SHELL_TOOL,
     ...(options?.includeSubagent === false ? [] : [SUBAGENT_TOOL]),
   ];
 }

@@ -247,6 +247,10 @@ button {
   background: transparent;
 }
 
+.chat-scroll-container {
+  overflow-anchor: none;
+}
+
 .no-scrollbar {
   scrollbar-width: none;
 }

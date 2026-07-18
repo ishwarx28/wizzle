@@ -10,14 +10,27 @@ import {
   type ChatCompletionJson,
 } from "./chat-completion-text";
 import { shouldManageSessionRuntimeForHelperCompletion } from "./session-runtime-helpers";
-import type { Message, ModelCapability, ModelId, PreviewFile } from "../types/workspace";
+import type {
+  Message,
+  ModelCapability,
+  ModelId,
+  ModelReasoningConfig,
+  PreviewFile,
+  ReasoningReplayEntry,
+  ReasoningSelection,
+  ProviderRetryStatus,
+} from "../types/workspace";
+import {
+  automaticReasoningSelection,
+  reasoningReplayForModel,
+  shouldReplayReasoning,
+} from "./reasoning-config";
 import {
   createToolCallFromPart,
   getAssistantConversationContent,
   getMessageParts,
 } from "./message-parts";
-import titleSystemPrompt from "./prompts/title-system-prompt.txt?raw";
-import enhanceSystemPrompt from "./prompts/enhance-system-prompt.txt?raw";
+import { getRemotePrompt } from "./remote-config";
 
 export {
   extractMessageText,
@@ -25,19 +38,13 @@ export {
   sanitizeGeneratedSessionTitle,
 } from "./chat-completion-text";
 
-type ReasoningLevel = string;
 export const INTERRUPTED_WORKSPACE_CHAT_ERROR = "__WIZZLE_PROVIDER_CHAT_INTERRUPTED__";
-const DEFAULT_REASONING_LEVELS = ["low", "medium", "high", "max"] as const;
 const MAX_TITLE_INPUT_LENGTH = 1_200;
 // Reasoning models share max_tokens with hidden reasoning; leave headroom for a short content title.
 const MAX_TITLE_OUTPUT_TOKENS = 1_024;
 const MAX_TITLE_RETRY_OUTPUT_TOKENS = 2_048;
 const MAX_ENHANCEMENT_INPUT_LENGTH = 8_000;
 const MAX_ENHANCEMENT_OUTPUT_TOKENS = 4 * 1_024;
-/** Loaded from `prompts/title-system-prompt.txt` (I-4). */
-const TITLE_SYSTEM_PROMPT = titleSystemPrompt.trim();
-/** Loaded from `prompts/enhance-system-prompt.txt` (I-4). */
-const ENHANCEMENT_SYSTEM_PROMPT = enhanceSystemPrompt.trim();
 
 export type OpenAIContentPart =
   | { type: "text"; text: string }
@@ -54,12 +61,27 @@ export type OpenAIChatToolCall = {
 
 type ProxyChatChunkPayload = {
   chunk: string;
-  kind: "content" | "reasoning" | "toolArguments" | "toolCallId" | "toolName";
+  kind:
+    | "content"
+    | "reasoning"
+    | "reasoningReplay"
+    | "toolArguments"
+    | "toolCallId"
+    | "toolName";
   requestId: string;
   toolCallIndex?: number | null;
 };
 
+type ProviderChatRetryPayload = ProviderRetryStatus & {
+  requestId: string;
+};
+
 export type WorkspaceChatChunk =
+  | {
+      entry: ReasoningReplayEntry;
+      kind: "reasoningReplay";
+      text: string;
+    }
   | {
       kind: "content" | "reasoning";
       text: string;
@@ -71,6 +93,7 @@ export type WorkspaceChatChunk =
     };
 
 export type ChatRequestMessage = {
+  __wizzle_reasoning_replay?: ReasoningReplayEntry[];
   content?: string | OpenAIContentPart[] | null;
   role: "assistant" | "system" | "tool" | "user";
   tool_call_id?: string;
@@ -91,30 +114,37 @@ const activeStreamRequestIdBySession = new Map<string, string>();
 /** Last-started stream (prompt enhancement / title-less helpers without a session scope). */
 let activeGlobalStreamRequestId: string | null = null;
 
-function resolveFallbackReasoningLevel(modelId: ModelId): ReasoningLevel {
-  return modelId.includes("max") ? "max" : "medium";
-}
-
-function normalizeReasoningLevels(reasoningLevels?: string[]) {
-  const normalizedLevels = (reasoningLevels ?? [])
-    .map((level) => level.trim())
-    .filter(Boolean);
-
-  return normalizedLevels.length > 0 ? normalizedLevels : [...DEFAULT_REASONING_LEVELS];
-}
-
-export function resolveLowestReasoningLevel(reasoningLevels?: string[]) {
-  return normalizeReasoningLevels(reasoningLevels)[0]!;
-}
-
-export function resolvePromptEnhancementReasoningLevel(reasoningLevels?: string[]) {
-  const normalizedLevels = normalizeReasoningLevels(reasoningLevels);
-
-  return normalizedLevels[1] ?? normalizedLevels[0]!;
-}
-
 function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+export async function subscribeToProviderChatRetries(options: {
+  onRetry?: (status: ProviderRetryStatus | null) => void;
+  requestId: string;
+}) {
+  if (!options.onRetry) {
+    return () => undefined;
+  }
+
+  return listen<ProviderChatRetryPayload>("provider-chat-retry", (event) => {
+    if (event.payload.requestId !== options.requestId) {
+      return;
+    }
+
+    const status: ProviderRetryStatus = {
+      attempt: event.payload.attempt,
+      delayMs: event.payload.delayMs,
+      maxAttempts: event.payload.maxAttempts,
+      message: event.payload.message,
+    };
+    frontendLogger.info("frontend.chat-stream", "stream_retrying", {
+      attempt: status.attempt,
+      delayMs: status.delayMs,
+      maxAttempts: status.maxAttempts,
+      requestIdLength: options.requestId.length,
+    });
+    options.onRetry?.(status);
+  });
 }
 
 function getErrorMessage(error: unknown, fallback: string) {
@@ -475,7 +505,7 @@ function buildDuplicateReadReplayContent(content: string) {
   return JSON.stringify(payload);
 }
 
-function compactBashToolResultForReplay(record: Record<string, unknown>) {
+function compactShellToolResultForReplay(record: Record<string, unknown>) {
   const combinedOutput = getStringField(record, "combinedOutput");
   const stdout = getStringField(record, "stdout");
   const stderr = getStringField(record, "stderr");
@@ -528,8 +558,8 @@ function compactToolResultJsonForReplay(
   toolName?: string,
 ) {
   switch (toolName) {
-    case "bash":
-      return compactBashToolResultForReplay(record);
+    case "shell":
+      return compactShellToolResultForReplay(record);
     case "edit":
     case "write":
       return compactFileMutationToolResultForReplay(record);
@@ -664,7 +694,14 @@ export function buildReadToolImageContextMessage(options: {
   ];
 }
 
-function buildAssistantConversationMessage(message: Message): ChatRequestMessage[] {
+function buildAssistantConversationMessage(
+  message: Message,
+  options: {
+    currentTurnId?: string;
+    modelId?: ModelId;
+    reasoning?: ModelReasoningConfig | null;
+  },
+): ChatRequestMessage[] {
   const parts = getMessageParts(message);
   const toolCalls = parts
     .filter((part) => part.type === "tool_call")
@@ -679,6 +716,11 @@ function buildAssistantConversationMessage(message: Message): ChatRequestMessage
       type: "function" as const,
     }));
   const content = getAssistantConversationContent(message).trim();
+  const reasoningReplay = reasoningReplayForModel({
+    entries: message.reasoningReplay,
+    modelId: options.modelId,
+    reasoning: options.reasoning,
+  });
 
   if (!content && toolCalls.length === 0) {
     return [];
@@ -686,6 +728,15 @@ function buildAssistantConversationMessage(message: Message): ChatRequestMessage
 
   return [
     {
+      ...(reasoningReplay.length > 0 &&
+      shouldReplayReasoning({
+        currentTurnId: options.currentTurnId,
+        hasToolCalls: toolCalls.length > 0,
+        messageTurnId: message.turnId,
+        reasoning: options.reasoning,
+      })
+        ? { __wizzle_reasoning_replay: reasoningReplay }
+        : {}),
       content: content || null,
       role: "assistant",
       ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
@@ -704,7 +755,10 @@ export function buildChatMessages(
   previewFileMap: Map<string, PreviewFile>,
   modelCapabilities: ModelCapability[],
   options: {
+    currentTurnId?: string;
     duplicateReadMessageIds?: ReadonlySet<string>;
+    modelId?: ModelId;
+    reasoning?: ModelReasoningConfig | null;
   } = {},
 ): ChatRequestMessage[] {
   const duplicateReadMessageIds =
@@ -712,7 +766,7 @@ export function buildChatMessages(
 
   return history.flatMap((message) => {
     if (message.role === "assistant") {
-      return buildAssistantConversationMessage(message);
+      return buildAssistantConversationMessage(message, options);
     }
 
     if (message.role === "tool") {
@@ -782,8 +836,10 @@ export async function streamWorkspaceChat(options: {
   modelId: ModelId;
   onChunk: (chunk: WorkspaceChatChunk) => void;
   onReasoningFinished?: () => void;
+  onRetry?: (status: ProviderRetryStatus | null) => void;
   projectId: string;
   reasoningLevel?: string;
+  reasoningSelection?: ReasoningSelection;
   /** Frontend cancellation key. Defaults to chatId; hidden subagents use their own key. */
   streamKey?: string;
   toolChoice?: "auto" | "none";
@@ -794,7 +850,9 @@ export async function streamWorkspaceChat(options: {
     model: options.modelId,
     stream: true,
     ...(options.maxTokens ? { max_tokens: options.maxTokens } : {}),
-    ...(options.toolChoice ? { tool_choice: options.toolChoice } : {}),
+    ...(options.toolChoice && options.tools?.length
+      ? { tool_choice: options.toolChoice }
+      : {}),
     ...(options.tools?.length ? { tools: options.tools } : {}),
   };
 
@@ -829,10 +887,27 @@ export async function streamWorkspaceChat(options: {
     didNotifyReasoningFinished = true;
     options.onReasoningFinished?.();
   };
+  let retryVisible = false;
+  const clearRetry = () => {
+    if (!retryVisible) {
+      return;
+    }
+    retryVisible = false;
+    options.onRetry?.(null);
+  };
+  const unlistenRetry = await subscribeToProviderChatRetries({
+    onRetry: (status) => {
+      retryVisible = Boolean(status);
+      options.onRetry?.(status);
+    },
+    requestId,
+  });
   const unlisten = await listen<ProxyChatChunkPayload>("provider-chat-chunk", (event) => {
     if (event.payload.requestId !== requestId || !event.payload.chunk) {
       return;
     }
+
+    clearRetry();
 
     frontendLogger.debug("frontend.chat-stream", "stream_chunk_received", {
       kind: event.payload.kind,
@@ -850,6 +925,30 @@ export async function streamWorkspaceChat(options: {
         kind: event.payload.kind,
         text: event.payload.chunk,
       });
+      return;
+    }
+
+    if (event.payload.kind === "reasoningReplay") {
+      try {
+        const entry = JSON.parse(event.payload.chunk) as ReasoningReplayEntry;
+        if (
+          !entry ||
+          typeof entry.assistantMessagePath !== "string" ||
+          !["append", "merge", "prepend", "set"].includes(entry.operation)
+        ) {
+          throw new Error("invalid reasoning replay metadata");
+        }
+        options.onChunk({
+          entry,
+          kind: "reasoningReplay",
+          text: event.payload.chunk,
+        });
+      } catch (error) {
+        frontendLogger.error("frontend.chat-stream", "reasoning_replay_chunk_invalid", {
+          error,
+          requestIdLength: requestId.length,
+        });
+      }
       return;
     }
 
@@ -873,7 +972,8 @@ export async function streamWorkspaceChat(options: {
         modelUuid: options.modelId,
         projectId: options.projectId,
         chatId: options.chatId,
-        reasoningLevel: options.reasoningLevel ?? resolveFallbackReasoningLevel(options.modelId),
+        reasoningLevel: options.reasoningLevel ?? null,
+        reasoningSelection: options.reasoningSelection ?? null,
         body: requestBody,
       },
     });
@@ -903,7 +1003,9 @@ export async function streamWorkspaceChat(options: {
 
     lastChunkKind = null;
     didNotifyReasoningFinished = false;
+    clearRetry();
     unlisten();
+    unlistenRetry();
   }
 }
 
@@ -950,9 +1052,9 @@ export async function generateWorkspaceSessionTitle(options: {
   attachments: PreviewFile[];
   chatId: string;
   modelId: ModelId;
+  modelReasoning?: ModelReasoningConfig | null;
   prompt: string;
   projectId: string;
-  reasoningLevels?: string[];
 }) {
   if (!isTauriRuntime()) {
     throw new Error("Wizzle title generation is only available inside the desktop app.");
@@ -986,7 +1088,7 @@ export async function generateWorkspaceSessionTitle(options: {
       messages: [
         {
           role: "system" as const,
-          content: TITLE_SYSTEM_PROMPT,
+          content: getRemotePrompt("title"),
         },
         {
           role: "user" as const,
@@ -1025,7 +1127,7 @@ export async function generateWorkspaceSessionTitle(options: {
         chatId: options.chatId,
         // Detached helper: must not flip session Busy/Idle during the agent run (#31/#32).
         manageSessionRuntime: shouldManageSessionRuntimeForHelperCompletion(),
-        reasoningLevel: resolveLowestReasoningLevel(options.reasoningLevels),
+        reasoningSelection: automaticReasoningSelection(options.modelReasoning) ?? null,
         body: buildTitleRequestBody(maxTokens),
       },
     });
@@ -1068,8 +1170,7 @@ export async function enhanceWorkspacePrompt(options: {
   modelId: ModelId;
   onDraft?: (draft: string) => void;
   projectId: string;
-  reasoningLevel?: string;
-  reasoningLevels?: string[];
+  reasoningSelection?: ReasoningSelection;
 }) {
   if (!isTauriRuntime()) {
     throw new Error("Wizzle prompt enhancement is only available inside the desktop app.");
@@ -1082,8 +1183,6 @@ export async function enhanceWorkspacePrompt(options: {
     projectIdLength: options.projectId.length,
   });
   const truncatedDraft = truncateAtWordBoundary(options.draft, MAX_ENHANCEMENT_INPUT_LENGTH);
-  const reasoningLevel =
-    options.reasoningLevel || resolvePromptEnhancementReasoningLevel(options.reasoningLevels);
   let rawEnhancedDraft = "";
 
   await streamWorkspaceChat({
@@ -1091,7 +1190,7 @@ export async function enhanceWorkspacePrompt(options: {
     history: [
       {
         role: "system",
-        content: ENHANCEMENT_SYSTEM_PROMPT,
+        content: getRemotePrompt("enhancement"),
       },
       {
         role: "user",
@@ -1118,14 +1217,14 @@ export async function enhanceWorkspacePrompt(options: {
       }
     },
     projectId: options.projectId,
-    reasoningLevel,
+    reasoningSelection: options.reasoningSelection,
     toolChoice: "none",
   });
 
   const enhancedDraft = normalizeEnhancedPromptResponse(rawEnhancedDraft);
   frontendLogger.info("frontend.chat-stream", "prompt_enhancement_finished", {
     enhancedLength: enhancedDraft.length,
-    reasoningLevel,
+    reasoningVariantId: options.reasoningSelection?.variantId ?? null,
     responseLength: rawEnhancedDraft.length,
     truncatedInputLength: truncatedDraft.length,
   });

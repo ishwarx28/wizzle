@@ -19,40 +19,126 @@ export interface ProxyModelInfo {
 }
 
 export interface ProviderInfo {
+  canRefreshModels: boolean;
   createdAtMs: number;
+  defaultMaxContext?: number | null;
+  defaultMaxOutputTokens?: number | null;
   defaultModelId?: string | null;
   endpoint: string;
   hasApiKey: boolean;
+  headers: ProviderHeader[];
   id: string;
+  isManaged: boolean;
+  managedConfigId?: string | null;
   modelCount: number;
   name: string;
   providerType: string;
-  /** Configured path or URL for provider-level tokenizer.json */
-  tokenizerJson?: string | null;
-  /** Cached local path under ~/.wizzle/tokenizers when ready */
-  tokenizerLocalPath?: string | null;
+  requestFields: ProviderRequestField[];
   updatedAtMs: number;
+}
+
+export interface ProviderHeader {
+  name: string;
+  value: string;
+}
+
+export interface ProviderRequestField {
+  path: string;
+  value: unknown;
+}
+
+export type ReasoningPatchOperation = "omit" | "set";
+export type ReasoningReplayOperation = "append" | "merge" | "prepend" | "set";
+export type ReasoningReplayScope =
+  | "active_tool_loop"
+  | "all_turns"
+  | "server_managed"
+  | "tool_call_turns";
+
+export interface ModelReasoningInput {
+  default: number;
+  id: string;
+  max?: number | null;
+  min?: number | null;
+  type: "integer";
+}
+
+export interface ModelReasoningRequestPatch {
+  operation: ReasoningPatchOperation;
+  path: string;
+  value?: unknown;
+}
+
+export interface ModelReasoningVariant {
+  id: string;
+  inputs: ModelReasoningInput[];
+  label: string;
+  request: ModelReasoningRequestPatch[];
+}
+
+export interface ModelReasoningReplayCapture {
+  assistantMessagePath: string;
+  operation?: ReasoningReplayOperation;
+  responsePath: string;
+  when?: {
+    equals: unknown;
+    responsePath: string;
+  } | null;
+}
+
+export interface ModelReasoningConfig {
+  defaultVariantId?: string | null;
+  replay?: {
+    capture: ModelReasoningReplayCapture[];
+    preserveExactly: boolean;
+    scope: ReasoningReplayScope;
+  } | null;
+  variants: ModelReasoningVariant[];
+}
+
+export interface ReasoningSelection {
+  inputs: Record<string, number>;
+  variantId: string;
+}
+
+export interface ReasoningReplayEntry {
+  assistantMessagePath: string;
+  operation: ReasoningReplayOperation;
+  /** Model UUID that produced this opaque provider-native value. */
+  sourceModelId?: ModelId;
+  /** Stable identity of the recipe used when this value was captured. */
+  sourceRecipeHash?: string;
+  value: unknown;
 }
 
 export interface ProviderModelInfo {
   capabilities: ModelCapability[];
+  /** Model-specific value before provider fallback is applied. */
+  configuredMaxContext?: number | null;
+  /** Model-specific value before provider fallback is applied. */
+  configuredMaxOutputTokens?: number | null;
   displayName?: string | null;
   id: ModelId;
   isPinned: boolean;
   lastUsedAtMs?: number | null;
-  /** Null when a remote catalog did not publish a trustworthy context limit. */
+  /** Effective context limit after provider and app fallback. */
   maxContext: number | null;
+  /** Effective output limit after provider fallback, if configured. */
   maxOutputTokens?: number | null;
   modelId: string;
   providerId: string;
   providerName: string;
   providerType: string;
+  reasoning?: ModelReasoningConfig | null;
+  /** Compatibility projection of `reasoning.variants[].id`. */
   reasoningLevels: string[];
-  /** Configured path or URL for model-level tokenizer.json (overrides provider) */
-  tokenizerJson?: string | null;
-  tokenizerKind?: string | null;
-  /** Cached local path when model tokenizer is ready */
-  tokenizerLocalPath?: string | null;
+}
+
+export interface ProviderRetryStatus {
+  attempt: number;
+  delayMs: number;
+  maxAttempts: number;
+  message: string;
 }
 
 export interface ToolApprovalRequest {
@@ -71,7 +157,7 @@ export interface ToolApprovalRequest {
   summary: string;
   timeout: string;
   toolCallId: string;
-  toolName: "bash" | "edit" | "read" | "write";
+  toolName: "shell" | "edit" | "read" | "write";
   warning?: {
     kind: "dangerous-command" | "external-path" | "sensitive-path";
     message: string;
@@ -186,6 +272,8 @@ export interface Message {
   toolCallId?: string;
   toolName?: string;
   reasoning?: string;
+  /** Opaque provider-native data retained only when the selected model requires replay. */
+  reasoningReplay?: ReasoningReplayEntry[];
   createdAtMs?: number;
   completedAtMs?: number;
   durationMs?: number;
@@ -279,6 +367,7 @@ export interface Session {
   updatedAtMs?: number;
   modelId?: ModelId;
   permissionMode?: PermissionMode;
+  /** Compatibility storage slot: plain variant id, or encoded ReasoningSelection with inputs. */
   reasoningLevel?: string | null;
   compactedContext?: CompactedContextRecord | null;
   events?: SessionEvent[];
@@ -286,7 +375,7 @@ export interface Session {
   replayTurnSummaries?: PersistedTurnSummaryRecord[];
   selectedModelUuid?: string | null;
   systemPromptHash?: string | null;
-  tokenizerKind?: string | null;
+  systemPromptTokens?: number;
   toolDefTokens?: number;
   toolDefsHash?: string | null;
 }

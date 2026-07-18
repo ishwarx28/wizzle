@@ -9,27 +9,24 @@ import {
   reconcileVisibleTurnCountAfterHydrate,
   visibleRawStartIndexForTurns,
 } from "../../lib/chat-turn-pagination";
+import {
+  BOTTOM_INDICATOR_THRESHOLD_PX,
+  distanceFromBottom,
+  shouldFollowAfterScroll,
+} from "../../lib/chat-scroll";
 import { interleaveContextStatus } from "../../lib/context-status";
 import { buildDisplayMessages } from "../../lib/message-parts";
 import { removeProjectById } from "../../lib/local-workspace";
 import { useWorkspaceStore, type ChatErrorDetail } from "../../store/workspace-store";
-import type { DisplayMessage, SessionEvent } from "../../types/workspace";
+import type { DisplayMessage, ModelId, SessionEvent } from "../../types/workspace";
 import { Composer } from "./Composer";
 import { ContextStatusDivider } from "./ContextStatusDivider";
 import { MessageBubble } from "./MessageBubble";
+import { ProviderRetryIndicator } from "./ProviderRetryIndicator";
 
 import { ToolApprovalPrompt } from "./ToolApprovalPrompt";
 import { ClarifyPrompt } from "./ClarifyPrompt";
-import { SessionTodoOverlay } from "./SessionTodoOverlay";
-
-const AUTO_SCROLL_RESUME_DELAY_MS = 420;
-const BOTTOM_SNAP_THRESHOLD_PX = 80;
-
-function isNearBottom(container: HTMLDivElement, threshold = BOTTOM_SNAP_THRESHOLD_PX) {
-  const distanceFromBottom =
-    container.scrollHeight - container.scrollTop - container.clientHeight;
-  return distanceFromBottom <= threshold;
-}
+import { SessionImplementationPlanOverlay } from "./SessionImplementationPlanOverlay";
 
 function displayIndexForRawBoundary(messages: DisplayMessage[], rawBoundary: number) {
   const boundary = Math.max(0, rawBoundary);
@@ -74,6 +71,8 @@ export function ChatView() {
   const chatError = useWorkspaceStore((state) => state.chatError);
   const chatErrorDetail = useWorkspaceStore((state) => state.chatErrorDetail);
   const sessionStreamErrors = useWorkspaceStore((state) => state.sessionStreamErrors);
+  const sessionProviderRetries = useWorkspaceStore((state) => state.sessionProviderRetries);
+  const providerModels = useWorkspaceStore((state) => state.providerModels);
   const loadingSessionId = useWorkspaceStore((state) => state.loadingSessionId);
   const previewFiles = useWorkspaceStore((state) => state.previewFiles);
   const draftSessions = useWorkspaceStore((state) => state.draftSessions);
@@ -90,27 +89,40 @@ export function ChatView() {
   );
   const openFile = useWorkspaceStore((state) => state.openFile);
   const hydrateWorkspace = useWorkspaceStore((state) => state.hydrateWorkspace);
+  const retryFailedTurn = useWorkspaceStore((state) => state.retryFailedTurn);
   const startMessageEdit = useWorkspaceStore((state) => state.startMessageEdit);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
-  const bottomAnchorRef = useRef<HTMLDivElement | null>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
   const shouldScrollAfterSendRef = useRef(false);
   const shouldScrollAfterSessionChangeRef = useRef(false);
   const autoScrollEnabledRef = useRef(true);
-  const autoScrollResumeTimeoutRef = useRef<number | null>(null);
+  const scheduledScrollFrameRef = useRef<number | null>(null);
+  const previousScrollTopRef = useRef(0);
   const previousSessionIdRef = useRef<string | null>(null);
   const lastEffectSessionIdRef = useRef<string | null>(null);
-  const previousMessageCountRef = useRef(0);
   const prependRestoreRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [isRemovingMissingProject, setIsRemovingMissingProject] = useState(false);
+  const [retryingFailedTurnId, setRetryingFailedTurnId] = useState<string | null>(null);
+  const [modelSelectionRequest, setModelSelectionRequest] = useState<{
+    excludedModelId: ModelId;
+    key: number;
+    turnId: string;
+  } | null>(null);
+  const nextModelSelectionRequestKeyRef = useRef(0);
   const [visibleTurnCount, setVisibleTurnCount] = useState(() => initialVisibleTurnCount());
   const { handleScrollActivity, isScrolling } = useScrollActivity();
 
   useEffect(() => {
     if (!hasBlockingPrompt) return;
+    autoScrollEnabledRef.current = true;
     setShowScrollToBottom(false);
-    window.requestAnimationFrame(() => bottomAnchorRef.current?.scrollIntoView({ block: "end" }));
+    scheduleScrollToLatest();
   }, [hasBlockingPrompt, pendingClarification?.toolCallId, pendingToolApproval?.toolCallId]);
+
+  useEffect(() => {
+    setModelSelectionRequest(null);
+  }, [selectedSessionId]);
 
   const currentProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0];
   const currentDraftSession = currentProject ? draftSessions[currentProject.id] ?? null : null;
@@ -207,6 +219,19 @@ export function ChatView() {
     }
     return sessionStreamErrors[sessionId] ?? null;
   }, [currentSession?.id, selectedSessionId, sessionStreamErrors]);
+  const providerRetry = useMemo(() => {
+    const sessionId = currentSession?.id ?? selectedSessionId;
+    return sessionId ? sessionProviderRetries[sessionId] ?? null : null;
+  }, [currentSession?.id, selectedSessionId, sessionProviderRetries]);
+
+  useEffect(() => {
+    if (!providerRetry) {
+      return;
+    }
+    autoScrollEnabledRef.current = true;
+    setShowScrollToBottom(false);
+    scheduleScrollToLatest();
+  }, [providerRetry?.attempt]);
   const missingProjectError: ChatErrorDetail | null =
     chatError && chatErrorDetail?.kind === "missing-project-root" && chatErrorDetail.message === chatError
       ? chatErrorDetail
@@ -230,6 +255,29 @@ export function ChatView() {
     } finally {
       setIsRemovingMissingProject(false);
     }
+  }
+
+  async function handleFailedTurnRetry(turnId: string, modelId: ModelId) {
+    const sessionId = currentSession?.id;
+    if (!sessionId || isSendingMessage || retryingFailedTurnId) {
+      return;
+    }
+
+    setRetryingFailedTurnId(turnId);
+    try {
+      await retryFailedTurn({ modelId, sessionId, turnId });
+    } finally {
+      setRetryingFailedTurnId((current) => (current === turnId ? null : current));
+    }
+  }
+
+  function requestFailedTurnModelSelection(turnId: string, excludedModelId: ModelId) {
+    nextModelSelectionRequestKeyRef.current += 1;
+    setModelSelectionRequest({
+      excludedModelId,
+      key: nextModelSelectionRequestKeyRef.current,
+      turnId,
+    });
   }
 
   const inlineChatError = chatError ? (
@@ -259,6 +307,7 @@ export function ChatView() {
   useEffect(() => {
     function handleComposerSend() {
       shouldScrollAfterSendRef.current = true;
+      autoScrollEnabledRef.current = true;
     }
 
     window.addEventListener("wizzle:composer-send", handleComposerSend);
@@ -270,8 +319,8 @@ export function ChatView() {
 
   useEffect(
     () => () => {
-      if (autoScrollResumeTimeoutRef.current !== null) {
-        window.clearTimeout(autoScrollResumeTimeoutRef.current);
+      if (scheduledScrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(scheduledScrollFrameRef.current);
       }
     },
     [],
@@ -282,14 +331,9 @@ export function ChatView() {
     const sessionChanged = lastEffectSessionIdRef.current !== nextSessionId;
 
     if (sessionChanged) {
-      if (autoScrollResumeTimeoutRef.current !== null) {
-        window.clearTimeout(autoScrollResumeTimeoutRef.current);
-        autoScrollResumeTimeoutRef.current = null;
-      }
-
       autoScrollEnabledRef.current = true;
       lastEffectSessionIdRef.current = nextSessionId;
-      previousMessageCountRef.current = currentMessages.length;
+      previousScrollTopRef.current = 0;
       prependRestoreRef.current = null;
       // Full first page always — do not clamp to totalTurnCount while history is empty (I-1).
       setVisibleTurnCount(initialVisibleTurnCount());
@@ -301,63 +345,8 @@ export function ChatView() {
     const reconciled = reconcileVisibleTurnCountAfterHydrate(totalTurnCount, visibleTurnCount);
     if (reconciled !== visibleTurnCount) {
       setVisibleTurnCount(reconciled);
-      return;
     }
-
-    const prependedScrollState = prependRestoreRef.current;
-
-    if (prependedScrollState) {
-      prependRestoreRef.current = null;
-
-      requestAnimationFrame(() => {
-        const container = scrollContainerRef.current;
-
-        if (!container) {
-          return;
-        }
-
-        container.scrollTop =
-          container.scrollHeight - prependedScrollState.scrollHeight + prependedScrollState.scrollTop;
-        updateScrollState();
-      });
-
-      return;
-    }
-
-    const container = scrollContainerRef.current;
-
-    if (!container || !hasMessages) {
-      previousMessageCountRef.current = currentMessages.length;
-      return;
-    }
-
-    const previousMessageCount = previousMessageCountRef.current;
-    previousMessageCountRef.current = currentMessages.length;
-
-    if (shouldScrollAfterSendRef.current && autoScrollEnabledRef.current) {
-      shouldScrollAfterSendRef.current = false;
-      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
-      return;
-    }
-
-    shouldScrollAfterSendRef.current = false;
-
-    if (!autoScrollEnabledRef.current) {
-      return;
-    }
-
-    const distanceFromBottom =
-      container.scrollHeight - container.scrollTop - container.clientHeight;
-
-    if (distanceFromBottom < BOTTOM_SNAP_THRESHOLD_PX) {
-      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
-      return;
-    }
-
-    if (currentMessages.length > previousMessageCount && distanceFromBottom < 200) {
-      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
-    }
-  }, [currentMessages, currentSession?.id, hasMessages, totalTurnCount, visibleTurnCount]);
+  }, [currentSession?.id, totalTurnCount, visibleTurnCount]);
 
   useLayoutEffect(() => {
     const nextSessionId = currentSession?.id ?? null;
@@ -366,74 +355,103 @@ export function ChatView() {
     if (sessionChanged) {
       previousSessionIdRef.current = nextSessionId;
       shouldScrollAfterSessionChangeRef.current = true;
-    }
-
-    if (!shouldScrollAfterSessionChangeRef.current) {
-      return;
+      autoScrollEnabledRef.current = true;
     }
 
     const container = scrollContainerRef.current;
-    const bottomAnchor = bottomAnchorRef.current;
 
     if (!container) {
       return;
     }
 
-    const scrollToLatest = () => {
-      if (bottomAnchor) {
-        bottomAnchor.scrollIntoView({ block: "end" });
-      }
+    const prependedScrollState = prependRestoreRef.current;
+    if (prependedScrollState) {
+      prependRestoreRef.current = null;
+      container.scrollTop =
+        container.scrollHeight - prependedScrollState.scrollHeight + prependedScrollState.scrollTop;
+      previousScrollTopRef.current = container.scrollTop;
+      setShowScrollToBottom(
+        distanceFromBottom(container) > BOTTOM_INDICATOR_THRESHOLD_PX,
+      );
+      return;
+    }
 
-      container.scrollTop = container.scrollHeight;
-      updateScrollState("programmatic");
-    };
-
-    scrollToLatest();
-
-    requestAnimationFrame(() => {
-      scrollToLatest();
+    if (
+      hasMessages &&
+      (shouldScrollAfterSessionChangeRef.current ||
+        shouldScrollAfterSendRef.current ||
+        autoScrollEnabledRef.current)
+    ) {
+      scrollToLatestNow();
       shouldScrollAfterSessionChangeRef.current = false;
-    });
-  }, [selectedSessionId, currentSession?.id, visibleRawStartIndex, hasMessages]);
+      shouldScrollAfterSendRef.current = false;
+    }
+  }, [currentMessages, selectedSessionId, currentSession?.id, visibleRawStartIndex, hasMessages]);
 
-  function updateScrollState(source: "manual" | "programmatic" = "programmatic") {
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    const messageList = messageListRef.current;
+
+    if (!container || !messageList || !hasMessages || typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      if (autoScrollEnabledRef.current) {
+        scheduleScrollToLatest();
+      }
+    });
+    observer.observe(container);
+    observer.observe(messageList);
+
+    return () => observer.disconnect();
+  }, [currentSession?.id, hasMessages]);
+
+  function updateScrollState() {
     const container = scrollContainerRef.current;
 
     if (!container) {
       return;
     }
 
-    const nearBottom = isNearBottom(container);
-    setShowScrollToBottom(!nearBottom);
+    const nextDistanceFromBottom = distanceFromBottom(container);
+    setShowScrollToBottom(nextDistanceFromBottom > BOTTOM_INDICATOR_THRESHOLD_PX);
+    autoScrollEnabledRef.current = shouldFollowAfterScroll({
+      distanceFromBottom: nextDistanceFromBottom,
+      following: autoScrollEnabledRef.current,
+      previousScrollTop: previousScrollTopRef.current,
+      scrollTop: container.scrollTop,
+    });
+    previousScrollTopRef.current = container.scrollTop;
+  }
 
-    if (source !== "manual") {
+  function pauseAutoScroll() {
+    autoScrollEnabledRef.current = false;
+  }
+
+  function scrollToLatestNow() {
+    const container = scrollContainerRef.current;
+
+    if (!container) {
       return;
     }
 
-    if (!nearBottom) {
-      autoScrollEnabledRef.current = false;
+    container.scrollTop = container.scrollHeight;
+    previousScrollTopRef.current = container.scrollTop;
+    setShowScrollToBottom(false);
+  }
 
-      if (autoScrollResumeTimeoutRef.current !== null) {
-        window.clearTimeout(autoScrollResumeTimeoutRef.current);
-        autoScrollResumeTimeoutRef.current = null;
-      }
-
+  function scheduleScrollToLatest() {
+    if (scheduledScrollFrameRef.current !== null) {
       return;
     }
 
-    if (autoScrollResumeTimeoutRef.current !== null) {
-      window.clearTimeout(autoScrollResumeTimeoutRef.current);
-    }
-
-    autoScrollResumeTimeoutRef.current = window.setTimeout(() => {
-      const latestContainer = scrollContainerRef.current;
-
-      if (latestContainer && isNearBottom(latestContainer)) {
-        autoScrollEnabledRef.current = true;
+    scheduledScrollFrameRef.current = window.requestAnimationFrame(() => {
+      scheduledScrollFrameRef.current = null;
+      if (autoScrollEnabledRef.current) {
+        scrollToLatestNow();
       }
-
-      autoScrollResumeTimeoutRef.current = null;
-    }, AUTO_SCROLL_RESUME_DELAY_MS);
+    });
   }
 
   function scrollToBottom() {
@@ -444,13 +462,7 @@ export function ChatView() {
     }
 
     autoScrollEnabledRef.current = true;
-
-    if (autoScrollResumeTimeoutRef.current !== null) {
-      window.clearTimeout(autoScrollResumeTimeoutRef.current);
-      autoScrollResumeTimeoutRef.current = null;
-    }
-
-    container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+    scrollToLatestNow();
   }
 
   function loadPreviousMessages() {
@@ -464,6 +476,7 @@ export function ChatView() {
       scrollHeight: container.scrollHeight,
       scrollTop: container.scrollTop,
     };
+    pauseAutoScroll();
     setVisibleTurnCount((currentCount) => nextVisibleTurnCount(totalTurnCount, currentCount));
   }
 
@@ -532,20 +545,41 @@ export function ChatView() {
       <div className="relative min-h-0 flex-1">
         <div
           className={[
-            "auto-hide-scrollbar min-h-0 h-full overflow-y-auto px-8 pb-6 pt-8",
+            "chat-scroll-container auto-hide-scrollbar min-h-0 h-full overflow-y-auto px-8 pb-6 pt-8",
             isScrolling ? "is-scrolling" : "",
           ].join(" ")}
           onScroll={() => {
-            handleScrollActivity();
-            updateScrollState("manual");
+            updateScrollState();
+
+            if (!autoScrollEnabledRef.current) {
+              handleScrollActivity();
+            }
 
             if (scrollContainerRef.current && scrollContainerRef.current.scrollTop <= 80) {
               loadPreviousMessages();
             }
           }}
+          onWheel={(event) => {
+            handleScrollActivity();
+            if (event.deltaY < 0) {
+              pauseAutoScroll();
+            }
+          }}
+          onPointerDown={(event) => {
+            const container = scrollContainerRef.current;
+            if (!container || event.pointerType !== "mouse") {
+              return;
+            }
+
+            const bounds = container.getBoundingClientRect();
+            if (event.clientX >= bounds.right - 14) {
+              pauseAutoScroll();
+              handleScrollActivity();
+            }
+          }}
           ref={scrollContainerRef}
         >
-          <div className="mx-auto flex max-w-[920px] flex-col gap-4">
+          <div className="mx-auto flex max-w-[920px] flex-col gap-4" ref={messageListRef}>
             {hasEarlierTurns ? (
               <div className="flex justify-center pb-2">
                 <button
@@ -568,6 +602,31 @@ export function ChatView() {
               }
 
               const message = item.message;
+              const ownsStreamError = Boolean(
+                sessionStreamError &&
+                  (message.id === sessionStreamError.turnId ||
+                    message.messages.some(
+                      (entry) => entry.turnId === sessionStreamError.turnId,
+                    )) &&
+                  (message.role === "assistant" ||
+                    !visibleMessages.some(
+                      (other) =>
+                        other.role === "assistant" &&
+                        (other.id === sessionStreamError.turnId ||
+                          other.messages.some(
+                            (entry) => entry.turnId === sessionStreamError.turnId,
+                          )),
+                    )),
+              );
+              const messageStreamError = ownsStreamError ? sessionStreamError : null;
+              const failedModelIsAvailable = Boolean(
+                messageStreamError &&
+                  providerModels.some((model) => model.id === messageStreamError.modelId),
+              );
+              const hasDifferentModel = Boolean(
+                messageStreamError &&
+                  providerModels.some((model) => model.id !== messageStreamError.modelId),
+              );
 
               return (
                 <MessageBubble
@@ -577,27 +636,30 @@ export function ChatView() {
                     canEditLatestUserTurn &&
                     activeMessageEdit?.messageId !== message.id
                   }
-                  fileMap={fileMap}
-                  inlineStreamError={
-                    sessionStreamError &&
-                    (message.id === sessionStreamError.turnId ||
-                      message.messages.some(
-                        (entry) => entry.turnId === sessionStreamError.turnId,
-                      ))
-                      ? // Prefer the last bubble of the failed turn (assistant if present).
-                        message.role === "assistant" ||
-                        !visibleMessages.some(
-                          (other) =>
-                            other.role === "assistant" &&
-                            (other.id === sessionStreamError.turnId ||
-                              other.messages.some(
-                                (entry) => entry.turnId === sessionStreamError.turnId,
-                              )),
-                        )
-                        ? sessionStreamError.message
-                        : null
-                      : null
+                  failedTurnRecovery={
+                    messageStreamError
+                      ? {
+                          canChooseDifferentModel:
+                            !isSendingMessage && hasDifferentModel,
+                          canRetry: !isSendingMessage && failedModelIsAvailable,
+                          isRetrying:
+                            isSendingMessage ||
+                            retryingFailedTurnId === messageStreamError.turnId,
+                          onChooseDifferentModel: () =>
+                            requestFailedTurnModelSelection(
+                              messageStreamError.turnId,
+                              messageStreamError.modelId,
+                            ),
+                          onRetry: () =>
+                            void handleFailedTurnRetry(
+                              messageStreamError.turnId,
+                              messageStreamError.modelId,
+                            ),
+                        }
+                      : undefined
                   }
+                  fileMap={fileMap}
+                  inlineStreamError={messageStreamError?.message ?? null}
                   isEditingUserMessage={activeMessageEdit?.messageId === message.id}
                   isLatest={index === chatItems.length - 1}
                   key={message.id}
@@ -620,7 +682,8 @@ export function ChatView() {
                 />
               );
             })}
-            <div aria-hidden className="h-px w-full shrink-0" ref={bottomAnchorRef} />
+            {providerRetry ? <ProviderRetryIndicator retry={providerRetry} /> : null}
+            <div aria-hidden className="h-px w-full shrink-0" />
           </div>
         </div>
         {showScrollToBottom && !hasBlockingPrompt ? (
@@ -632,7 +695,7 @@ export function ChatView() {
             >
               <ArrowDown className="h-4 w-4" />
             </button>
-            <SessionTodoOverlay />
+            <SessionImplementationPlanOverlay />
           </div>
         ) : null}
       </div>
@@ -641,9 +704,20 @@ export function ChatView() {
           {inlineChatError}
           {pendingClarification ? <ClarifyPrompt /> : pendingToolApproval ? <ToolApprovalPrompt /> : (
             <Composer
+              modelSelectionExcludedModelId={modelSelectionRequest?.excludedModelId}
+              modelSelectionRequestKey={modelSelectionRequest?.key}
+              onRequestedModelSelect={(modelId) => {
+                const requestedTurnId = modelSelectionRequest?.turnId;
+                setModelSelectionRequest(null);
+                if (!requestedTurnId) {
+                  return;
+                }
+                void handleFailedTurnRetry(requestedTurnId, modelId);
+              }}
+              onRequestedModelSelectCancel={() => setModelSelectionRequest(null)}
               placeholder="Ask Wizzle to inspect, edit, or debug this project"
               showFloatingEnhanceAction={!showScrollToBottom}
-              showFloatingTodoAction={!showScrollToBottom}
+              showFloatingPlanAction={!showScrollToBottom}
             />
           )}
         </div>

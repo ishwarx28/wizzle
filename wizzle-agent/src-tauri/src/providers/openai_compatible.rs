@@ -1,16 +1,20 @@
 use futures_util::StreamExt;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::CONTENT_TYPE;
 use serde_json::{json, Value};
 use std::time::Duration;
 use tauri::{Emitter, Window};
 
 use crate::logging::log_desktop_event;
 
+use super::native_transport::apply_provider_headers;
+use super::reasoning::{
+    apply_provider_request_fields, apply_reasoning_selection, capture_replay_payloads,
+    strip_and_apply_openai_message_replay, ProviderReasoningSelection,
+};
+use super::retry::{can_retry_transport, is_retryable_transport_error, notify_and_wait_for_retry};
 use super::types::{ProviderModelRecord, ProviderResolvedModel, ProviderSecretRecord};
 
 const MAX_SSE_BUFFER_BYTES: usize = 10 * 1024 * 1024;
-const MAX_PROVIDER_RETRY_ATTEMPTS: usize = 2;
-const PROVIDER_RETRY_DELAYS_MS: [u64; MAX_PROVIDER_RETRY_ATTEMPTS] = [250, 1000];
 const OPENAI_API_PREFIX: &str = "/v1";
 const OPENAI_CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
 const OPENAI_MODELS_PATH: &str = "/models";
@@ -50,6 +54,7 @@ pub struct ProviderChatChunkPayload {
 pub enum ProviderChatChunkKind {
     Content,
     Reasoning,
+    ReasoningReplay,
     ToolArguments,
     ToolCallId,
     ToolName,
@@ -189,6 +194,7 @@ pub fn map_provider_error(
     transport_error: Option<&reqwest::Error>,
 ) -> ProviderRequestError {
     if let Some(error) = transport_error {
+        let retryable = is_retryable_transport_error(error);
         let message = if error.is_timeout() {
             "Provider request timed out.".to_string()
         } else if error.is_connect() || error.is_request() {
@@ -199,12 +205,47 @@ pub fn map_provider_error(
             "Provider request failed.".to_string()
         };
 
-        return ProviderRequestError::new(message, true);
+        return ProviderRequestError::new(message, retryable);
     }
 
     let (code, message) = extract_error_fields(body);
     let code_text = code.unwrap_or_default().to_ascii_lowercase();
     let message_text = message.as_deref().unwrap_or_default().to_ascii_lowercase();
+
+    // A completed HTTP response is a provider decision, not a transport failure. Preserve useful
+    // status-specific messages, but never mark the rejection for automatic retry.
+    if let Some(status_code) = status_code {
+        match status_code {
+            401 | 403 => {
+                return ProviderRequestError::new(
+                    "Provider authentication failed. Check the configured API key.".to_string(),
+                    false,
+                )
+            }
+            408 => {
+                return ProviderRequestError::new("Provider request timed out.".to_string(), false)
+            }
+            425 => {
+                return ProviderRequestError::new(
+                    "Provider is temporarily unavailable. Try again shortly.".to_string(),
+                    false,
+                )
+            }
+            429 => {
+                return ProviderRequestError::new(
+                    "Provider rate limit reached. Try again shortly.".to_string(),
+                    false,
+                )
+            }
+            500..=599 => {
+                return ProviderRequestError::new(
+                    "Provider is temporarily unavailable. Try again shortly.".to_string(),
+                    false,
+                )
+            }
+            _ => {}
+        }
+    }
 
     if code_text.contains("model_not_found")
         || message_text.contains("model") && message_text.contains("not found")
@@ -232,10 +273,31 @@ pub fn map_provider_error(
         );
     }
 
+    if let Some(status_code) = status_code {
+        return match status_code {
+            400 | 422 => ProviderRequestError::new(
+                "Provider rejected the request. Check the model and request settings.".to_string(),
+                false,
+            ),
+            // A conflict may require changed request state or an idempotency decision. Repeating
+            // the same request automatically is less safe than asking the caller to resolve it.
+            409 => ProviderRequestError::new(
+                "Provider could not accept the request in its current state.".to_string(),
+                false,
+            ),
+            _ => ProviderRequestError::new(
+                "Provider could not complete the request.".to_string(),
+                false,
+            ),
+        };
+    }
+
+    // Native transports and SSE error events may not carry an HTTP status. Their codes are useful
+    // for safe user-facing messages, but still do not make a provider rejection retryable.
     if code_text.contains("rate_limit") || code_text.contains("resource_exhausted") {
         return ProviderRequestError::new(
             "Provider rate limit reached. Try again shortly.".to_string(),
-            true,
+            false,
         );
     }
 
@@ -243,41 +305,16 @@ pub fn map_provider_error(
         || code_text.contains("service_unavailable")
         || code_text.contains("internal")
     {
-        return ProviderRequestError::new("Provider is temporarily unavailable.".to_string(), true);
-    }
-
-    match status_code.unwrap_or_default() {
-        401 | 403 => ProviderRequestError::new(
-            "Provider authentication failed. Check the configured API key.".to_string(),
+        return ProviderRequestError::new(
+            "Provider is temporarily unavailable.".to_string(),
             false,
-        ),
-        408 => ProviderRequestError::new("Provider request timed out.".to_string(), true),
-        429 => ProviderRequestError::new(
-            "Provider rate limit reached. Try again shortly.".to_string(),
-            true,
-        ),
-        500..=599 => {
-            ProviderRequestError::new("Provider is temporarily unavailable.".to_string(), true)
-        }
-        _ => ProviderRequestError::new(
-            message
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| "Provider could not complete the request.".to_string()),
-            false,
-        ),
-    }
-}
-
-fn is_transient_reqwest_error(error: &reqwest::Error) -> bool {
-    error.is_timeout() || error.is_connect() || error.is_request() || error.is_body()
-}
-
-async fn wait_before_retry(attempt: usize) {
-    if attempt == 0 || attempt > MAX_PROVIDER_RETRY_ATTEMPTS {
-        return;
+        );
     }
 
-    tokio::time::sleep(Duration::from_millis(PROVIDER_RETRY_DELAYS_MS[attempt - 1])).await;
+    ProviderRequestError::new(
+        "Provider could not complete the request.".to_string(),
+        false,
+    )
 }
 
 fn endpoint_with_path(endpoint: &str, path: &str) -> String {
@@ -290,6 +327,10 @@ fn endpoint_with_path(endpoint: &str, path: &str) -> String {
     format!("{}/{}", endpoint, path)
 }
 
+fn provider_endpoint(endpoint: &str, configured_path: Option<&str>, fallback_path: &str) -> String {
+    endpoint_with_path(endpoint, configured_path.unwrap_or(fallback_path))
+}
+
 fn discovered_model(model_id: &str) -> ProviderModelRecord {
     ProviderModelRecord {
         capabilities: Vec::new(),
@@ -297,31 +338,15 @@ fn discovered_model(model_id: &str) -> ProviderModelRecord {
         max_context: None,
         max_output_tokens: None,
         model_id: model_id.to_string(),
+        reasoning: None,
         reasoning_levels: Vec::new(),
-        tokenizer_json: None,
-        tokenizer_kind: None,
     }
-}
-
-/// Normalize reasoning level labels into OpenAI-compatible `reasoning_effort` values.
-/// Accepted levels: low, medium, high, xhigh, max (and case/whitespace variants).
-pub fn resolve_reasoning_effort(level: &str) -> Option<String> {
-    let normalized = level.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "low" | "medium" | "high" | "xhigh" | "max" => Some(normalized),
-        _ => None,
-    }
-}
-
-fn model_supports_reasoning(model: &ProviderResolvedModel) -> bool {
-    !model.model.reasoning_levels.is_empty()
 }
 
 pub(crate) fn build_request_body(
     model: &ProviderResolvedModel,
     mut body: Value,
     stream: bool,
-    reasoning_level: Option<&str>,
 ) -> Value {
     if let Some(object) = body.as_object_mut() {
         object.insert(
@@ -329,13 +354,6 @@ pub(crate) fn build_request_body(
             Value::String(model.model.model_id.clone()),
         );
         object.insert("stream".to_string(), Value::Bool(stream));
-
-        if model_supports_reasoning(model) {
-            if let Some(effort) = reasoning_level.and_then(resolve_reasoning_effort) {
-                // Prefer the desktop UI selection over any stale body field.
-                object.insert("reasoning_effort".to_string(), Value::String(effort));
-            }
-        }
     }
 
     body
@@ -346,7 +364,7 @@ async fn post_chat_completion(
     resolved_model: &ProviderResolvedModel,
     body: Value,
     stream: bool,
-    reasoning_level: Option<&str>,
+    reasoning_selection: Option<&ProviderReasoningSelection>,
 ) -> Result<reqwest::Response, ProviderRequestError> {
     if !matches!(
         resolved_model.provider.provider_type.as_str(),
@@ -358,22 +376,28 @@ async fn post_chat_completion(
         ));
     }
 
-    let mut request = client
-        .post(endpoint_with_path(
+    let mut request_body = build_request_body(resolved_model, body, stream);
+    strip_and_apply_openai_message_replay(&mut request_body)
+        .map_err(|message| ProviderRequestError::new(message, false))?;
+    apply_provider_request_fields(&mut request_body, &resolved_model.provider.request_fields)
+        .map_err(|message| ProviderRequestError::new(message, false))?;
+    apply_reasoning_selection(
+        &mut request_body,
+        resolved_model.model.reasoning.as_ref(),
+        reasoning_selection,
+    )
+    .map_err(|message| ProviderRequestError::new(message, false))?;
+
+    let request = client
+        .post(provider_endpoint(
             &resolved_model.provider.endpoint,
+            resolved_model.provider.chat_completions_path.as_deref(),
             &format!("{OPENAI_API_PREFIX}{OPENAI_CHAT_COMPLETIONS_PATH}"),
         ))
         .header(CONTENT_TYPE, "application/json")
-        .json(&build_request_body(
-            resolved_model,
-            body,
-            stream,
-            reasoning_level,
-        ));
+        .json(&request_body);
 
-    if let Some(api_key) = resolved_model.provider.api_key.as_deref() {
-        request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
-    }
+    let request = apply_provider_headers(request, &resolved_model.provider)?;
 
     let response = request
         .send()
@@ -424,6 +448,31 @@ fn extract_stream_error_message(payload: &Value) -> Option<String> {
         }
     }
     Some("Provider stream returned an error.".to_string())
+}
+
+fn stream_error_message(message: &str) -> String {
+    let normalized = message.trim().to_ascii_lowercase();
+
+    if normalized.contains("rate limit") || normalized.contains("too many requests") {
+        return "Provider rate limit reached. Try again shortly.".to_string();
+    }
+    if normalized.contains("context") && normalized.contains("length") {
+        return "Prompt is too long for the selected model.".to_string();
+    }
+    if normalized.contains("authentication") || normalized.contains("api key") {
+        return "Provider authentication failed. Check the configured API key.".to_string();
+    }
+
+    "Provider rejected the streamed request.".to_string()
+}
+
+fn should_retry_incomplete_stream(
+    saw_done: bool,
+    finish_reason: Option<&str>,
+    emitted_any_chunks: bool,
+    attempt: usize,
+) -> bool {
+    !saw_done && finish_reason.is_none() && can_retry_transport(attempt, emitted_any_chunks)
 }
 
 /// Decide whether a finished SSE stream is a successful terminal close (#18).
@@ -501,6 +550,7 @@ fn process_sse_events(
     window: &Window,
     buffer: &mut String,
     keep_tail: bool,
+    model: &ProviderResolvedModel,
 ) -> Result<SseProcessResult, String> {
     let normalized = buffer.replace("\r\n", "\n").replace('\r', "\n");
     let mut events = normalized.split("\n\n").collect::<Vec<_>>();
@@ -563,6 +613,20 @@ fn process_sse_events(
                 .map_err(|_| "Could not deliver the provider stream chunk.".to_string())?;
             result.emitted_chunk_count += 1;
         }
+        for chunk in capture_replay_payloads(&payload, model.model.reasoning.as_ref())? {
+            window
+                .emit(
+                    PROVIDER_CHAT_CHUNK_EVENT,
+                    ProviderChatChunkPayload {
+                        chunk,
+                        kind: ProviderChatChunkKind::ReasoningReplay,
+                        request_id: request_id.to_string(),
+                        tool_call_index: None,
+                    },
+                )
+                .map_err(|_| "Could not deliver reasoning replay metadata.".to_string())?;
+            result.emitted_chunk_count += 1;
+        }
     }
 
     Ok(result)
@@ -570,25 +634,42 @@ fn process_sse_events(
 
 pub async fn complete_chat(
     client: &reqwest::Client,
+    window: &Window,
+    request_id: &str,
     resolved_model: &ProviderResolvedModel,
     body: Value,
-    reasoning_level: Option<&str>,
+    reasoning_selection: Option<&ProviderReasoningSelection>,
 ) -> Result<String, String> {
     let mut attempt = 0;
 
     loop {
-        match post_chat_completion(client, resolved_model, body.clone(), false, reasoning_level)
-            .await
+        match post_chat_completion(
+            client,
+            resolved_model,
+            body.clone(),
+            false,
+            reasoning_selection,
+        )
+        .await
         {
             Ok(response) => {
-                return response
+                match response
                     .text()
                     .await
-                    .map_err(|error| map_provider_error(None, "", Some(&error)).message);
+                    .map_err(|error| map_provider_error(None, "", Some(&error)))
+                {
+                    Ok(body) => return Ok(body),
+                    Err(error) if error.retryable && can_retry_transport(attempt, false) => {
+                        attempt += 1;
+                        notify_and_wait_for_retry(window, request_id, attempt, &error.message)
+                            .await;
+                    }
+                    Err(error) => return Err(error.message),
+                }
             }
-            Err(error) if error.retryable && attempt < MAX_PROVIDER_RETRY_ATTEMPTS => {
+            Err(error) if error.retryable && can_retry_transport(attempt, false) => {
                 attempt += 1;
-                wait_before_retry(attempt).await;
+                notify_and_wait_for_retry(window, request_id, attempt, &error.message).await;
             }
             Err(error) => return Err(error.message),
         }
@@ -601,28 +682,29 @@ pub async fn stream_chat(
     request_id: &str,
     resolved_model: &ProviderResolvedModel,
     body: Value,
-    reasoning_level: Option<&str>,
+    reasoning_selection: Option<&ProviderReasoningSelection>,
 ) -> Result<(), String> {
     let mut attempt = 0;
     let mut emitted_any_chunks = false;
 
     'retry: loop {
-        let response =
-            match post_chat_completion(client, resolved_model, body.clone(), true, reasoning_level)
-                .await
-            {
-                Ok(response) => response,
-                Err(error)
-                    if error.retryable
-                        && attempt < MAX_PROVIDER_RETRY_ATTEMPTS
-                        && !emitted_any_chunks =>
-                {
-                    attempt += 1;
-                    wait_before_retry(attempt).await;
-                    continue 'retry;
-                }
-                Err(error) => return Err(error.message),
-            };
+        let response = match post_chat_completion(
+            client,
+            resolved_model,
+            body.clone(),
+            true,
+            reasoning_selection,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) if error.retryable && can_retry_transport(attempt, emitted_any_chunks) => {
+                attempt += 1;
+                notify_and_wait_for_retry(&window, request_id, attempt, &error.message).await;
+                continue 'retry;
+            }
+            Err(error) => return Err(error.message),
+        };
 
         let mut buffer = String::new();
         let mut pending_utf8 = Vec::new();
@@ -631,21 +713,36 @@ pub async fn stream_chat(
         let mut finish_reason: Option<String> = None;
 
         loop {
-            let item = tokio::time::timeout(PROVIDER_STREAM_IDLE_TIMEOUT, stream.next())
-                .await
-                .map_err(|_| "Provider stream timed out while waiting for data.".to_string())?;
+            let item = match tokio::time::timeout(PROVIDER_STREAM_IDLE_TIMEOUT, stream.next()).await
+            {
+                Ok(item) => item,
+                Err(_) if can_retry_transport(attempt, emitted_any_chunks) => {
+                    attempt += 1;
+                    notify_and_wait_for_retry(
+                        &window,
+                        request_id,
+                        attempt,
+                        "Provider stream timed out while waiting for data.",
+                    )
+                    .await;
+                    continue 'retry;
+                }
+                Err(_) => {
+                    return Err("Provider stream timed out while waiting for data.".to_string())
+                }
+            };
             let Some(item) = item else {
                 break;
             };
             let bytes = match item {
                 Ok(bytes) => bytes,
                 Err(error)
-                    if is_transient_reqwest_error(&error)
-                        && attempt < MAX_PROVIDER_RETRY_ATTEMPTS
-                        && !emitted_any_chunks =>
+                    if is_retryable_transport_error(&error)
+                        && can_retry_transport(attempt, emitted_any_chunks) =>
                 {
+                    let mapped = map_provider_error(None, "", Some(&error));
                     attempt += 1;
-                    wait_before_retry(attempt).await;
+                    notify_and_wait_for_retry(&window, request_id, attempt, &mapped.message).await;
                     continue 'retry;
                 }
                 Err(error) => return Err(map_provider_error(None, "", Some(&error)).message),
@@ -657,11 +754,12 @@ pub async fn stream_chat(
                 return Err("Provider stream exceeded the 10 MB safety limit.".to_string());
             }
 
-            let parsed = process_sse_events(request_id, &window, &mut buffer, true)?;
-            if let Some(error_message) = parsed.error_message {
-                return Err(error_message);
-            }
+            let parsed =
+                process_sse_events(request_id, &window, &mut buffer, true, resolved_model)?;
             emitted_any_chunks |= parsed.emitted_chunk_count > 0;
+            if let Some(error_message) = parsed.error_message {
+                return Err(stream_error_message(&error_message));
+            }
             saw_done |= parsed.saw_done;
             if parsed.finish_reason.is_some() {
                 finish_reason = parsed.finish_reason;
@@ -673,19 +771,33 @@ pub async fn stream_chat(
         }
 
         if !buffer.trim().is_empty() {
-            let parsed = process_sse_events(request_id, &window, &mut buffer, false)?;
-            if let Some(error_message) = parsed.error_message {
-                return Err(error_message);
-            }
+            let parsed =
+                process_sse_events(request_id, &window, &mut buffer, false, resolved_model)?;
             emitted_any_chunks |= parsed.emitted_chunk_count > 0;
+            if let Some(error_message) = parsed.error_message {
+                return Err(stream_error_message(&error_message));
+            }
             saw_done |= parsed.saw_done;
             if parsed.finish_reason.is_some() {
                 finish_reason = parsed.finish_reason;
             }
         }
 
-        resolve_stream_completion(saw_done, finish_reason.as_deref(), emitted_any_chunks)?;
-        return Ok(());
+        match resolve_stream_completion(saw_done, finish_reason.as_deref(), emitted_any_chunks) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if should_retry_incomplete_stream(
+                    saw_done,
+                    finish_reason.as_deref(),
+                    emitted_any_chunks,
+                    attempt,
+                ) =>
+            {
+                attempt += 1;
+                notify_and_wait_for_retry(&window, request_id, attempt, &error).await;
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -697,14 +809,12 @@ pub async fn fetch_models(
         .timeout(PROVIDER_CATALOG_TIMEOUT)
         .build()
         .map_err(|_| "Could not initialize the provider connection.".to_string())?;
-    let mut request = client.get(endpoint_with_path(
+    let request = client.get(provider_endpoint(
         &provider.endpoint,
+        provider.models_path.as_deref(),
         &format!("{OPENAI_API_PREFIX}{OPENAI_MODELS_PATH}"),
     ));
-
-    if let Some(api_key) = provider.api_key.as_deref() {
-        request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
-    }
+    let request = apply_provider_headers(request, provider).map_err(|error| error.message)?;
 
     let response = request
         .send()
@@ -779,8 +889,8 @@ pub async fn fetch_models(
 mod tests {
     use super::{
         append_utf8_stream_chunk, build_request_body, discovered_model, endpoint_with_path,
-        extract_finish_reason, map_provider_error, resolve_reasoning_effort,
-        resolve_stream_completion,
+        extract_finish_reason, map_provider_error, provider_endpoint, resolve_stream_completion,
+        should_retry_incomplete_stream, stream_error_message,
     };
     use crate::providers::types::{
         ProviderModelRecord, ProviderResolvedModel, ProviderSecretRecord,
@@ -795,17 +905,23 @@ mod tests {
                 max_context: Some(128_000),
                 max_output_tokens: None,
                 model_id: "test-model".to_string(),
+                reasoning: None,
                 reasoning_levels,
-                tokenizer_json: None,
-                tokenizer_kind: Some("heuristic".to_string()),
             },
             model_uuid: "uuid-1".to_string(),
             provider: ProviderSecretRecord {
                 api_key: Some("key".to_string()),
+                api_key_required: false,
+                auth_header_name: Some("Authorization".to_string()),
+                auth_header_prefix: "Bearer ".to_string(),
+                chat_completions_path: None,
                 endpoint: "https://example.com".to_string(),
+                headers: Vec::new(),
                 id: "provider-1".to_string(),
+                models_path: None,
                 name: "Example".to_string(),
                 provider_type: "openai_compatible".to_string(),
+                request_fields: Vec::new(),
             },
         }
     }
@@ -823,6 +939,14 @@ mod tests {
         assert_eq!(
             endpoint_with_path("https://api.example.test/api/v1", "/v1/chat/completions"),
             "https://api.example.test/api/v1/chat/completions"
+        );
+        assert_eq!(
+            provider_endpoint(
+                "https://models.example.test/inference",
+                Some("/chat/completions"),
+                "/v1/chat/completions",
+            ),
+            "https://models.example.test/inference/chat/completions"
         );
     }
 
@@ -855,7 +979,7 @@ mod tests {
             google.message,
             "Provider rate limit reached. Try again shortly."
         );
-        assert!(google.retryable);
+        assert!(!google.retryable);
     }
 
     #[test]
@@ -866,7 +990,6 @@ mod tests {
         assert!(model.reasoning_levels.is_empty());
         assert_eq!(model.max_context, None);
         assert_eq!(model.max_output_tokens, None);
-        assert_eq!(model.tokenizer_kind, None);
     }
 
     #[test]
@@ -882,29 +1005,86 @@ mod tests {
     }
 
     #[test]
-    fn resolves_standard_reasoning_levels() {
-        assert_eq!(resolve_reasoning_effort("low").as_deref(), Some("low"));
-        assert_eq!(
-            resolve_reasoning_effort("medium").as_deref(),
-            Some("medium")
-        );
-        assert_eq!(resolve_reasoning_effort("high").as_deref(), Some("high"));
-        assert_eq!(resolve_reasoning_effort("xhigh").as_deref(), Some("xhigh"));
-        assert_eq!(resolve_reasoning_effort("max").as_deref(), Some("max"));
-        assert_eq!(resolve_reasoning_effort("MAX").as_deref(), Some("max"));
-        assert_eq!(resolve_reasoning_effort("fast").as_deref(), None);
-        assert_eq!(resolve_reasoning_effort("balanced").as_deref(), None);
-        assert_eq!(resolve_reasoning_effort("  ").as_deref(), None);
+    fn does_not_retry_http_validation_failures_with_transient_body_text() {
+        let body =
+            r#"{"error":{"message":"Error from provider (Console): Upstream request failed"}}"#;
+
+        for status in [400, 422] {
+            let error = map_provider_error(Some(status), body, None);
+
+            assert_eq!(
+                error.message,
+                "Provider rejected the request. Check the model and request settings."
+            );
+            assert!(!error.retryable, "status {status} must not be retried");
+        }
     }
 
     #[test]
-    fn injects_reasoning_effort_when_model_supports_reasoning() {
-        let model = sample_model(vec![
-            "low".to_string(),
-            "medium".to_string(),
-            "high".to_string(),
-            "max".to_string(),
-        ]);
+    fn never_retries_a_completed_http_rejection() {
+        let body = r#"{"error":{"message":"upstream request failed"}}"#;
+
+        for status in [400, 408, 409, 422, 425, 429, 500, 502, 599] {
+            let error = map_provider_error(Some(status), body, None);
+            assert!(!error.retryable, "status {status} must not be retried");
+        }
+    }
+
+    #[test]
+    fn does_not_retry_http_conflicts_automatically() {
+        let error = map_provider_error(
+            Some(409),
+            r#"{"error":{"message":"upstream request failed"}}"#,
+            None,
+        );
+
+        assert_eq!(
+            error.message,
+            "Provider could not accept the request in its current state."
+        );
+        assert!(!error.retryable);
+    }
+
+    #[test]
+    fn does_not_retry_statusless_provider_rejections() {
+        let error = map_provider_error(
+            None,
+            r#"{"error":{"message":"Error from provider (Console): Upstream request failed"}}"#,
+            None,
+        );
+
+        assert_eq!(error.message, "Provider could not complete the request.");
+        assert!(!error.retryable);
+    }
+
+    #[test]
+    fn retries_only_incomplete_stream_state_before_output() {
+        assert!(should_retry_incomplete_stream(false, None, false, 0));
+        assert!(!should_retry_incomplete_stream(false, None, true, 0));
+        assert!(!should_retry_incomplete_stream(true, None, false, 0));
+        assert!(!should_retry_incomplete_stream(
+            false,
+            Some("content_filter"),
+            false,
+            0,
+        ));
+    }
+
+    #[test]
+    fn maps_sse_provider_rejections_without_retry_markers() {
+        assert_eq!(
+            stream_error_message("Error from provider (Console): Upstream request failed"),
+            "Provider rejected the streamed request."
+        );
+        assert_eq!(
+            stream_error_message("maximum context length exceeded"),
+            "Prompt is too long for the selected model."
+        );
+    }
+
+    #[test]
+    fn builds_transport_fields_without_inventing_reasoning() {
+        let model = sample_model(Vec::new());
         let body = build_request_body(
             &model,
             json!({
@@ -912,26 +1092,14 @@ mod tests {
                 "model": "ignored",
             }),
             true,
-            Some("medium"),
         );
 
-        assert_eq!(
-            body.get("reasoning_effort").and_then(Value::as_str),
-            Some("medium")
-        );
+        assert!(body.get("reasoning_effort").is_none());
         assert_eq!(
             body.get("model").and_then(Value::as_str),
             Some("test-model")
         );
         assert_eq!(body.get("stream").and_then(Value::as_bool), Some(true));
-    }
-
-    #[test]
-    fn skips_reasoning_effort_when_model_has_no_levels() {
-        let model = sample_model(vec![]);
-        let body = build_request_body(&model, json!({ "messages": [] }), false, Some("max"));
-
-        assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]

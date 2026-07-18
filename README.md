@@ -6,7 +6,7 @@ Wizzle is a local-first desktop AI coding agent. The Tauri application owns the 
 
 - `wizzle-agent/src`: React and TypeScript workspace UI plus agent orchestration.
 - `wizzle-agent/src-tauri`: Rust commands for SQLite persistence, provider HTTP calls, local file tools, and process control.
-- `opencode-models.yaml`: initial OpenAI-compatible provider and model metadata imported when no providers exist.
+- `WIZZLE_CONFIG_URL`: required public manifest for developer metadata, updates, prompts, and managed provider catalogs.
 - Local state and provider credentials are stored under `~/.wizzle`.
 
 A project maps to one user-selected local folder, and every stored session belongs to one project. Ordinary mutations stay within that project; approved external mutations and host-capable shell commands remain subject to the selected session permission mode.
@@ -22,6 +22,28 @@ cp .env.example .env
 source "$HOME/.cargo/env"
 npm run tauri dev
 ```
+
+The app validates and caches the remote configuration at startup. Managed providers are installed explicitly from the Providers page; custom providers and their models remain locally configurable.
+
+### In-app updates
+
+The root YAML manifest declares the latest semantic version, severity, release note, and a signed Tauri update-manifest URL for each desktop platform:
+
+```yaml
+update:
+  version: "0.2.0"
+  status: "normal" # or critical
+  note: "Release summary"
+  platforms:
+    macos:
+      url: "https://github.com/OWNER/REPO/releases/download/main-build/macos.json"
+    windows:
+      url: "https://github.com/OWNER/REPO/releases/download/main-build/windows.json"
+    linux:
+      url: "https://github.com/OWNER/REPO/releases/download/main-build/linux.json"
+```
+
+Release builds require `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. The matching public key must be embedded with `WIZZLE_UPDATER_PUBLIC_KEY`. GitHub Actions generates signed updater packages and the three platform manifests without sending users to a browser.
 
 ## Verification
 

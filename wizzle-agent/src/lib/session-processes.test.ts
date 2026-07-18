@@ -2,7 +2,7 @@ import {
   filterProcessesForSession,
   formatProcessOriginLabel,
   isActiveProcessStatus,
-  isBackgroundBashPayload,
+  isBackgroundShellPayload,
   resolveBackgroundProcessId,
   selectActiveSessionProcesses,
   summarizeProcessCommand,
@@ -59,9 +59,9 @@ function main() {
     "filter by session",
   );
 
-  assert(isBackgroundBashPayload({ background: true }), "background flag");
-  assert(isBackgroundBashPayload({ process: { id: "process-x" } }), "process id");
-  assert(!isBackgroundBashPayload({ ok: true } as { background?: boolean }), "foreground");
+  assert(isBackgroundShellPayload({ background: true }), "background flag");
+  assert(isBackgroundShellPayload({ process: { id: "process-x" } }), "process id");
+  assert(!isBackgroundShellPayload({ ok: true } as { background?: boolean }), "foreground");
   assert(resolveBackgroundProcessId({ process: { id: " process-x " } }) === "process-x", "id trim");
 
   assert(formatProcessOriginLabel({}) === null, "no origin");

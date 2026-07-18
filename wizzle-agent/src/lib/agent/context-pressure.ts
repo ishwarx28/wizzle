@@ -4,15 +4,12 @@
  */
 
 import type { Message } from "../../types/workspace";
+import { getRemotePrompt } from "../remote-config";
 
 /** Short identity system prompt for the pressure forced-final call only. */
-export const CONTEXT_PRESSURE_SYSTEM_PROMPT = [
-  "You are Wizzle, a desktop coding agent.",
-  "Give a brief status based on the current findings for the latest user task.",
-  "Be concise, direct, and distinguish completed work from remaining work.",
-  "Do not call tools.",
-  "Do not restate the entire history.",
-].join("\n");
+export function resolveContextPressureSystemPrompt() {
+  return getRemotePrompt("context-pressure");
+}
 
 /** Auto-continue user prompt after pressure settle + compaction opportunity. */
 export const CONTEXT_CONTINUE_PROMPT =
@@ -23,12 +20,19 @@ export const MAX_REINFLATED_COMPACTED_TURNS = 5;
 export type WorkspaceAgentFinishReason =
   | "done"
   | "context_pressure"
+  | "max_steps"
   | "error"
   | "interrupted";
 
 export type WorkspaceAgentRunResult = {
   finishReason: WorkspaceAgentFinishReason;
 };
+
+export function shouldAutoContinueAfterExceptionalFinish(
+  finishReason: WorkspaceAgentFinishReason,
+) {
+  return finishReason === "context_pressure" || finishReason === "max_steps";
+}
 
 /** Only enter pressure after tools have grown the active turn. */
 export function shouldEnterContextPressure(options: {
@@ -52,6 +56,17 @@ export function shouldEnterContextPressure(options: {
     options.code === "attachments_too_large" ||
     options.code === undefined
   );
+}
+
+export async function persistPendingImplementationPlanForContextContinuation(options: {
+  hasPendingPlan: boolean;
+  persistPlan: () => Promise<unknown>;
+}) {
+  if (!options.hasPendingPlan) {
+    return false;
+  }
+
+  return (await options.persistPlan()) !== false;
 }
 
 /**

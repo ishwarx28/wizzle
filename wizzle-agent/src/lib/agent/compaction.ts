@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   extractMessageText,
   sanitizeToolResultContentForReplay,
+  subscribeToProviderChatRetries,
   type ChatRequestMessage,
 } from "../chat-stream";
 import {
@@ -10,21 +11,25 @@ import {
   estimateTextTokens,
   isCompactableReplayBlock,
   resolveMaxReplayInput,
+  resolveReservedOutputTokens,
   type ReplayBlock,
 } from "../context-budget";
 import { getAssistantConversationContent, getMessageParts } from "../message-parts";
 import { shouldManageSessionRuntimeForHelperCompletion } from "../session-runtime-helpers";
+import { automaticReasoningSelection } from "../reasoning-config";
 import type {
   CompactedContextRecord,
   Message,
   ModelId,
   PreviewFile,
   ProviderModelInfo,
+  ProviderRetryStatus,
 } from "../../types/workspace";
-import compactionSystemPrompt from "../prompts/compaction-system-prompt.txt?raw";
+import { getRemotePrompt } from "../remote-config";
 
-/** Loaded from `prompts/compaction-system-prompt.txt` (I-4). */
-export const COMPACTION_SYSTEM_PROMPT = compactionSystemPrompt.trim();
+export function resolveCompactionSystemPrompt() {
+  return getRemotePrompt("compaction");
+}
 
 const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
 <template>
@@ -294,48 +299,59 @@ function parseCompletionText(response: string) {
   }
 }
 
-function resolveCompactionReasoningLevel(model: ProviderModelInfo) {
-  if (model.reasoningLevels.includes("balanced")) {
-    return "balanced";
-  }
-
-  return model.reasoningLevels[0] ?? "fast";
-}
-
 async function requestSummary(options: {
   chatId: string;
   maxTokens: number;
   model: ProviderModelInfo;
+  onProviderRetry?: (status: ProviderRetryStatus | null) => void;
   projectId: string;
   userPrompt: string;
 }) {
-  const response = await invoke<string>("complete_provider_chat", {
-    input: {
-      modelUuid: options.model.id,
-      projectId: options.projectId,
-      chatId: options.chatId,
-      // Frontend owns compacting/busy; do not Idle when the summary completes (#31 family).
-      manageSessionRuntime: shouldManageSessionRuntimeForHelperCompletion(),
-      reasoningLevel: resolveCompactionReasoningLevel(options.model),
-      body: {
-        model: options.model.id,
-        stream: false,
-        max_tokens: options.maxTokens,
-        messages: [
-          {
-            role: "system",
-            content: COMPACTION_SYSTEM_PROMPT,
-          },
-          {
-            role: "user",
-            content: options.userPrompt,
-          },
-        ] satisfies ChatRequestMessage[],
-      },
+  const requestId = crypto.randomUUID();
+  let retryVisible = false;
+  const unlistenRetry = await subscribeToProviderChatRetries({
+    onRetry: (status) => {
+      retryVisible = Boolean(status);
+      options.onProviderRetry?.(status);
     },
+    requestId,
   });
 
-  return parseCompletionText(response);
+  try {
+    const response = await invoke<string>("complete_provider_chat", {
+      input: {
+        requestId,
+        modelUuid: options.model.id,
+        projectId: options.projectId,
+        chatId: options.chatId,
+        // Frontend owns compacting/busy; do not Idle when the summary completes (#31 family).
+        manageSessionRuntime: shouldManageSessionRuntimeForHelperCompletion(),
+        reasoningSelection: automaticReasoningSelection(options.model.reasoning) ?? null,
+        body: {
+          model: options.model.id,
+          stream: false,
+          max_tokens: options.maxTokens,
+          messages: [
+            {
+              role: "system",
+              content: resolveCompactionSystemPrompt(),
+            },
+            {
+              role: "user",
+              content: options.userPrompt,
+            },
+          ] satisfies ChatRequestMessage[],
+        },
+      },
+    });
+
+    return parseCompletionText(response);
+  } finally {
+    if (retryVisible) {
+      options.onProviderRetry?.(null);
+    }
+    unlistenRetry();
+  }
 }
 
 /** Same eligibility as live drop set — terminal history, not done-only (#34). */
@@ -344,14 +360,13 @@ function isCompletedCandidateBlock(block: ReplayBlock, currentTurnId?: string) {
 }
 
 /**
- * Compaction-request budget only: COMPACTION_SYSTEM_PROMPT + user prompt
+ * Compaction-request budget only: remote compaction system prompt + user prompt
  * (history + template + previous summary). Does NOT count the agent system
  * prompt or tool definitions — those are not sent on the summarizer call.
  */
 export function estimateCompactionRequestTokens(options: {
   historyText: string;
   previousSummary?: string | null;
-  tokenizerKind?: string | null;
 }) {
   const userPrompt = buildCompactionUserPrompt({
     historyText: options.historyText,
@@ -361,7 +376,7 @@ export function estimateCompactionRequestTokens(options: {
   return estimateConversationTokens({
     messages: [
       {
-        content: COMPACTION_SYSTEM_PROMPT,
+        content: resolveCompactionSystemPrompt(),
         role: "system",
       },
       {
@@ -369,9 +384,56 @@ export function estimateCompactionRequestTokens(options: {
         role: "user",
       },
     ],
-    tokenizerKind: options.tokenizerKind,
     tools: [],
   });
+}
+
+function truncateCompactionHistoryMiddle(text: string, maxChars: number) {
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  const marker = `\n[Earlier history truncated: omitted ${text.length - maxChars} chars]\n`;
+  const available = Math.max(0, maxChars - marker.length);
+  const head = Math.ceil(available * 0.65);
+  const tail = Math.max(0, available - head);
+  return `${text.slice(0, head)}${marker}${tail > 0 ? text.slice(-tail) : ""}`;
+}
+
+/** Bound an oversized single-turn compaction request before it reaches the provider. */
+export function fitCompactionHistoryText(options: {
+  historyText: string;
+  inputBudget: number;
+  previousSummary?: string | null;
+}) {
+  const estimate = (historyText: string) =>
+    estimateCompactionRequestTokens({
+      historyText,
+      previousSummary: options.previousSummary,
+    });
+
+  if (estimate(options.historyText) <= options.inputBudget) {
+    return options.historyText;
+  }
+
+  let low = 0;
+  let high = options.historyText.length;
+  let best: string | null = null;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = truncateCompactionHistoryMiddle(options.historyText, middle);
+    if (estimate(candidate) <= options.inputBudget) {
+      best = candidate;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  if (!best) {
+    throw new Error("The existing compacted summary is too large for the selected model context.");
+  }
+  return best;
 }
 
 /**
@@ -388,7 +450,6 @@ export function selectOldestCompactionBatch(options: {
   previousContext?: CompactedContextRecord | null;
   previewFileMap: Map<string, PreviewFile>;
   tokenLimit: number;
-  tokenizerKind?: string | null;
 }): string[] {
   const candidateOrder = options.candidateTurnIds.filter((turnId, index, all) => all.indexOf(turnId) === index);
   if (candidateOrder.length === 0) {
@@ -411,12 +472,16 @@ export function selectOldestCompactionBatch(options: {
     return [];
   }
 
-  // Reserve room for the summary output (same cap family as compactReplayBlocks).
-  const reservedOutput = Math.min(
-    options.tokenLimit * 2,
-    typeof options.maxOutputTokens === "number" && Number.isFinite(options.maxOutputTokens) && options.maxOutputTokens > 0
-      ? Math.floor(options.maxOutputTokens)
-      : options.tokenLimit * 2,
+  const reservedOutput = resolveReservedOutputTokens(
+    options.maxContext ?? undefined,
+    Math.min(
+      typeof options.maxOutputTokens === "number" &&
+        Number.isFinite(options.maxOutputTokens) &&
+        options.maxOutputTokens > 0
+        ? Math.floor(options.maxOutputTokens)
+        : options.tokenLimit,
+      options.tokenLimit,
+    ),
   );
   const inputBudget = resolveMaxReplayInput(options.maxContext ?? undefined, reservedOutput);
   const previousSummary = options.previousContext?.summary ?? null;
@@ -431,7 +496,6 @@ export function selectOldestCompactionBatch(options: {
     const requestTokens = estimateCompactionRequestTokens({
       historyText,
       previousSummary,
-      tokenizerKind: options.tokenizerKind,
     });
 
     if (requestTokens > inputBudget && batchTurnIds.length > 0) {
@@ -455,6 +519,7 @@ export async function compactReplayBlocks(options: {
   currentTurnId?: string;
   droppedTurnIds: string[];
   model: ProviderModelInfo;
+  onProviderRetry?: (status: ProviderRetryStatus | null) => void;
   previousContext?: CompactedContextRecord | null;
   projectId: string;
   previewFileMap: Map<string, PreviewFile>;
@@ -474,19 +539,25 @@ export async function compactReplayBlocks(options: {
     return null;
   }
 
-  const historyText = buildCompactionHistoryText(
+  const rawHistoryText = buildCompactionHistoryText(
     candidateBlocks.flatMap((block) => block.messages),
     options.previewFileMap,
   );
-  const maxTokens = Math.min(
-    options.model.maxOutputTokens ?? options.tokenLimit * 2,
-    options.tokenLimit * 2,
+  const maxTokens = resolveReservedOutputTokens(
+    options.model.maxContext ?? undefined,
+    Math.min(options.model.maxOutputTokens ?? options.tokenLimit, options.tokenLimit),
   );
+  const historyText = fitCompactionHistoryText({
+    historyText: rawHistoryText,
+    inputBudget: resolveMaxReplayInput(options.model.maxContext ?? undefined, maxTokens),
+    previousSummary: options.previousContext?.summary,
+  });
   let summary = normalizeSummaryStructure(
     await requestSummary({
       chatId: options.chatId,
       maxTokens,
       model: options.model,
+      onProviderRetry: options.onProviderRetry,
       projectId: options.projectId,
       userPrompt: buildCompactionUserPrompt({
         historyText,
@@ -494,9 +565,7 @@ export async function compactReplayBlocks(options: {
       }),
     }),
   );
-  let tokens = estimateTextTokens(summary, {
-    tokenizerKind: options.model.tokenizerKind,
-  });
+  let tokens = estimateTextTokens(summary);
 
   if (tokens > options.tokenLimit) {
     summary = normalizeSummaryStructure(
@@ -504,6 +573,7 @@ export async function compactReplayBlocks(options: {
         chatId: options.chatId,
         maxTokens,
         model: options.model,
+        onProviderRetry: options.onProviderRetry,
         projectId: options.projectId,
         userPrompt: buildCompactionUserPrompt({
           historyText,
@@ -512,16 +582,12 @@ export async function compactReplayBlocks(options: {
         }),
       }),
     );
-    tokens = estimateTextTokens(summary, {
-      tokenizerKind: options.model.tokenizerKind,
-    });
+    tokens = estimateTextTokens(summary);
   }
 
   if (tokens > options.tokenLimit) {
     summary = compressSummaryPreservingSections(summary, options.tokenLimit);
-    tokens = estimateTextTokens(summary, {
-      tokenizerKind: options.model.tokenizerKind,
-    });
+    tokens = estimateTextTokens(summary);
   }
 
   if (tokens > options.tokenLimit) {
@@ -539,17 +605,6 @@ export async function compactReplayBlocks(options: {
     tokens,
     updatedAtMs: Date.now(),
   } satisfies CompactedContextRecord;
-}
-
-export function buildCompactedContextMessage(summary: string): ChatRequestMessage {
-  return {
-    content: [
-      "Compacted context from earlier completed turns.",
-      "",
-      summary,
-    ].join("\n"),
-    role: "system",
-  };
 }
 
 export function resolveModelId(model: ProviderModelInfo): ModelId {

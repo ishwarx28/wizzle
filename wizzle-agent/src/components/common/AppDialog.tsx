@@ -5,15 +5,20 @@ import type { PropsWithChildren, ReactNode } from "react";
 interface AppDialogProps {
   actions: ReactNode;
   busy?: boolean;
+  dismissible?: boolean;
   description?: string;
   /**
    * Top border above the action row. Only for long scrollable forms
    * (add/edit provider); keep off for simple confirms and short dialogs.
    */
   footerDivider?: boolean;
+  /** Let structured content sit flush against the dialog shell. */
+  flushContent?: boolean;
   onClose: () => void;
-  /** Wider panel for multi-field forms (provider editor). */
-  size?: "default" | "wide";
+  /** Wider panels for multi-field forms and large catalog editors. */
+  size?: "default" | "wide" | "provider";
+  /** Keep an accessible name while omitting the visible title area. */
+  hideHeader?: boolean;
   title: string;
 }
 
@@ -22,19 +27,29 @@ export function AppDialog({
   busy = false,
   children,
   description,
+  dismissible = true,
   footerDivider = false,
+  flushContent = false,
+  hideHeader = false,
   onClose,
   size = "default",
   title,
 }: PropsWithChildren<AppDialogProps>) {
-  const maxWidthClass = size === "wide" ? "max-w-[720px]" : "max-w-[380px]";
+  const maxWidthClass =
+    size === "provider"
+      ? "max-w-[1120px]"
+      : size === "wide"
+        ? "max-w-[720px]"
+        : "max-w-[380px]";
   const titleId = useId();
   const descriptionId = useId();
   const panelRef = useRef<HTMLDivElement | null>(null);
   const onCloseRef = useRef(onClose);
   const busyRef = useRef(busy);
+  const dismissibleRef = useRef(dismissible);
   onCloseRef.current = onClose;
   busyRef.current = busy;
+  dismissibleRef.current = dismissible;
 
   useEffect(() => {
     const previouslyFocused = document.activeElement instanceof HTMLElement
@@ -59,7 +74,7 @@ export function AppDialog({
       }
 
       if (event.key === "Escape") {
-        if (!busyRef.current) {
+        if (dismissibleRef.current && !busyRef.current) {
           event.preventDefault();
           onCloseRef.current();
         }
@@ -110,7 +125,7 @@ export function AppDialog({
       data-modal
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
-          if (!busy) {
+          if (dismissible && !busy) {
             onClose();
           }
         }
@@ -118,8 +133,9 @@ export function AppDialog({
     >
       <div
         aria-busy={busy || undefined}
-        aria-describedby={description ? descriptionId : undefined}
-        aria-labelledby={titleId}
+        aria-describedby={!hideHeader && description ? descriptionId : undefined}
+        aria-label={hideHeader ? title : undefined}
+        aria-labelledby={hideHeader ? undefined : titleId}
         aria-modal="true"
         className={`relative flex w-full ${maxWidthClass} max-h-[min(90vh,880px)] flex-col overflow-hidden rounded-[26px] border border-[var(--color-border)] bg-[var(--color-panel)] shadow-[0_22px_60px_rgba(0,0,0,0.34)]`}
         onMouseDown={(event) => event.stopPropagation()}
@@ -127,15 +143,24 @@ export function AppDialog({
         role="dialog"
         tabIndex={-1}
       >
-        <div className="shrink-0 space-y-1 px-5 pt-5">
-          <h2 className="text-ui-tight font-medium text-[var(--color-text)]" id={titleId}>{title}</h2>
-          {description ? (
-            <p className="text-ui text-[var(--color-text-secondary)]" id={descriptionId}>{description}</p>
-          ) : null}
-        </div>
+        {!hideHeader ? (
+          <div className="shrink-0 space-y-1 px-5 pt-5">
+            <h2 className="text-ui-tight font-medium text-[var(--color-text)]" id={titleId}>{title}</h2>
+            {description ? (
+              <p className="text-ui text-[var(--color-text-secondary)]" id={descriptionId}>{description}</p>
+            ) : null}
+          </div>
+        ) : null}
 
         {children ? (
-          <div className="min-h-0 flex-1 overflow-y-auto px-5 pt-4">{children}</div>
+          <div
+            className={[
+              "min-h-0 flex-1 overflow-y-auto",
+              flushContent ? "p-0" : "px-5 pt-4",
+            ].join(" ")}
+          >
+            {children}
+          </div>
         ) : null}
 
         <div

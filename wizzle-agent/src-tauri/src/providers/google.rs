@@ -5,32 +5,43 @@ use serde_json::{json, Map, Value};
 use tauri::Window;
 
 use super::native_transport::{
-    checked_response, emit_chunks, endpoint_with_version, is_transient, parse_json, response_text,
-    wait_before_retry, SseDecoder, MAX_RETRY_ATTEMPTS, STREAM_IDLE_TIMEOUT,
+    apply_provider_headers, checked_response, emit_chunks, endpoint_with_version, parse_json,
+    response_text, SseDecoder, STREAM_IDLE_TIMEOUT,
 };
 use super::openai_compatible::{map_provider_error, ProviderChatChunkKind, ProviderRequestError};
+use super::reasoning::{
+    apply_message_replay, apply_provider_request_fields, apply_reasoning_selection,
+    capture_replay_payloads, ProviderReasoningSelection,
+};
+use super::retry::{can_retry_transport, is_retryable_transport_error, notify_and_wait_for_retry};
 use super::types::{ProviderModelRecord, ProviderResolvedModel, ProviderSecretRecord};
 
 const TOOL_CALL_ID_PREFIX: &str = "wizzle-google";
 
 pub async fn complete_chat(
     client: &reqwest::Client,
+    window: &Window,
+    request_id: &str,
     model: &ProviderResolvedModel,
     body: Value,
-    reasoning_level: Option<&str>,
+    reasoning_selection: Option<&ProviderReasoningSelection>,
 ) -> Result<String, String> {
-    let request_body = build_request_body(model, &body, reasoning_level)?;
+    let request_body = build_request_body(model, &body, reasoning_selection)?;
     let mut attempt = 0;
 
     loop {
         match post_generate_content(client, model, &request_body, false).await {
-            Ok(response) => {
-                let body = response_text(response).await?;
-                return normalize_completion(&body);
-            }
-            Err(error) if error.retryable && attempt < MAX_RETRY_ATTEMPTS => {
+            Ok(response) => match response_text(response).await {
+                Ok(body) => return normalize_completion(&body),
+                Err(error) if error.retryable && can_retry_transport(attempt, false) => {
+                    attempt += 1;
+                    notify_and_wait_for_retry(window, request_id, attempt, &error.message).await;
+                }
+                Err(error) => return Err(error.message),
+            },
+            Err(error) if error.retryable && can_retry_transport(attempt, false) => {
                 attempt += 1;
-                wait_before_retry(attempt).await;
+                notify_and_wait_for_retry(window, request_id, attempt, &error.message).await;
             }
             Err(error) => return Err(error.message),
         }
@@ -43,18 +54,18 @@ pub async fn stream_chat(
     request_id: &str,
     model: &ProviderResolvedModel,
     body: Value,
-    reasoning_level: Option<&str>,
+    reasoning_selection: Option<&ProviderReasoningSelection>,
 ) -> Result<(), String> {
-    let request_body = build_request_body(model, &body, reasoning_level)?;
+    let request_body = build_request_body(model, &body, reasoning_selection)?;
     let mut attempt = 0;
     let mut emitted_any = false;
 
     'retry: loop {
         let response = match post_generate_content(client, model, &request_body, true).await {
             Ok(response) => response,
-            Err(error) if error.retryable && attempt < MAX_RETRY_ATTEMPTS && !emitted_any => {
+            Err(error) if error.retryable && can_retry_transport(attempt, emitted_any) => {
                 attempt += 1;
-                wait_before_retry(attempt).await;
+                notify_and_wait_for_retry(&window, request_id, attempt, &error.message).await;
                 continue;
             }
             Err(error) => return Err(error.message),
@@ -64,32 +75,56 @@ pub async fn stream_chat(
         let mut state = GoogleStreamState::default();
 
         loop {
-            let item = tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next())
-                .await
-                .map_err(|_| "Provider stream timed out while waiting for data.".to_string())?;
+            let item = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
+                Ok(item) => item,
+                Err(_) if can_retry_transport(attempt, emitted_any) => {
+                    attempt += 1;
+                    notify_and_wait_for_retry(
+                        &window,
+                        request_id,
+                        attempt,
+                        "Provider stream timed out while waiting for data.",
+                    )
+                    .await;
+                    continue 'retry;
+                }
+                Err(_) => {
+                    return Err("Provider stream timed out while waiting for data.".to_string())
+                }
+            };
             let Some(item) = item else { break };
             let bytes = match item {
                 Ok(bytes) => bytes,
                 Err(error)
-                    if is_transient(&error) && attempt < MAX_RETRY_ATTEMPTS && !emitted_any =>
+                    if is_retryable_transport_error(&error)
+                        && can_retry_transport(attempt, emitted_any) =>
                 {
+                    let mapped = map_provider_error(None, "", Some(&error));
                     attempt += 1;
-                    wait_before_retry(attempt).await;
+                    notify_and_wait_for_retry(&window, request_id, attempt, &mapped.message).await;
                     continue 'retry;
                 }
                 Err(error) => return Err(map_provider_error(None, "", Some(&error)).message),
             };
             for event in decoder.append(&bytes)? {
-                let chunks = process_stream_event(&event.data, &mut state)?;
+                let chunks = process_stream_event(&event.data, &mut state, model)?;
                 emitted_any |= emit_chunks(&window, request_id, chunks)? > 0;
             }
         }
         for event in decoder.finish()? {
-            let chunks = process_stream_event(&event.data, &mut state)?;
+            let chunks = process_stream_event(&event.data, &mut state, model)?;
             emitted_any |= emit_chunks(&window, request_id, chunks)? > 0;
         }
 
-        return resolve_stream(state, emitted_any);
+        let stream_incomplete = !state.finished;
+        match resolve_stream(state, emitted_any) {
+            Ok(()) => return Ok(()),
+            Err(error) if stream_incomplete && can_retry_transport(attempt, emitted_any) => {
+                attempt += 1;
+                notify_and_wait_for_retry(&window, request_id, attempt, &error).await;
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -99,8 +134,6 @@ async fn post_generate_content(
     body: &Value,
     stream: bool,
 ) -> Result<reqwest::Response, ProviderRequestError> {
-    let api_key = required_api_key(&model.provider, "direct requests")
-        .map_err(|message| ProviderRequestError::new(message, false))?;
     let model_id = model.model.model_id.trim_start_matches("models/");
     if model_id.is_empty()
         || model_id.contains(':')
@@ -125,29 +158,18 @@ async fn post_generate_content(
             &path,
         ))
         .header(CONTENT_TYPE, "application/json")
-        .header("x-goog-api-key", api_key)
-        .json(body)
+        .json(body);
+    let request = apply_provider_headers(request, &model.provider)?
         .send()
         .await;
 
     checked_response(request).await
 }
 
-fn required_api_key<'a>(
-    provider: &'a ProviderSecretRecord,
-    purpose: &str,
-) -> Result<&'a str, String> {
-    provider
-        .api_key
-        .as_deref()
-        .filter(|key| !key.trim().is_empty())
-        .ok_or_else(|| format!("Google Gemini requires an API key for {purpose}."))
-}
-
 fn build_request_body(
     model: &ProviderResolvedModel,
     body: &Value,
-    reasoning_level: Option<&str>,
+    reasoning_selection: Option<&ProviderReasoningSelection>,
 ) -> Result<Value, String> {
     let messages = body
         .get("messages")
@@ -208,7 +230,9 @@ fn build_request_body(
                         parts.push(part);
                     }
                 }
-                push_content(&mut contents, "model", parts);
+                let mut converted_content = json!({ "role": "model", "parts": parts });
+                apply_message_replay(message, &mut converted_content)?;
+                push_converted_content(&mut contents, converted_content);
             }
             Some("tool") => {
                 let id = message
@@ -262,20 +286,6 @@ fn build_request_body(
     }
     copy_number(body, &mut generation_config, "temperature", "temperature");
     copy_number(body, &mut generation_config, "top_p", "topP");
-    if model
-        .model
-        .model_id
-        .to_ascii_lowercase()
-        .contains("gemini-3")
-        && !model.model.reasoning_levels.is_empty()
-    {
-        if let Some(level) = reasoning_level.and_then(google_thinking_level) {
-            generation_config.insert(
-                "thinkingConfig".to_string(),
-                json!({ "thinkingLevel": level, "includeThoughts": true }),
-            );
-        }
-    }
     if !generation_config.is_empty() {
         object.insert(
             "generationConfig".to_string(),
@@ -296,6 +306,12 @@ fn build_request_body(
             );
         }
     }
+    apply_provider_request_fields(&mut output, &model.provider.request_fields)?;
+    apply_reasoning_selection(
+        &mut output,
+        model.model.reasoning.as_ref(),
+        reasoning_selection,
+    )?;
     Ok(output)
 }
 
@@ -377,6 +393,25 @@ fn push_content(contents: &mut Vec<Value>, role: &str, parts: Vec<Value>) {
     contents.push(json!({ "role": role, "parts": parts }));
 }
 
+fn push_converted_content(contents: &mut Vec<Value>, content: Value) {
+    let role = content.get("role").and_then(Value::as_str);
+    let has_replay_fields = content.as_object().is_some_and(|object| {
+        object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "role" | "parts"))
+    });
+    if !has_replay_fields {
+        if let (Some(role), Some(parts)) = (
+            role,
+            content.get("parts").and_then(Value::as_array).cloned(),
+        ) {
+            push_content(contents, role, parts);
+            return;
+        }
+    }
+    contents.push(content);
+}
+
 fn parse_arguments(arguments: &str) -> Result<Value, String> {
     let value = serde_json::from_str::<Value>(arguments)
         .map_err(|_| "A stored tool call contains invalid JSON arguments.".to_string())?;
@@ -406,16 +441,6 @@ fn copy_number(
 ) {
     if source.get(source_key).is_some_and(Value::is_number) {
         target.insert(target_key.to_string(), source[source_key].clone());
-    }
-}
-
-fn google_thinking_level(level: &str) -> Option<&'static str> {
-    match level.trim().to_ascii_lowercase().as_str() {
-        "minimal" => Some("MINIMAL"),
-        "low" => Some("LOW"),
-        "medium" => Some("MEDIUM"),
-        "high" | "xhigh" | "max" => Some("HIGH"),
-        _ => None,
     }
 }
 
@@ -549,6 +574,7 @@ struct GoogleStreamState {
 fn process_stream_event(
     data: &str,
     state: &mut GoogleStreamState,
+    model: &ProviderResolvedModel,
 ) -> Result<Vec<(ProviderChatChunkKind, String, Option<usize>)>, String> {
     if data.trim().is_empty() || data.trim() == "[DONE]" {
         return Ok(Vec::new());
@@ -624,6 +650,11 @@ fn process_stream_event(
         map_finish_reason(reason)?;
         state.finished = true;
     }
+    chunks.extend(
+        capture_replay_payloads(&payload, model.model.reasoning.as_ref())?
+            .into_iter()
+            .map(|chunk| (ProviderChatChunkKind::ReasoningReplay, chunk, None)),
+    );
     Ok(chunks)
 }
 
@@ -656,7 +687,6 @@ fn resolve_stream(state: GoogleStreamState, emitted_any: bool) -> Result<(), Str
 pub async fn fetch_models(
     provider: &ProviderSecretRecord,
 ) -> Result<Vec<ProviderModelRecord>, String> {
-    let api_key = required_api_key(provider, "model refresh")?;
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(30))
@@ -667,21 +697,24 @@ pub async fn fetch_models(
     let mut seen = std::collections::HashSet::new();
 
     for _ in 0..100 {
-        let mut request = client
+        let request = client
             .get(endpoint_with_version(
                 &provider.endpoint,
                 "v1beta",
                 "models",
             ))
-            .header("x-goog-api-key", api_key)
             .query(&[("pageSize", "1000")]);
+        let mut request =
+            apply_provider_headers(request, provider).map_err(|error| error.message)?;
         if let Some(token) = page_token.as_deref() {
             request = request.query(&[("pageToken", token)]);
         }
         let response = checked_response(request.send().await)
             .await
             .map_err(|error| error.message)?;
-        let body = response_text(response).await?;
+        let body = response_text(response)
+            .await
+            .map_err(|error| error.message)?;
         let payload = serde_json::from_str::<Value>(&body)
             .map_err(|_| "Google Gemini returned an invalid model list.".to_string())?;
         let entries = payload
@@ -719,9 +752,8 @@ pub async fn fetch_models(
                     max_context: entry.get("inputTokenLimit").and_then(Value::as_u64),
                     max_output_tokens: entry.get("outputTokenLimit").and_then(Value::as_u64),
                     model_id: id.to_string(),
+                    reasoning: None,
                     reasoning_levels: Vec::new(),
-                    tokenizer_json: None,
-                    tokenizer_kind: None,
                 });
             }
         }
@@ -745,6 +777,7 @@ mod tests {
     use super::{
         build_request_body, decode_tool_call_metadata, encode_tool_call_id, normalize_completion,
     };
+    use crate::providers::reasoning::{ModelReasoningConfig, ProviderReasoningSelection};
     use crate::providers::types::{
         ProviderModelRecord, ProviderResolvedModel, ProviderSecretRecord,
     };
@@ -759,16 +792,35 @@ mod tests {
                 max_context: None,
                 max_output_tokens: Some(8192),
                 model_id: "gemini-3-pro".to_string(),
+                reasoning: Some(
+                    serde_json::from_value::<ModelReasoningConfig>(json!({
+                        "variants": [{
+                            "id": "high",
+                            "label": "High",
+                            "request": [{
+                                "operation": "set",
+                                "path": "/generationConfig/thinkingConfig/thinkingLevel",
+                                "value": "HIGH"
+                            }]
+                        }]
+                    }))
+                    .expect("reasoning recipe"),
+                ),
                 reasoning_levels: vec!["low".to_string(), "high".to_string()],
-                tokenizer_json: None,
-                tokenizer_kind: None,
             },
             provider: ProviderSecretRecord {
                 api_key: Some("key".to_string()),
+                api_key_required: true,
+                auth_header_name: Some("x-goog-api-key".to_string()),
+                auth_header_prefix: String::new(),
+                chat_completions_path: None,
                 endpoint: "https://generativelanguage.googleapis.com".to_string(),
+                headers: Vec::new(),
                 id: "p".to_string(),
+                models_path: None,
                 name: "Google".to_string(),
                 provider_type: "google".to_string(),
+                request_fields: Vec::new(),
             },
         }
     }
@@ -784,6 +836,10 @@ mod tests {
     #[test]
     fn converts_messages_tools_and_signature() {
         let id = encode_tool_call_id(0, Some("signature"), Some("native-call-0"));
+        let selection = ProviderReasoningSelection {
+            variant_id: "high".to_string(),
+            ..ProviderReasoningSelection::default()
+        };
         let body = build_request_body(&model(), &json!({
             "messages":[
                 {"role":"system","content":"Be concise"},
@@ -792,7 +848,7 @@ mod tests {
                 {"role":"tool","tool_call_id":id,"content":"{\"ok\":true}"}
             ],
             "tools":[{"type":"function","function":{"name":"read_file","description":"Read","parameters":{"type":"object"}}}]
-        }), Some("high")).expect("request");
+        }), Some(&selection)).expect("request");
 
         assert_eq!(body["systemInstruction"]["parts"][0]["text"], "Be concise");
         assert_eq!(

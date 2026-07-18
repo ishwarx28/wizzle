@@ -18,14 +18,14 @@ use crate::agent::AgentRuntimeState;
 pub use attachments::{build_attachment_preview_from_bytes, read_attachment_previews};
 pub use types::WorkspaceSnapshotPayload;
 use types::{
-    AppendOrUpdateMessageInput, DeleteSessionInput, FinalizeTurnInput, LoadComposerStateInput,
-    LoadTodoStateInput, LoadWorkspaceSessionInput, PersistSessionMetadataInput,
-    PersistWorkspaceSessionInput, RenameSessionInput, ResolveToolPathCandidatesInput,
-    ResolvedToolPathCandidatePayload, SaveComposerStateInput, SaveTodoStateInput,
-    SaveWorkspaceSettingsInput, SetProjectExpandedInput, TodoStatePayload,
-    TruncateSessionTranscriptInput, UpdateSessionSelectionInput, UpdateSessionTitleInput,
-    UpsertSessionEventInput, UpsertTurnSummaryInput, WorkspaceComposerStatePayload,
-    WorkspaceSessionLoadPayload,
+    AppendOrUpdateMessageInput, DeleteSessionInput, FinalizeTurnInput,
+    ImplementationPlanStatePayload, LoadComposerStateInput, LoadImplementationPlanStateInput,
+    LoadWorkspaceSessionInput, PersistSessionMetadataInput, PersistWorkspaceSessionInput,
+    RenameSessionInput, ResolveToolPathCandidatesInput, ResolvedToolPathCandidatePayload,
+    SaveComposerStateInput, SaveImplementationPlanStateInput, SaveWorkspaceSettingsInput,
+    SetProjectExpandedInput, TruncateSessionTranscriptInput, UpdateSessionSelectionInput,
+    UpdateSessionTitleInput, UpsertSessionEventInput, UpsertTurnSummaryInput,
+    WorkspaceComposerStatePayload, WorkspaceSessionLoadPayload,
 };
 
 pub const MAX_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
@@ -410,27 +410,27 @@ pub fn save_composer_state(
 }
 
 #[tauri::command]
-pub fn load_todo_state(
-    input: LoadTodoStateInput,
+pub fn load_implementation_plan_state(
+    input: LoadImplementationPlanStateInput,
     lock: State<'_, WorkspaceStorageLock>,
-) -> Result<Option<TodoStatePayload>, String> {
+) -> Result<Option<ImplementationPlanStatePayload>, String> {
     let _guard = lock
         .0
         .lock()
         .map_err(|_| "Could not access Wizzle workspace storage.".to_string())?;
-    sqlite_repository::load_todo_state(input)
+    sqlite_repository::load_implementation_plan_state(input)
 }
 
 #[tauri::command]
-pub fn save_todo_state(
-    input: SaveTodoStateInput,
+pub fn save_implementation_plan_state(
+    input: SaveImplementationPlanStateInput,
     lock: State<'_, WorkspaceStorageLock>,
-) -> Result<(), String> {
+) -> Result<ImplementationPlanStatePayload, String> {
     let _guard = lock
         .0
         .lock()
         .map_err(|_| "Could not access Wizzle workspace storage.".to_string())?;
-    sqlite_repository::save_todo_state(input)
+    sqlite_repository::save_implementation_plan_state(input)
 }
 
 #[tauri::command]

@@ -7,11 +7,67 @@ use super::openai_compatible::{
     map_provider_error, ProviderChatChunkKind, ProviderChatChunkPayload, ProviderRequestError,
     PROVIDER_CHAT_CHUNK_EVENT,
 };
+use super::types::ProviderSecretRecord;
 
 pub const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
-pub const MAX_RETRY_ATTEMPTS: usize = 2;
 pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-const RETRY_DELAYS_MS: [u64; MAX_RETRY_ATTEMPTS] = [250, 1000];
+
+pub fn apply_provider_headers(
+    mut request: reqwest::RequestBuilder,
+    provider: &ProviderSecretRecord,
+) -> Result<reqwest::RequestBuilder, ProviderRequestError> {
+    if provider.api_key_required
+        && provider
+            .api_key
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err(ProviderRequestError::new(
+            format!("{} requires an API key.", provider.name),
+            false,
+        ));
+    }
+    if let (Some(header_name), Some(api_key)) = (
+        provider.auth_header_name.as_deref(),
+        provider
+            .api_key
+            .as_deref()
+            .filter(|value| !value.trim().is_empty()),
+    ) {
+        let name =
+            reqwest::header::HeaderName::from_bytes(header_name.as_bytes()).map_err(|_| {
+                ProviderRequestError::new(
+                    "Provider authentication header is invalid.".to_string(),
+                    false,
+                )
+            })?;
+        let value = reqwest::header::HeaderValue::from_str(&format!(
+            "{}{}",
+            provider.auth_header_prefix, api_key
+        ))
+        .map_err(|_| {
+            ProviderRequestError::new(
+                "Provider authentication value is invalid.".to_string(),
+                false,
+            )
+        })?;
+        request = request.header(name, value);
+    }
+    for header in &provider.headers {
+        let name =
+            reqwest::header::HeaderName::from_bytes(header.name.as_bytes()).map_err(|_| {
+                ProviderRequestError::new("A custom provider header is invalid.".to_string(), false)
+            })?;
+        let value = reqwest::header::HeaderValue::from_str(&header.value).map_err(|_| {
+            ProviderRequestError::new(
+                "A custom provider header value is invalid.".to_string(),
+                false,
+            )
+        })?;
+        request = request.header(name, value);
+    }
+    Ok(request)
+}
 
 #[derive(Debug)]
 pub struct SseEvent {
@@ -138,25 +194,33 @@ pub fn emit_chunks(
     Ok(emitted)
 }
 
-pub async fn response_text(response: reqwest::Response) -> Result<String, String> {
+pub async fn response_text(response: reqwest::Response) -> Result<String, ProviderRequestError> {
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
     {
-        return Err("Provider response exceeded the 10 MB safety limit.".to_string());
+        return Err(ProviderRequestError::new(
+            "Provider response exceeded the 10 MB safety limit.".to_string(),
+            false,
+        ));
     }
 
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| map_provider_error(None, "", Some(&error)).message)?;
+        let chunk = chunk.map_err(|error| map_provider_error(None, "", Some(&error)))?;
         if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-            return Err("Provider response exceeded the 10 MB safety limit.".to_string());
+            return Err(ProviderRequestError::new(
+                "Provider response exceeded the 10 MB safety limit.".to_string(),
+                false,
+            ));
         }
         bytes.extend_from_slice(&chunk);
     }
 
-    String::from_utf8(bytes).map_err(|_| "Provider returned invalid UTF-8.".to_string())
+    String::from_utf8(bytes).map_err(|_| {
+        ProviderRequestError::new("Provider returned invalid UTF-8.".to_string(), false)
+    })
 }
 
 pub async fn checked_response(
@@ -170,19 +234,8 @@ pub async fn checked_response(
     let status = response.status().as_u16();
     let body = response_text(response)
         .await
-        .map_err(|message| ProviderRequestError::new(message, false))?;
+        .map_err(|error| ProviderRequestError::new(error.message, false))?;
     Err(map_provider_error(Some(status), &body, None))
-}
-
-pub fn is_transient(error: &reqwest::Error) -> bool {
-    error.is_timeout() || error.is_connect() || error.is_request() || error.is_body()
-}
-
-pub async fn wait_before_retry(attempt: usize) {
-    if attempt == 0 || attempt > MAX_RETRY_ATTEMPTS {
-        return;
-    }
-    tokio::time::sleep(Duration::from_millis(RETRY_DELAYS_MS[attempt - 1])).await;
 }
 
 pub fn parse_json(data: &str) -> Result<Value, String> {

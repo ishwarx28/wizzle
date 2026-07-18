@@ -14,11 +14,15 @@ const {
   selectReplayHistoryWithinBudget,
 } = await import("./context-budget.ts");
 const {
-  COMPACTION_SYSTEM_PROMPT,
   buildCompactionHistoryText,
   estimateCompactionRequestTokens,
+  fitCompactionHistoryText,
+  resolveCompactionSystemPrompt,
   selectOldestCompactionBatch,
 } = await import("./agent/compaction.ts");
+const { createTestRemoteConfig } = await import("./remote-config.test-fixture.ts");
+const { installRemoteConfigForTests } = await import("./remote-config.ts");
+installRemoteConfigForTests(createTestRemoteConfig());
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -59,7 +63,7 @@ function makeAssistantMessage(options: {
 }
 
 function pad(label: string, approxTokens: number) {
-  // estimateTextTokens ≈ ceil(len / 3.5) with unknown-tokenizer multiplier 1.15
+  // estimateTextTokens ≈ ceil(len / 3.5) with a conservative 1.15 multiplier.
   const chars = Math.ceil(approxTokens * 3.5);
   return `${label}:${"x".repeat(Math.max(0, chars - label.length - 1))}`;
 }
@@ -93,7 +97,7 @@ function main() {
       {
         type: "function",
         function: {
-          name: "bash",
+          name: "shell",
           description: pad("tool-desc", 300),
           parameters: { type: "object", properties: {} },
         },
@@ -102,11 +106,48 @@ function main() {
   });
 
   assert(selection.droppedTurnIds.length > 0, "should drop some older turns");
+  assert(selection.budget.reservedOutputTokens === 400, "response reserve is 10% of context");
+  assert(selection.budget.safetyMarginTokens === 200, "safety margin is 5% of context");
+  assert(selection.budget.inputBudget === 3_400, "safe input subtracts response and safety");
+  assert(selection.budget.compactionTrigger === 2_720, "high-water is 80% of safe input");
+  assert(selection.budget.postCompactionTarget === 2_040, "low-water is 60% of safe input");
+  assert(
+    selection.droppedTurnIds.join(",") === [turnA, turnB, turnC].join(","),
+    "one trigger compacts every previous completed non-compacted turn",
+  );
+  assert(
+    selection.requestEstimatedTokens <= selection.budget.healthyTarget,
+    "proactive compaction and reinflation stay within the healthy context target",
+  );
+  assert(
+    selection.snapshot.preCompactionTokens > selection.budget.compactionTrigger,
+    "the high-water check uses the complete pre-compaction request",
+  );
+  assert(selection.snapshot.optionalTokens === 0, "optional overlap is removed before compaction");
   assert(selection.droppedTurnIds[0] === turnA, "oldest completed turn dropped first");
   assert(!selection.droppedTurnIds.includes(turnActive), "active turn never dropped");
   assert(
     selection.messages.some((message) => message.turnId === turnActive),
     "active turn kept in live messages",
+  );
+
+  const forcedContinuationSelection = selectReplayHistoryWithinBudget({
+    currentTurnId: turnActive,
+    forceCompaction: true,
+    history,
+    maxContext: 128_000,
+    modelCapabilities: ["text"],
+    previewFileMap: new Map(),
+    systemPrompt: "system",
+    tools: [],
+  });
+  assert(
+    forcedContinuationSelection.droppedTurnIds.join(",") === [turnA, turnB, turnC].join(","),
+    "exceptional continuation compacts every completed non-compacted turn below high-water",
+  );
+  assert(
+    !forcedContinuationSelection.droppedTurnIds.includes(turnActive),
+    "forced continuation still excludes its active Continue turn",
   );
   // Dropped ids are oldest → newer order
   for (let index = 1; index < selection.droppedTurnIds.length; index += 1) {
@@ -119,12 +160,12 @@ function main() {
   // --- Compaction batch budget ignores agent tools (only compaction prompt) ---
   const blocks = buildReplayBlocks(history, turnActive);
   const hugeToolsEstimate = estimateConversationTokens({
-    messages: [{ role: "system", content: COMPACTION_SYSTEM_PROMPT }],
+    messages: [{ role: "system", content: resolveCompactionSystemPrompt() }],
     tools: [
       {
         type: "function",
         function: {
-          name: "bash",
+          name: "shell",
           description: pad("huge-tools", 20_000),
           parameters: { type: "object", properties: {} },
         },
@@ -138,6 +179,21 @@ function main() {
   assert(
     compactOnlyEstimate < hugeToolsEstimate / 2,
     "compaction estimate must not include agent-scale tools",
+  );
+
+  const oversizedHistoryText = `oldest:${"z".repeat(80_000)}`;
+  const fittedHistoryText = fitCompactionHistoryText({
+    historyText: oversizedHistoryText,
+    inputBudget: 5_000,
+    previousSummary: null,
+  });
+  assert(fittedHistoryText.length < oversizedHistoryText.length, "oversized history is pruned");
+  assert(
+    estimateCompactionRequestTokens({
+      historyText: fittedHistoryText,
+      previousSummary: null,
+    }) <= 5_000,
+    "pruned compaction input fits before the provider request",
   );
 
   const batch = selectOldestCompactionBatch({
@@ -179,7 +235,7 @@ function main() {
       {
         type: "function",
         function: {
-          name: "bash",
+          name: "shell",
           description: pad("tool-desc", 300),
           parameters: { type: "object", properties: {} },
         },
@@ -240,6 +296,14 @@ function main() {
     "reinflated pairs count toward the actual request but not required live usage",
   );
   assert(
+    reinflateSelection.snapshot.requestTokens === reinflateSelection.requestEstimatedTokens,
+    "the popup/runtime snapshot counts optional overlap in the actual request",
+  );
+  assert(
+    reinflateSelection.snapshot.optionalTokens > 0,
+    "last-five overlap has an explicit optional token count",
+  );
+  assert(
     reinflateSelection.requestEstimatedTokens <= reinflateSelection.budget.inputBudget,
     "reinflated pairs stay within residual request space",
   );
@@ -260,7 +324,7 @@ function main() {
   });
   assert(
     reinflateSelection.estimatedTokens === requiredOnlySelection.estimatedTokens,
-    "optional reinflated history does not increase compaction or displayed usage",
+    "optional reinflated history does not increase the compaction-trigger count",
   );
   assert(
     !reinflateSelection.messages.some((message) => message.role === "tool"),
@@ -282,6 +346,35 @@ function main() {
     residualTokens: 5,
   });
   assert(reinflateEmpty.turnIds.length === 0, "no reinflate when residual too small");
+
+  // Growing streamed content must invalidate a run-local estimate even when ids are unchanged.
+  const replayCache = new Map<string, { replayMessageCount: number; tokens: number }>();
+  const growingHistory = [
+    makeUserMessage({ id: "grow-u", turnId: turnActive, content: "start" }),
+  ];
+  const beforeGrowth = selectReplayHistoryWithinBudget({
+    cachedEstimateByBlockId: replayCache,
+    currentTurnId: turnActive,
+    history: growingHistory,
+    maxContext: 128_000,
+    modelCapabilities: ["text"],
+    previewFileMap: new Map(),
+    systemPrompt: "sys",
+  });
+  growingHistory[0]!.content = pad("grown", 2_000);
+  const afterGrowth = selectReplayHistoryWithinBudget({
+    cachedEstimateByBlockId: replayCache,
+    currentTurnId: turnActive,
+    history: growingHistory,
+    maxContext: 128_000,
+    modelCapabilities: ["text"],
+    previewFileMap: new Map(),
+    systemPrompt: "sys",
+  });
+  assert(
+    afterGrowth.requestEstimatedTokens > beforeGrowth.requestEstimatedTokens,
+    "replay cache keys include message content, not only stable ids",
+  );
 
   // --- #34: interrupted / error historical turns are compactable and batchable ---
   const turnInterrupted = "turn-interrupted";
@@ -345,7 +438,7 @@ function main() {
       {
         type: "function",
         function: {
-          name: "bash",
+          name: "shell",
           description: pad("tool-desc", 300),
           parameters: { type: "object", properties: {} },
         },
@@ -382,6 +475,19 @@ function main() {
     const block = interruptedBlocks.find((entry) => entry.turnId === turnId);
     assert(block && isCompactableReplayBlock(block, turnActive), `dropped ${turnId} must be batchable`);
   }
+
+  const legacyBlocks = buildReplayBlocks([
+    { ...makeUserMessage({ id: "legacy-u", turnId: "unused", content: "old request" }), turnId: undefined },
+    {
+      ...makeAssistantMessage({ id: "legacy-a", turnId: "unused", content: "old reply" }),
+      turnId: undefined,
+    },
+  ]);
+  assert(legacyBlocks.length === 1, "legacy messages without turn ids stay grouped as a turn");
+  assert(
+    isCompactableReplayBlock(legacyBlocks[0]!),
+    "legacy completed history remains eligible for compaction",
+  );
 
   const historyText = buildCompactionHistoryText(
     interruptedBlocks

@@ -6,7 +6,9 @@ export type ParsedToolPayload = {
   allowCustomAnswer?: boolean;
   answer?: string;
   afterContent?: string;
+  autoBackgrounded?: boolean;
   background?: boolean;
+  backgroundReason?: string | null;
   beforeContent?: string;
   bytesWritten?: number;
   combinedOutput?: string;
@@ -14,7 +16,7 @@ export type ParsedToolPayload = {
   choices?: string[];
   content?: string;
   created?: boolean;
-  currentItem?: TodoPayloadItem;
+  currentStep?: ImplementationPlanPayloadStep;
   cwd?: string;
   diffTruncated?: boolean;
   error?: string;
@@ -23,9 +25,7 @@ export type ParsedToolPayload = {
   limit?: number;
   latestOutput?: string | null;
   join?: string;
-  item?: string;
-  itemId?: string;
-  items?: Array<string | TodoPayloadItem>;
+  approaches?: Array<{ id?: string; summary?: string; title?: string }>;
   name?: string;
   kind?: string;
   mime?: string;
@@ -43,6 +43,8 @@ export type ParsedToolPayload = {
   recommended?: number;
   replacements?: number;
   status?: string;
+  steps?: ImplementationPlanPayloadStep[];
+  stopTurn?: boolean;
   summary?: string;
   task?: ParsedToolPayload | string;
   taskId?: string;
@@ -75,9 +77,10 @@ export type ProcessPayload = {
   stdoutTail?: string;
 };
 
-export type TodoPayloadItem = {
-  addedByTemplate?: boolean;
+export type ImplementationPlanPayloadStep = {
+  details?: string;
   id?: string;
+  kind?: string;
   status?: string;
   title?: string;
 };
@@ -88,7 +91,15 @@ export type ToolRunEntry = {
   detailLabel: string;
   id: string;
   isExpandable: boolean;
-  kind: "bash" | "clarify" | "edit" | "other" | "read" | "subagent" | "todo" | "write";
+  kind:
+    | "shell"
+    | "clarify"
+    | "edit"
+    | "implementation_plan"
+    | "other"
+    | "read"
+    | "subagent"
+    | "write";
   result?: ToolResult;
   resultPayload: ParsedToolPayload | null;
   resourceLabel?: string;
@@ -183,13 +194,13 @@ function buildRunDetailLabel(
         return "Editing a file";
       }
       return `Edited ${resourceLabel ?? "resource"}`;
-    case "bash": {
+    case "shell": {
       const callPayload = parseToolPayload(toolCall.input);
       const action = callPayload?.action ?? "run";
       if (action === "list_processes") return live ? "Checking background processes" : "Checked background processes";
       if (action === "read_process") return live ? "Checking a background process" : "Checked a background process";
       if (action === "stop_process") return live ? "Stopping a background process" : "Stopped a background process";
-      if (callPayload?.background === true || resultPayload?.background === true) {
+      if (callPayload?.type === "background" || resultPayload?.background === true) {
         return live ? "Starting a background process" : "Started a background process";
       }
       return live ? "Running a command" : "Ran a command";
@@ -212,17 +223,18 @@ function buildRunDetailLabel(
           return live ? "Managing a subagent" : "Managed a subagent";
       }
     }
-    case "todo": {
+    case "implementation_plan": {
       const action = parseToolPayload(toolCall.input)?.action ?? resultPayload?.action ?? "status";
-      if (live) return action === "status" ? "Checking TODO" : "Updating TODO";
+      if (live) return action === "status" ? "Reading implementation plan" : "Updating implementation plan";
       const labels: Record<string, string> = {
-        add: "Added a TODO item",
-        clear: "Cleared TODO",
-        create: "Created session TODO",
-        status: "Checked session TODO",
-        update: "Updated a TODO item",
+        complete_step: "Completed a plan step",
+        create: "Created implementation plan",
+        resume: "Started implementation plan",
+        revise: "Revised implementation plan",
+        start_step: "Started a plan step",
+        status: "Read implementation plan",
       };
-      return labels[action] ?? "Updated session TODO";
+      return labels[action] ?? "Updated implementation plan";
     }
     case "clarify": {
       const kind = parseToolPayload(toolCall.input)?.kind;
@@ -242,12 +254,12 @@ function resolveToolKind(toolName: string): ToolRunEntry["kind"] {
       return "write";
     case "edit":
       return "edit";
-    case "bash":
-      return "bash";
+    case "shell":
+      return "shell";
     case "subagent":
       return "subagent";
-    case "todo":
-      return "todo";
+    case "implementation_plan":
+      return "implementation_plan";
     case "clarify":
       return "clarify";
     default:
@@ -264,7 +276,7 @@ function isExpandableTool(
     return true;
   }
 
-  if (toolCall.name === "bash") {
+  if (toolCall.name === "shell") {
     return true;
   }
 
@@ -272,8 +284,8 @@ function isExpandableTool(
     return true;
   }
 
-  if (toolCall.name === "todo") {
-    return parseToolPayload(toolCall.input)?.action !== "clear";
+  if (toolCall.name === "implementation_plan") {
+    return true;
   }
 
   if (toolCall.name === "clarify") {
@@ -486,12 +498,21 @@ export function summarizeToolRuns(runs: ToolRunEntry[]) {
   const editedRuns = runs.filter(
     (run) => run.kind === "edit" || (run.kind === "write" && run.resultPayload?.created === false),
   );
-  const bashRuns = runs.filter((run) => run.kind === "bash");
+  const shellRuns = runs.filter((run) => run.kind === "shell");
   const subagentRuns = runs.filter((run) => run.kind === "subagent");
-  const todoRuns = runs.filter((run) => run.kind === "todo");
+  const planRuns = runs.filter((run) => run.kind === "implementation_plan");
   const clarifyRuns = runs.filter((run) => run.kind === "clarify");
   const otherRuns = runs.filter(
-    (run) => !["bash", "clarify", "edit", "read", "subagent", "todo", "write"].includes(run.kind),
+    (run) =>
+      ![
+        "shell",
+        "clarify",
+        "edit",
+        "implementation_plan",
+        "read",
+        "subagent",
+        "write",
+      ].includes(run.kind),
   );
   const summaryParts: string[] = [];
 
@@ -513,10 +534,10 @@ export function summarizeToolRuns(runs: ToolRunEntry[]) {
     summaryParts.push(`Edited ${pluralize(editedRuns.length, "file")}`);
   }
 
-  if (bashRuns.length === 1) {
+  if (shellRuns.length === 1) {
     summaryParts.push("Ran a command");
-  } else if (bashRuns.length > 1) {
-    summaryParts.push(`Ran ${pluralize(bashRuns.length, "command")}`);
+  } else if (shellRuns.length > 1) {
+    summaryParts.push(`Ran ${pluralize(shellRuns.length, "command")}`);
   }
 
   if (subagentRuns.length === 1) {
@@ -525,8 +546,8 @@ export function summarizeToolRuns(runs: ToolRunEntry[]) {
     summaryParts.push(`Managed ${pluralize(subagentRuns.length, "subagent")}`);
   }
 
-  if (todoRuns.length === 1) summaryParts.push(todoRuns[0]!.detailLabel);
-  else if (todoRuns.length > 1) summaryParts.push(`Updated ${pluralize(todoRuns.length, "TODO item")}`);
+  if (planRuns.length === 1) summaryParts.push(planRuns[0]!.detailLabel);
+  else if (planRuns.length > 1) summaryParts.push(`Updated ${pluralize(planRuns.length, "plan step")}`);
 
   if (clarifyRuns.length === 1) summaryParts.push(clarifyRuns[0]!.detailLabel);
   else if (clarifyRuns.length > 1) summaryParts.push(`Resolved ${pluralize(clarifyRuns.length, "clarification")}`);
@@ -546,12 +567,15 @@ export function extractLinkedFileFromToolResult(message: {
   if (
     message.status !== "done" ||
     !message.toolName ||
-    !["edit", "read", "write"].includes(message.toolName)
+    !["edit", "implementation_plan", "read", "write"].includes(message.toolName)
   ) {
     return null;
   }
 
   const payload = parseToolPayload(message.content);
+  if (message.toolName === "implementation_plan" && payload?.stopTurn !== true) {
+    return null;
+  }
   const path = payload?.path;
 
   if (!path) {
@@ -560,7 +584,9 @@ export function extractLinkedFileFromToolResult(message: {
 
   return {
     action:
-      message.toolName === "read"
+      message.toolName === "implementation_plan"
+        ? "plan"
+        : message.toolName === "read"
         ? "read"
         : message.toolName === "edit" || payload.created === false
           ? "edited"

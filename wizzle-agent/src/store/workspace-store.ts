@@ -43,6 +43,7 @@ import {
 } from "../lib/composer-session-queue";
 import {
   CONTEXT_CONTINUE_PROMPT,
+  shouldAutoContinueAfterExceptionalFinish,
 } from "../lib/agent/context-pressure";
 import { createDurablePersistFailureReporter } from "../lib/durable-persist-failure";
 import { getErrorMessage } from "../lib/settle-turn-persist";
@@ -52,14 +53,15 @@ import {
   isSessionAlreadyRunningError,
 } from "../lib/session-run-wake";
 import { resolveImageAttachmentHardFailError } from "../lib/image-capability";
-import { resolveEffectiveTokenizer } from "../lib/tokenizer-resolve";
-import { activateTokenizer } from "../lib/tokenizer-runtime";
 import {
   appendMessagePart,
   synchronizeMessageFromParts,
   updateMatchingMessagePart,
 } from "../lib/message-parts";
-import { buildTurnReplaySummary } from "../lib/context-budget";
+import {
+  buildTurnReplaySummary,
+  type ContextBudgetSnapshot,
+} from "../lib/context-budget";
 import {
   beginContextCompaction,
   completeContextCompaction,
@@ -77,12 +79,17 @@ import {
 } from "../lib/settle-turn-persist";
 import { resolveHydratedSessionSelection } from "../lib/session-selection";
 import {
-  clearSessionStreamErrorMap,
   formatStreamStepUserMessage,
-  setSessionStreamErrorMap,
   turnHasPartialAssistantContent,
-  type SessionStreamError,
 } from "../lib/stream-step-error";
+import {
+  applyFailedTurnRetryTranscript,
+  FAILED_TURN_MARKER_KEY,
+  prepareFailedTurnRetryTranscript,
+  recoverSessionStreamError,
+  type PersistedFailedTurnMarker,
+  type RecoverableSessionStreamError,
+} from "../lib/failed-turn-recovery";
 import { settleNonToolTurnMessage } from "../lib/settle-turn-status";
 import {
   closeWorkspaceSubagents,
@@ -112,6 +119,7 @@ import type {
   Project,
   ProviderInfo,
   ProviderModelInfo,
+  ProviderRetryStatus,
   Session,
   SessionEvent,
   ToolApprovalRequest,
@@ -120,6 +128,14 @@ import type {
   WorkspaceSnapshot,
 } from "../types/workspace";
 import { formatExactMessageTimestamp } from "../utils/time";
+import {
+  encodeReasoningSelection,
+  normalizeReasoningSelection,
+} from "../lib/reasoning-config";
+
+function normalizedReasoningValue(model: ProviderModelInfo | undefined, value?: string | null) {
+  return encodeReasoningSelection(normalizeReasoningSelection(value, model?.reasoning));
+}
 
 export type ChatErrorDetail =
   | {
@@ -151,11 +167,15 @@ interface WorkspaceState {
   sendingSessionIds: string[];
   /** Inline context compaction status per session (#81). */
   sessionContextStatus: Record<string, ContextCompactionStatus>;
+  /** Exact request budget published by the active agent run. */
+  sessionContextBudgets: Record<string, ContextBudgetSnapshot | undefined>;
+  /** Active bounded provider retry, shown inline for its owning session. */
+  sessionProviderRetries: Record<string, ProviderRetryStatus | undefined>;
   /**
    * Stream/step failure under the assistant bubble for this session (#19 C).
    * Cleared when the user sends another message.
    */
-  sessionStreamErrors: Record<string, SessionStreamError | undefined>;
+  sessionStreamErrors: Record<string, RecoverableSessionStreamError | undefined>;
   /**
    * Pending tool approvals keyed by session id.
    * Survive session switches; only the selected session's entry is shown in UI (#26/#28).
@@ -183,6 +203,7 @@ interface WorkspaceState {
   deleteSession: (projectId: string, sessionId: string) => Promise<void>;
   selectSession: (projectId: string, sessionId: string) => void;
   openFile: (fileId: string) => void;
+  openFileFromPath: (path: string, summary: string) => Promise<void>;
   closeFile: (fileId: string) => void;
   toggleSidebar: () => void;
   toggleFilePanel: () => void;
@@ -197,10 +218,13 @@ interface WorkspaceState {
   startMessageEdit: (edit: MessageEditState) => void;
   cancelMessageEdit: () => void;
   interruptPrompt: () => Promise<void>;
+  retryFailedTurn: (input: RetryFailedTurnInput) => Promise<SubmitPromptResult>;
   sendPrompt: (
     prompt: string,
     attachments?: PreviewFile[],
     options?: {
+      /** Internal continuation must compact its completed predecessor before streaming. */
+      forceCompaction?: boolean;
       projectId?: string;
       /** Re-run agent for an existing user message (I-11 trailing turn). */
       reuseUserMessageId?: string;
@@ -233,7 +257,7 @@ type PendingWorkflowQuestionResolver = {
   toolCallId: string;
 };
 
-type SubmitPromptResult =
+export type SubmitPromptResult =
   | { ok: true; accepted: true; turnId: string }
   | {
       ok: false;
@@ -245,10 +269,58 @@ type SubmitPromptResult =
     }
   | { ok: false; accepted: true; turnId: string; error: string; retryable?: boolean };
 
+export type RetryFailedTurnInput = {
+  /** Explicitly required so a different-model retry cannot run before selection. */
+  modelId: ModelId;
+  sessionId: string;
+  turnId: string;
+};
+
 /** Resolvers live for the whole wait; not cleared on session switch (#26). */
 const pendingToolApprovalResolversBySessionId = new Map<string, PendingToolApprovalResolver>();
 const pendingWorkflowQuestionResolversBySessionId = new Map<string, PendingWorkflowQuestionResolver>();
 const activeRunRequestIdsBySession = new Map<string, string>();
+const retryingFailedTurnSessionIds = new Set<string>();
+
+function clearSessionStreamErrorMap(
+  map: Record<string, RecoverableSessionStreamError | undefined>,
+  sessionId: string,
+) {
+  if (!sessionId || !(sessionId in map)) {
+    return map;
+  }
+
+  const next = { ...map };
+  delete next[sessionId];
+  return next;
+}
+
+function setSessionStreamErrorMap(
+  map: Record<string, RecoverableSessionStreamError | undefined>,
+  sessionId: string,
+  error: RecoverableSessionStreamError,
+) {
+  return sessionId ? { ...map, [sessionId]: error } : map;
+}
+
+function recoverLoadedSessionStreamErrors(
+  projects: Project[],
+  current: Record<string, RecoverableSessionStreamError | undefined>,
+) {
+  const next = { ...current };
+  for (const session of projects.flatMap((project) => project.sessions)) {
+    if (!session.messagesLoaded) {
+      continue;
+    }
+    const recovered = recoverSessionStreamError(session);
+    if (recovered) {
+      next[session.id] = recovered;
+    } else {
+      delete next[session.id];
+    }
+  }
+  return next;
+}
 
 function requestComposerQueueDrain(sessionId: string) {
   if (!sessionId) {
@@ -783,7 +855,7 @@ function resolveApprovalNotificationBody(request: ToolApprovalRequest) {
   }
 
   const toolName = request.toolName;
-  if (toolName === "bash") {
+  if (toolName === "shell") {
     return "Wizzle wants to run a command";
   }
 
@@ -977,6 +1049,29 @@ function prependPersistedSession(projects: Project[], projectId: string, session
   return nextProjects;
 }
 
+function setSessionProviderRetryMap(
+  current: Record<string, ProviderRetryStatus | undefined>,
+  sessionId: string,
+  status: ProviderRetryStatus | null,
+) {
+  const next = { ...current };
+  if (status) {
+    next[sessionId] = status;
+  } else {
+    delete next[sessionId];
+  }
+  return next;
+}
+
+function removeSessionContextBudget(
+  current: Record<string, ContextBudgetSnapshot | undefined>,
+  sessionId: string,
+) {
+  const next = { ...current };
+  delete next[sessionId];
+  return next;
+}
+
 async function persistWorkspaceSettingsForCurrentState() {
   const state = useWorkspaceStore.getState();
   const selectedSessionId = isDraftSessionSelection(state) ? null : state.selectedSessionId;
@@ -1003,7 +1098,6 @@ async function persistSelectedSessionModelSettings() {
     state.selectedSessionId,
   );
   const model = state.providerModels.find((entry) => entry.id === state.modelId);
-  const provider = state.providers.find((entry) => entry.id === model?.providerId);
   if (!session || !model) {
     return;
   }
@@ -1013,7 +1107,6 @@ async function persistSelectedSessionModelSettings() {
     reasoningLevel: state.reasoningLevel,
     selectedModelUuid: state.modelId,
     sessionId: state.selectedSessionId,
-    tokenizerKind: resolveEffectiveTokenizer(model, provider).kind,
   });
 }
 
@@ -1027,7 +1120,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   isFilePanelOpen: true,
   isSendingMessage: false,
   sendingSessionIds: [],
+  sessionContextBudgets: {},
   sessionContextStatus: {},
+  sessionProviderRetries: {},
   sessionStreamErrors: {},
   isSidebarOpen: true,
   loadingSessionId: null,
@@ -1066,12 +1161,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     set((state) => {
       const applied = applyWorkspaceSnapshotToState(state, snapshot);
       const nextSelectedSessionId = applied.selectedSessionId ?? null;
+      const nextProjects = applied.projects ?? state.projects;
       return {
         ...state,
         ...applied,
         activeMessageEdit: didChangeWorkspaceContext ? null : state.activeMessageEdit,
         chatError: didChangeWorkspaceContext ? null : state.chatError,
         chatErrorDetail: didChangeWorkspaceContext ? null : state.chatErrorDetail,
+        sessionStreamErrors: recoverLoadedSessionStreamErrors(
+          nextProjects,
+          state.sessionStreamErrors,
+        ),
         // Recompute selected-session busy flag after selection may change.
         ...withSendingSessionState(nextSelectedSessionId, state.sendingSessionIds),
         ...withPendingApprovalsState(nextSelectedSessionId, {}),
@@ -1259,13 +1359,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         ? persistedSession.modelId
         : currentState.modelId;
     const selectedModel = currentState.providerModels.find((model) => model.id === selectedModelId);
-    const selectedReasoningLevel =
-      persistedSession?.reasoningLevel &&
-      selectedModel?.reasoningLevels.includes(persistedSession.reasoningLevel)
-        ? persistedSession.reasoningLevel
-        : selectedModel?.reasoningLevels.includes(currentState.reasoningLevel)
-          ? currentState.reasoningLevel
-          : selectedModel?.reasoningLevels[0] ?? "";
+    const selectedReasoningLevel = normalizedReasoningValue(
+      selectedModel,
+      persistedSession?.reasoningLevel ?? currentState.reasoningLevel,
+    );
 
     // Do NOT reject pending approvals on switch — keep waiters alive and re-show on return (#26/#28).
 
@@ -1280,6 +1377,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       reasoningLevel: selectedReasoningLevel,
       selectedProjectId: projectId,
       selectedSessionId: sessionId,
+      sessionStreamErrors:
+        persistedSession?.messagesLoaded
+          ? (() => {
+              const recovered = recoverSessionStreamError(persistedSession);
+              return recovered
+                ? setSessionStreamErrorMap(state.sessionStreamErrors, sessionId, recovered)
+                : clearSessionStreamErrorMap(state.sessionStreamErrors, sessionId);
+            })()
+          : state.sessionStreamErrors,
       ...withSendingSessionState(sessionId, state.sendingSessionIds),
       ...withPendingApprovalsState(sessionId, state.pendingToolApprovalsBySessionId),
       pendingWorkflowQuestion: pendingWorkflowQuestionForSelection(
@@ -1321,6 +1427,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
                 : state.loadingSessionId,
             previewFiles: mergePreviewFiles(state.previewFiles, previewFiles),
             projects: nextProjects,
+            sessionStreamErrors: (() => {
+              const recovered = recoverSessionStreamError(mergedSession);
+              return recovered
+                ? setSessionStreamErrorMap(state.sessionStreamErrors, sessionId, recovered)
+                : clearSessionStreamErrorMap(state.sessionStreamErrors, sessionId);
+            })(),
           };
         });
       })
@@ -1349,6 +1461,40 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         ? state.openedFileIds
         : [...state.openedFileIds, fileId],
     })),
+  openFileFromPath: async (path, summary) => {
+    const current = useWorkspaceStore.getState();
+    const existing = current.previewFiles.find(
+      (file) => file.realPath === path || file.path === path,
+    );
+    if (existing) {
+      current.openFile(existing.id);
+      return;
+    }
+    const project = current.projects.find((entry) => entry.id === current.selectedProjectId);
+    if (!project) {
+      throw new Error("Wizzle could not resolve the selected project for this plan.");
+    }
+    const previews = await loadPreviewFilesFromPaths([
+      {
+        path,
+        projectId: project.id,
+        projectRoot: project.rootPath,
+        summary,
+      },
+    ]);
+    const preview = previews[0];
+    if (!preview) {
+      throw new Error("Wizzle could not load the implementation plan preview.");
+    }
+    set((state) => ({
+      activeFileId: preview.id,
+      isFilePanelOpen: true,
+      openedFileIds: state.openedFileIds.includes(preview.id)
+        ? state.openedFileIds
+        : [...state.openedFileIds, preview.id],
+      previewFiles: mergePreviewFiles(state.previewFiles, previews),
+    }));
+  },
   closeFile: (fileId) =>
     set((state) => {
       const openedFileIds = state.openedFileIds.filter((entry) => entry !== fileId);
@@ -1374,9 +1520,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   setModelId: (modelId) => {
     set((state) => {
       const selectedModel = state.providerModels.find((model) => model.id === modelId);
-      const reasoningLevel = selectedModel?.reasoningLevels.includes(state.reasoningLevel)
-        ? state.reasoningLevel
-        : selectedModel?.reasoningLevels[0] ?? "";
+      const reasoningLevel = normalizedReasoningValue(selectedModel, state.reasoningLevel);
       const projects =
         state.selectedProjectId && state.selectedSessionId && !isDraftSessionSelection(state)
           ? updatePersistedSession(
@@ -1428,9 +1572,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
       return {
         modelId,
-        reasoningLevel: selectedModel?.reasoningLevels.includes(state.reasoningLevel)
-          ? state.reasoningLevel
-          : selectedModel?.reasoningLevels[0] ?? "",
+        reasoningLevel: normalizedReasoningValue(selectedModel, state.reasoningLevel),
         providerModels: models,
         providerModelsError: null,
         providers,
@@ -1644,6 +1786,198 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       interruptWorkspaceChat({ sessionId }),
     ]);
   },
+  retryFailedTurn: async (input): Promise<SubmitPromptResult> => {
+    const state = useWorkspaceStore.getState();
+    const failure = state.sessionStreamErrors[input.sessionId];
+    if (!input.modelId.trim()) {
+      return {
+        accepted: false,
+        error: "Choose a model before retrying the reply.",
+        ok: false,
+      };
+    }
+    if (!failure || failure.turnId !== input.turnId) {
+      return {
+        accepted: false,
+        error: "That failed reply is no longer available to retry.",
+        ok: false,
+      };
+    }
+    if (
+      state.selectedSessionId !== input.sessionId ||
+      state.sendingSessionIds.includes(input.sessionId) ||
+      retryingFailedTurnSessionIds.has(input.sessionId)
+    ) {
+      return {
+        accepted: false,
+        error: "The chat is not ready to retry that reply.",
+        ok: false,
+      };
+    }
+
+    const selectedModel = state.providerModels.find((model) => model.id === input.modelId);
+    if (!selectedModel) {
+      return {
+        accepted: false,
+        error: "The selected model is no longer available.",
+        ok: false,
+      };
+    }
+
+    let projectId: string | null = null;
+    let session: Session | null = null;
+    for (const project of state.projects) {
+      const candidate = project.sessions.find((entry) => entry.id === input.sessionId);
+      if (candidate) {
+        projectId = project.id;
+        session = candidate;
+        break;
+      }
+    }
+    if (!projectId || !session?.messagesLoaded) {
+      return {
+        accepted: false,
+        error: "Wait for the failed chat to finish loading before retrying.",
+        ok: false,
+      };
+    }
+
+    const latestUserTurnId = [...session.messages]
+      .reverse()
+      .find((message) => message.role === "user")?.turnId;
+    if (latestUserTurnId !== input.turnId) {
+      return {
+        accepted: false,
+        error: "Only the latest failed reply can be retried safely.",
+        ok: false,
+      };
+    }
+
+    const prepared = prepareFailedTurnRetryTranscript(session.messages, input.turnId);
+    if (!prepared) {
+      return {
+        accepted: false,
+        error: "The original message for that reply is unavailable.",
+        ok: false,
+      };
+    }
+
+    const attachments = (prepared.userMessage.linkedFileIds ?? [])
+      .map((fileId) => state.previewFiles.find((file) => file.id === fileId))
+      .filter((file): file is PreviewFile => Boolean(file));
+    const imageAttachmentError = resolveImageAttachmentHardFailError(
+      selectedModel.capabilities,
+      attachments,
+    );
+    if (imageAttachmentError) {
+      return { accepted: false, error: imageAttachmentError, ok: false };
+    }
+    const reasoningLevel = normalizedReasoningValue(
+      selectedModel,
+      session.reasoningLevel ?? state.reasoningLevel,
+    );
+    // The backend refuses an empty keep set as a destructive guard. A
+    // non-existent id makes first-turn retry explicit without retaining the
+    // failed turn itself.
+    const durableKeepTurnIds =
+      prepared.keepTurnIds.length > 0
+        ? prepared.keepTurnIds
+        : [`turn-retry-retain-${crypto.randomUUID()}`];
+
+    retryingFailedTurnSessionIds.add(input.sessionId);
+    try {
+      if (!(await checkProjectRootExists(projectId))) {
+        return {
+          accepted: false,
+          error: "The project folder is no longer available.",
+          ok: false,
+        };
+      }
+      await updateSessionSelection({
+        permissionMode: session.permissionMode ?? state.permissionMode,
+        projectId,
+        reasoningLevel,
+        selectedModelUuid: input.modelId,
+        sessionId: input.sessionId,
+      });
+      await truncateSessionTranscriptToTurns({
+        keepTurnIds: durableKeepTurnIds,
+        sessionId: input.sessionId,
+      });
+
+      set((current) => {
+        const nextProjects = updatePersistedSession(
+          current.projects,
+          projectId as string,
+          input.sessionId,
+          (sessionEntry) => {
+            applyFailedTurnRetryTranscript(sessionEntry, prepared, {
+              modelId: input.modelId,
+              reasoningLevel,
+            });
+            sessionEntry.updatedAtLabel = nowLabel();
+            sessionEntry.updatedAtMs = Date.now();
+          },
+        );
+        const sessionContextStatus = { ...current.sessionContextStatus };
+        delete sessionContextStatus[input.sessionId];
+        return {
+          modelId: input.modelId,
+          projects: nextProjects ?? current.projects,
+          reasoningLevel,
+          sessionContextBudgets: removeSessionContextBudget(
+            current.sessionContextBudgets,
+            input.sessionId,
+          ),
+          sessionContextStatus,
+          sessionProviderRetries: setSessionProviderRetryMap(
+            current.sessionProviderRetries,
+            input.sessionId,
+            null,
+          ),
+        };
+      });
+
+      await appendOrUpdateMessage({
+        message: prepared.userMessage,
+        previewFiles: useWorkspaceStore.getState().previewFiles,
+        projectId,
+        sessionId: input.sessionId,
+      });
+      set((current) => {
+        const nextProjects = updatePersistedSession(
+          current.projects,
+          projectId as string,
+          input.sessionId,
+          (sessionEntry) => {
+            const userMessage = sessionEntry.messages.find(
+              (message) => message.id === prepared.userMessage.id,
+            );
+            if (userMessage) {
+              userMessage.isStored = true;
+            }
+          },
+        );
+        return nextProjects ? { projects: nextProjects } : current;
+      });
+
+      return await useWorkspaceStore.getState().sendPrompt(
+        prepared.userMessage.content,
+        attachments,
+        {
+          projectId,
+          reuseUserMessageId: prepared.userMessage.id,
+          sessionId: input.sessionId,
+        },
+      );
+    } catch (error) {
+      const message = getErrorMessage(error, "Wizzle could not prepare that reply for retry.");
+      set({ chatError: message, chatErrorDetail: null });
+      return { accepted: false, error: message, ok: false };
+    } finally {
+      retryingFailedTurnSessionIds.delete(input.sessionId);
+    }
+  },
   sendPrompt: async (prompt, attachments = [], options): Promise<SubmitPromptResult> => {
     const initialState = useWorkspaceStore.getState();
     const content = prompt.trim();
@@ -1731,11 +2065,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     }
     const initialProviderModel =
       initialState.providerModels.find((model) => model.id === initialState.modelId) ?? null;
-    const initialProvider = initialState.providers.find(
-      (provider) => provider.id === initialProviderModel?.providerId,
-    );
-    const initialTokenizer = resolveEffectiveTokenizer(initialProviderModel, initialProvider);
-
     const imageAttachmentError = resolveImageAttachmentHardFailError(
       initialProviderModel?.capabilities,
       attachments,
@@ -1845,6 +2174,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           projects: nextProjects,
           selectedProjectId: targetProjectId,
           selectedSessionId: targetSessionId,
+          sessionProviderRetries: setSessionProviderRetryMap(
+            setSessionProviderRetryMap(state.sessionProviderRetries, draftSessionId, null),
+            targetSessionId,
+            null,
+          ),
           sessionStreamErrors,
           ...withSendingSessionState(targetSessionId, sendingSessionIds),
         };
@@ -1936,6 +2270,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           chatErrorDetail: null,
           previewFiles: nextPreviewFiles,
           projects: nextProjects,
+          sessionProviderRetries: setSessionProviderRetryMap(
+            state.sessionProviderRetries,
+            targetSessionId as string,
+            null,
+          ),
           // #19 C: new send hides prior stream-step error under the bubble.
           sessionStreamErrors: clearSessionStreamErrorMap(
             state.sessionStreamErrors,
@@ -1986,6 +2325,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       set((state) => ({
         chatError: retryable ? state.chatError : message,
         chatErrorDetail: retryable ? state.chatErrorDetail : null,
+        sessionContextBudgets: removeSessionContextBudget(
+          state.sessionContextBudgets,
+          targetSessionId,
+        ),
         ...withSendingSessionState(
           state.selectedSessionId,
           removeSendingSessionId(targetSessionId, state.sendingSessionIds),
@@ -2055,7 +2398,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           reasoningLevel: sessionToPersist.reasoningLevel ?? currentPersistState.reasoningLevel,
           selectedModelUuid: sessionToPersist.selectedModelUuid ?? currentPersistState.modelId,
           sessionId: targetSessionId,
-          tokenizerKind: initialTokenizer.kind,
         });
       }
       // Edit: make SQL match in-memory truncation before the agent runs (#3/#57).
@@ -2125,9 +2467,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           attachments,
           chatId: titleSessionId,
           modelId: initialState.modelId,
+          modelReasoning: initialProviderModel?.reasoning,
           projectId: targetProjectId,
           prompt: content,
-          reasoningLevels: initialProviderModel?.reasoningLevels,
         })
           .then(async (generatedTitle) => {
             const nextTitle = normalizeGeneratedSessionTitle(generatedTitle, fallbackTitle);
@@ -2193,6 +2535,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       set((state) => ({
         chatError: message,
         chatErrorDetail: null,
+        sessionContextBudgets: removeSessionContextBudget(
+          state.sessionContextBudgets,
+          targetSessionId,
+        ),
         ...withSendingSessionState(
           state.selectedSessionId,
           removeSendingSessionId(targetSessionId, state.sendingSessionIds),
@@ -2224,9 +2570,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     let durablePersistChars = 0;
     let lastDurablePersistAt = Date.now();
     let durablePersistChain = Promise.resolve();
+    const dirtyMessageIds = new Set<string>();
     /** After settle starts, late stream writes must not race finalize (#4). */
     let turnSettled = false;
     let settledTurnPersistResult: SettledTurnPersistResult | null = null;
+    let activeRunModelId = initialState.modelId;
     const bufferedToolOutputByCallId = new Map<string, BufferedToolOutput>();
     let activeContentStepId: string | null = null;
     const streamStartedAssistantMessageIds = new Set<string>();
@@ -2297,35 +2645,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         .map((message) => message.id);
     };
 
-    const persistActiveTurnMessages = async () => {
-      if (!isActiveRunRequest()) {
-        return;
-      }
-
-      const state = useWorkspaceStore.getState();
-      const session = resolvePersistedSession(state.projects, targetProjectId, targetSessionId as string);
-
-      for (const message of session?.messages ?? []) {
-        if (message.turnId !== turnId) {
-          continue;
-        }
-
-        try {
-          await appendOrUpdateMessage({
-            message,
-            previewFiles: state.previewFiles,
-            projectId: targetProjectId,
-            sessionId: targetSessionId as string,
-          });
-        } catch (error) {
-          if (isTurnAlreadyFinalizedError(error) || turnSettled) {
-            continue;
-          }
-          handleMidStreamPersistFailure(error, "active_turn_messages");
-        }
-      }
-    };
-
     const reconcileEditedSessionIfNeeded = async () => {
       if (!activeMessageEdit) {
         return;
@@ -2368,6 +2687,26 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       }
     };
 
+    const persistDirtyMessages = async () => {
+      const messageIds = Array.from(dirtyMessageIds);
+      dirtyMessageIds.clear();
+
+      for (let index = 0; index < messageIds.length; index += 1) {
+        const messageId = messageIds[index];
+
+        try {
+          await persistMessageFromState(messageId);
+        } catch (error) {
+          // Preserve the failed item and everything not attempted. A later
+          // stream update or the settled-turn flush will retry the latest state.
+          for (let pendingIndex = index; pendingIndex < messageIds.length; pendingIndex += 1) {
+            dirtyMessageIds.add(messageIds[pendingIndex]);
+          }
+          throw error;
+        }
+      }
+    };
+
     const runDurablePersist = (reason: string) => {
       if (turnSettled) {
         return;
@@ -2379,21 +2718,26 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       durablePersistChain = durablePersistChain
         .catch(() => undefined)
         .then(() => {
-          if (turnSettled || !activeAssistantMessageId) {
+          if (turnSettled || dirtyMessageIds.size === 0) {
             return undefined;
           }
 
-          return persistMessageFromState(activeAssistantMessageId);
+          return persistDirtyMessages();
         })
         .catch((error) => {
           handleMidStreamPersistFailure(error, reason);
         });
     };
 
-    const persistMessageFromStateSoft = (messageId: string, reason: string) => {
-      void persistMessageFromState(messageId).catch((error) => {
-        handleMidStreamPersistFailure(error, reason);
-      });
+    const queueDurableMessagePersist = (
+      messageId: string,
+      reason: string,
+      flushImmediately = false,
+    ) => {
+      dirtyMessageIds.add(messageId);
+      if (flushImmediately) {
+        runDurablePersist(reason);
+      }
     };
 
     const noteDurableStreamProgress = (charCount: number) => {
@@ -2474,7 +2818,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
         return nextProjects ? { projects: nextProjects } : state;
       });
-      persistMessageFromStateSoft(messageId, "assistant_chunks_flushed");
+      queueDurableMessagePersist(messageId, "assistant_chunks_flushed");
       noteDurableStreamProgress(contentChunk.length);
       frontendLogger.debug("frontend.workspace", "assistant_chunks_flushed", {
         contentLength: contentChunk.length,
@@ -2560,9 +2904,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
         return nextProjects ? { projects: nextProjects } : state;
       });
-      void persistActiveTurnMessages().catch((error) => {
-        handleMidStreamPersistFailure(error, "tool_chunks_flushed");
-      });
+      for (const [toolCallId] of pendingToolOutputs) {
+        queueDurableMessagePersist(`message-tool-${toolCallId}`, "tool_chunks_flushed");
+      }
       noteDurableStreamProgress(
         pendingToolOutputs.reduce((total, [, buffer]) => total + buffer.combinedOutput.length, 0),
       );
@@ -2685,7 +3029,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
         return nextProjects ? { projects: nextProjects } : state;
       });
-      persistMessageFromStateSoft(message.id, "assistant_message_created");
+      queueDurableMessagePersist(message.id, "assistant_message_created", true);
       frontendLogger.info("frontend.workspace", "assistant_message_created", {
         messageIdLength: message.id.length,
         sessionIdLength: targetSessionId.length,
@@ -2766,7 +3110,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
         return nextProjects ? { projects: nextProjects } : state;
       });
-      persistMessageFromStateSoft(messageId, "assistant_stream_finished");
+      queueDurableMessagePersist(messageId, "assistant_stream_finished", true);
       frontendLogger.info("frontend.workspace", "assistant_stream_finished", {
         messageIdLength: messageId.length,
         sessionIdLength: targetSessionId.length,
@@ -2849,7 +3193,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
         return nextProjects ? { projects: nextProjects } : state;
       });
-      persistMessageFromStateSoft(messageId, "assistant_tool_calls_synced");
+      queueDurableMessagePersist(messageId, "assistant_tool_calls_synced", true);
       frontendLogger.info("frontend.workspace", "assistant_tool_calls_synced", {
         messageIdLength: messageId.length,
         sessionIdLength: targetSessionId.length,
@@ -2963,7 +3307,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
               projectId: targetProjectId,
               projectRoot: targetProjectRoot,
               summary:
-                linkedFile.action === "created"
+                linkedFile.action === "plan"
+                  ? "Implementation plan ready for review"
+                  : linkedFile.action === "created"
                   ? "Created during assistant turn"
                   : linkedFile.action === "edited"
                     ? "Edited during assistant turn"
@@ -3010,7 +3356,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           projects: nextProjects,
         };
       });
-      persistMessageFromStateSoft(messageToStore.id, "tool_message_appended");
+      queueDurableMessagePersist(messageToStore.id, "tool_message_appended", true);
       frontendLogger.info("frontend.workspace", "tool_message_appended", {
         messageIdLength: messageToStore.id.length,
         linkedFileCount: linkedFileIds.length,
@@ -3034,6 +3380,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       // Apply last buffered UI state before freezing stream writes.
       flushBufferedChunks();
       flushBufferedToolChunks();
+      clearPendingDurablePersist();
       turnSettled = true;
       activeAssistantMessageId = null;
       activeContentStepId = null;
@@ -3045,6 +3392,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           targetSessionId as string,
           (sessionEntry) => {
             const turnMessages = sessionEntry.messages.filter((message) => message.turnId === turnId);
+            const hadPartialContentAtFailure =
+              status === "error" &&
+              turnHasPartialAssistantContent(turnMessages, turnId);
             const assistantMessages = turnMessages.filter((message) => message.role === "assistant");
             const changedFileIdsForTurn = turnMessages
               .filter((message) => message.role === "tool")
@@ -3320,6 +3670,34 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
               }
             }
 
+            if (status === "error" && fallbackContent && lastAssistantMessage) {
+              let markerPart = [...(lastAssistantMessage.parts ?? [])]
+                .reverse()
+                .find((part) => part.type !== "reasoning");
+              if (!markerPart) {
+                markerPart = {
+                  content: "",
+                  createdAtMs: completedAtMs,
+                  id: createMessagePartId(lastAssistantMessage.id, "content"),
+                  status: "error",
+                  type: "content",
+                };
+                lastAssistantMessage.parts = appendMessagePart(
+                  lastAssistantMessage.parts,
+                  markerPart,
+                );
+              }
+              markerPart.metadata = {
+                ...(markerPart.metadata ?? {}),
+                [FAILED_TURN_MARKER_KEY]: {
+                  error: fallbackContent,
+                  hadPartialContent: hadPartialContentAtFailure,
+                  modelId: activeRunModelId,
+                  turnId,
+                } satisfies PersistedFailedTurnMarker,
+              };
+            }
+
             sessionEntry.updatedAtLabel = nowLabel();
             sessionEntry.updatedAtMs = completedAtMs;
           },
@@ -3499,15 +3877,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       if (!selectedProviderModel) {
         throw new Error("Choose a provider model before sending a message.");
       }
-
-      const selectedProvider = currentState.providers.find(
-        (provider) => provider.id === selectedProviderModel.providerId,
-      );
-      const effectiveTokenizer = resolveEffectiveTokenizer(
-        selectedProviderModel,
-        selectedProvider,
-      );
-      await activateTokenizer(effectiveTokenizer.localPath);
+      activeRunModelId = currentState.modelId;
 
       const agentRunResult = await runWorkspaceAgent({
         cancelToolApproval: (toolCallId) =>
@@ -3518,6 +3888,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         modelId: currentState.modelId,
         modelCapabilities: selectedProviderModel.capabilities,
         compactedContext: session.compactedContext ?? null,
+        forceCompaction: options?.forceCompaction,
         onAssistantChunk: ({ kind, text, messageId }) => {
           if (activeAssistantMessageId !== messageId) {
             activeAssistantMessageId = messageId;
@@ -3538,6 +3909,23 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           }
         },
         onAssistantCreated: beginAssistantMessage,
+        onAssistantReasoningReplay: (messageId, reasoningReplay) => {
+          set((state) => {
+            const nextProjects = updatePersistedSession(
+              state.projects,
+              targetProjectId,
+              targetSessionId as string,
+              (sessionEntry) => {
+                const message = sessionEntry.messages.find((entry) => entry.id === messageId);
+                if (message) {
+                  message.reasoningReplay = reasoningReplay;
+                }
+              },
+            );
+            return nextProjects ? { projects: nextProjects } : state;
+          });
+          queueDurableMessagePersist(messageId, "assistant_reasoning_replay_captured", true);
+        },
         onReasoningFinished: finishReasoningStep,
         onAssistantStreamFinished: finishAssistantStream,
         onAssistantToolCalls: syncAssistantToolCalls,
@@ -3569,37 +3957,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
               ),
             },
           }));
-          void upsertSessionEvent({
-            event,
-            sessionId: targetSessionId as string,
-          }).catch((error) => {
-            frontendLogger.error("frontend.workspace", "context_event_persist_failed", {
-              error,
-              phase: event.phase,
-              sessionIdLength: (targetSessionId as string).length,
-            });
-          });
           void setSessionRuntimeState(targetSessionId as string, "compacting").catch(() => undefined);
         },
         onCompactedContext: async (compactedContext) => {
-          let compactedSession: Session | null = null;
           const latestState = useWorkspaceStore.getState();
           const previousStatus = latestState.sessionContextStatus[targetSessionId as string];
-          const latestSession = resolvePersistedSession(
-            latestState.projects,
-            targetProjectId,
-            targetSessionId as string,
-          );
-          const existingEvent = previousStatus?.eventId
-            ? latestSession?.events?.find((entry) => entry.id === previousStatus.eventId)
-            : null;
-          const event = existingEvent
-            ? { ...existingEvent, phase: "compacted" as const, updatedAtMs: Date.now() }
-            : createContextCompactionEvent(
-                "compacted",
-                previousStatus?.afterMessageCount ??
-                  compactionAnchorMessageCount(latestSession?.messages ?? [], turnId),
-              );
           set((state) => {
             const nextProjects = updatePersistedSession(
               state.projects,
@@ -3607,56 +3969,127 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
               targetSessionId as string,
               (sessionEntry) => {
                 sessionEntry.compactedContext = compactedContext;
-                sessionEntry.events = upsertSessionEventInList(sessionEntry.events, event);
                 sessionEntry.updatedAtLabel = nowLabel();
                 sessionEntry.updatedAtMs = Date.now();
-                compactedSession = sessionEntry;
               },
             );
 
             return {
               ...(nextProjects ? { projects: nextProjects } : {}),
-              sessionContextStatus: {
-                ...state.sessionContextStatus,
-                [targetSessionId as string]: completeContextCompaction(
-                  state.sessionContextStatus[targetSessionId as string],
-                ),
-              },
             };
           });
 
-          void upsertSessionEvent({
-            event,
-            sessionId: targetSessionId as string,
-          }).catch((error) => {
-            frontendLogger.error("frontend.workspace", "context_event_persist_failed", {
-              error,
-              phase: event.phase,
-              sessionIdLength: (targetSessionId as string).length,
-            });
-          });
-
+          const compactedSession = resolvePersistedSession(
+            useWorkspaceStore.getState().projects,
+            targetProjectId,
+            targetSessionId as string,
+          );
           if (compactedSession) {
+            const sessionForPersistence: Session = {
+              ...compactedSession,
+              events: compactedSession.events?.filter(
+                (event) => event.id !== previousStatus?.eventId,
+              ),
+            };
             await createSessionIfNeeded({
               projectId: targetProjectId,
               selectedProjectId: targetProjectId,
               selectedSessionId: targetSessionId as string,
-              session: compactedSession,
+              session: sessionForPersistence,
             });
           }
         },
         onCompactionEnded: async (result) => {
           if (result === "compacted") {
+            let completedEvent: SessionEvent | null = null;
+            set((state) => {
+              const status = state.sessionContextStatus[targetSessionId as string];
+              const nextProjects = updatePersistedSession(
+                state.projects,
+                targetProjectId,
+                targetSessionId as string,
+                (sessionEntry) => {
+                  const existingEvent = status?.eventId
+                    ? sessionEntry.events?.find((entry) => entry.id === status.eventId)
+                    : null;
+                  completedEvent = existingEvent
+                    ? { ...existingEvent, phase: "compacted", updatedAtMs: Date.now() }
+                    : createContextCompactionEvent(
+                        "compacted",
+                        status?.afterMessageCount ??
+                          compactionAnchorMessageCount(sessionEntry.messages, turnId),
+                      );
+                  sessionEntry.events = upsertSessionEventInList(
+                    sessionEntry.events,
+                    completedEvent,
+                  );
+                },
+              );
+              return {
+                ...(nextProjects ? { projects: nextProjects } : {}),
+                sessionContextStatus: {
+                  ...state.sessionContextStatus,
+                  [targetSessionId as string]: completeContextCompaction(status),
+                },
+              };
+            });
+            if (completedEvent) {
+              try {
+                await upsertSessionEvent({
+                  event: completedEvent,
+                  sessionId: targetSessionId as string,
+                });
+              } catch (error) {
+                frontendLogger.error("frontend.workspace", "context_event_persist_failed", {
+                  error,
+                  phase: "compacted",
+                  sessionIdLength: (targetSessionId as string).length,
+                });
+              }
+            }
             void setSessionRuntimeState(targetSessionId as string, "busy").catch(() => undefined);
             return;
           }
 
           set((state) => {
             const next = { ...state.sessionContextStatus };
+            const eventId = next[targetSessionId as string]?.eventId;
             delete next[targetSessionId as string];
-            return { sessionContextStatus: next };
+            const nextProjects = updatePersistedSession(
+              state.projects,
+              targetProjectId,
+              targetSessionId as string,
+              (sessionEntry) => {
+                if (eventId) {
+                  sessionEntry.events = sessionEntry.events?.filter(
+                    (event) => event.id !== eventId,
+                  );
+                }
+              },
+            );
+            return {
+              ...(nextProjects ? { projects: nextProjects } : {}),
+              sessionContextStatus: next,
+            };
           });
           void setSessionRuntimeState(targetSessionId as string, "busy").catch(() => undefined);
+        },
+        onContextBudget: (snapshot) => {
+          set((state) => ({
+            sessionContextBudgets: {
+              ...state.sessionContextBudgets,
+              [targetSessionId as string]: snapshot,
+            },
+          }));
+        },
+        onProviderRetry: (status) => {
+          set((state) => ({
+            sessionProviderRetries: setSessionProviderRetryMap(
+              state.sessionProviderRetries,
+              targetSessionId as string,
+              status,
+            ),
+          }));
         },
         onToolChunk: appendToolChunk,
         onToolMessage: appendToolMessage,
@@ -3669,11 +4102,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
               targetSessionId as string,
               (sessionEntry) => {
                 sessionEntry.systemPromptHash = metadata.systemPromptHash;
+                sessionEntry.systemPromptTokens = metadata.systemPromptTokens;
                 sessionEntry.toolDefsHash = metadata.toolDefsHash;
                 sessionEntry.toolDefTokens = metadata.toolDefTokens;
-                if (metadata.tokenizerKind) {
-                  sessionEntry.tokenizerKind = metadata.tokenizerKind;
-                }
                 sessionEntry.updatedAtMs = Date.now();
                 sessionToPersist = sessionEntry;
               },
@@ -3694,9 +4125,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         permissionMode: currentState.permissionMode,
         previewFileMap: new Map(currentState.previewFiles.map((file) => [file.id, file] as const)),
         projectId: targetProjectId,
-        reasoningLevel: selectedProviderModel.reasoningLevels.includes(currentState.reasoningLevel)
-          ? currentState.reasoningLevel
-          : selectedProviderModel.reasoningLevels[0],
+        reasoningLevel: normalizedReasoningValue(
+          selectedProviderModel,
+          currentState.reasoningLevel,
+        ),
         requestToolApproval: (request) =>
           useWorkspaceStore.getState().requestToolApproval(request),
         requestWorkflowQuestions: (request) =>
@@ -3704,17 +4136,33 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         selectedModel: selectedProviderModel,
         turnSummaries: session.replayTurnSummaries ?? [],
         turnId,
-        tokenizerKind: effectiveTokenizer.kind,
       });
       settleTurn("done", "The model returned an empty response.");
       const persistResult = await awaitSettledTurnPersist();
       applySettledPersistOutcome(persistResult);
       await reconcileEditedSessionIfNeeded();
       await finishRuntimeRun();
+      const shouldAutoContinue = shouldAutoContinueAfterExceptionalFinish(
+        agentRunResult.finishReason,
+      );
+      // Queue and persist the internal continuation while the session still
+      // appears busy, so a user send cannot overtake it during this handoff.
+      if (shouldAutoContinue) {
+        await enqueueContextContinue(targetSessionId, CONTEXT_CONTINUE_PROMPT);
+        frontendLogger.info("frontend.workspace", "exceptional_continue_enqueued", {
+          finishReason: agentRunResult.finishReason,
+          sessionIdLength: targetSessionId.length,
+          turnIdLength: turnId.length,
+        });
+      }
       if (isActiveRunRequest()) {
         activeRunRequestIdsBySession.delete(targetSessionId);
       }
       set((state) => ({
+        sessionContextBudgets: removeSessionContextBudget(
+          state.sessionContextBudgets,
+          targetSessionId,
+        ),
         ...withSendingSessionState(
           state.selectedSessionId,
           removeSendingSessionId(targetSessionId, state.sendingSessionIds),
@@ -3726,15 +4174,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         status: "done",
         turnId,
       });
-      // After context pressure: one internal continue ahead of any user queue.
-      // Standard compaction for the oversized turn runs on the continue send.
-      if (agentRunResult.finishReason === "context_pressure") {
-        enqueueContextContinue(targetSessionId, CONTEXT_CONTINUE_PROMPT);
-        frontendLogger.info("frontend.workspace", "context_continue_enqueued", {
-          sessionIdLength: targetSessionId.length,
-          turnIdLength: turnId.length,
-        });
-      }
       requestComposerQueueDrain(targetSessionId);
       frontendLogger.info("frontend.workspace", "agent_run_completed", {
         finalizeError: persistResult?.finalizeError ?? null,
@@ -3766,6 +4205,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           activeRunRequestIdsBySession.delete(targetSessionId);
         }
         set((state) => ({
+          sessionContextBudgets: removeSessionContextBudget(
+            state.sessionContextBudgets,
+            targetSessionId,
+          ),
           ...withSendingSessionState(
             state.selectedSessionId,
             removeSendingSessionId(targetSessionId, state.sendingSessionIds),
@@ -3829,7 +4272,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         activeRunRequestIdsBySession.delete(targetSessionId);
       }
 
-      // #19 C: show under the assistant bubble (not a global banner); no mid-stream retry.
+      // #19 C: after bounded zero-output retries, show the final failure under the bubble.
       const settledSession = resolvePersistedSession(
         useWorkspaceStore.getState().projects,
         targetProjectId,
@@ -3846,8 +4289,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       set((state) => ({
         chatError: null,
         chatErrorDetail: null,
+        sessionContextBudgets: removeSessionContextBudget(
+          state.sessionContextBudgets,
+          targetSessionId,
+        ),
         sessionStreamErrors: setSessionStreamErrorMap(state.sessionStreamErrors, targetSessionId, {
+          hadPartialContent,
           message: streamErrorMessage,
+          modelId: activeRunModelId,
           turnId,
         }),
         ...withSendingSessionState(

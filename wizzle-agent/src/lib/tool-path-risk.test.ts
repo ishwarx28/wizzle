@@ -16,21 +16,21 @@ const writeWarning = createExternalPathWarning({
 });
 assertEqual(writeWarning?.kind, "external-path");
 
-const bashWarning = createExternalPathWarning({
+const shellWarning = createExternalPathWarning({
   command: "cat /etc/outside.txt",
   permissionMode: "full-access",
   projectRoot,
-  toolName: "bash",
+  toolName: "shell",
 });
-assertEqual(bashWarning?.kind, "external-path");
+assertEqual(shellWarning?.kind, "external-path");
 
-const bashTempWarning = createExternalPathWarning({
+const shellTempWarning = createExternalPathWarning({
   command: "cat /tmp/outside.txt",
   permissionMode: "full-access",
   projectRoot,
-  toolName: "bash",
+  toolName: "shell",
 });
-assertEqual(bashTempWarning?.kind, "external-path");
+assertEqual(shellTempWarning?.kind, "external-path");
 
 const writeTempWarning = createExternalPathWarning({
   path: "/tmp/outside.txt",
@@ -44,7 +44,7 @@ const devRedirectWarning = createExternalPathWarning({
   command: "rg TODO src 2>/dev/null",
   permissionMode: "full-access",
   projectRoot,
-  toolName: "bash",
+  toolName: "shell",
 });
 assertEqual(devRedirectWarning, undefined);
 
@@ -52,7 +52,7 @@ const devPrefixWarning = createExternalPathWarning({
   command: "cat /dev/fd/1",
   permissionMode: "full-access",
   projectRoot,
-  toolName: "bash",
+  toolName: "shell",
 });
 assertEqual(devPrefixWarning, undefined);
 
@@ -60,7 +60,7 @@ const grepPatternWarning = createExternalPathWarning({
   command: "grep '/api/users' src/routes.ts",
   permissionMode: "full-access",
   projectRoot,
-  toolName: "bash",
+  toolName: "shell",
 });
 assertEqual(grepPatternWarning, undefined);
 
@@ -68,7 +68,7 @@ const sedPatternWarning = createExternalPathWarning({
   command: "sed -n '/api/users/p' src/routes.ts",
   permissionMode: "full-access",
   projectRoot,
-  toolName: "bash",
+  toolName: "shell",
 });
 assertEqual(sedPatternWarning, undefined);
 
@@ -76,7 +76,7 @@ const findPatternWarning = createExternalPathWarning({
   command: "find . -path '/tmp/*' -print",
   permissionMode: "full-access",
   projectRoot,
-  toolName: "bash",
+  toolName: "shell",
 });
 assertEqual(findPatternWarning, undefined);
 
@@ -84,7 +84,7 @@ const projectWarning = createExternalPathWarning({
   command: "rg TODO src",
   permissionMode: "full-access",
   projectRoot,
-  toolName: "bash",
+  toolName: "shell",
 });
 assertEqual(projectWarning, undefined);
 
@@ -93,7 +93,7 @@ const cwdInsideWarning = createExternalPathWarning({
   cwd: "src",
   permissionMode: "full-access",
   projectRoot,
-  toolName: "bash",
+  toolName: "shell",
 });
 assertEqual(cwdInsideWarning, undefined);
 
@@ -102,7 +102,7 @@ const cwdOutsideWarning = createExternalPathWarning({
   cwd: "src",
   permissionMode: "full-access",
   projectRoot,
-  toolName: "bash",
+  toolName: "shell",
 });
 assertEqual(cwdOutsideWarning?.kind, "external-path");
 
@@ -120,7 +120,7 @@ const homeResolvedWarning = createExternalPathWarning({
       resolvedPath: "/Users/example/notes.txt",
     },
   ],
-  toolName: "bash",
+  toolName: "shell",
 });
 assertEqual(homeResolvedWarning?.kind, "external-path");
 
@@ -136,7 +136,7 @@ const unknownVariableWarning = createExternalPathWarning({
       resolvedPath: "/workspace/project/$SECRET_DIR/notes.txt",
     },
   ],
-  toolName: "bash",
+  toolName: "shell",
 });
 assertEqual(unknownVariableWarning?.kind, "external-path");
 
@@ -153,7 +153,7 @@ const unknownVariableSafeLookingWarning = createExternalPathWarning({
       resolvedPath: "/tmp/$SECRET_DIR/notes.txt",
     },
   ],
-  toolName: "bash",
+  toolName: "shell",
 });
 assertEqual(unknownVariableSafeLookingWarning?.kind, "external-path");
 
@@ -170,7 +170,7 @@ const complexVariableWarning = createExternalPathWarning({
       resolvedPath: "/workspace/project/${TARGET%/*}",
     },
   ],
-  toolName: "bash",
+  toolName: "shell",
 });
 assertEqual(complexVariableWarning?.kind, "external-path");
 
@@ -210,7 +210,7 @@ const sensitiveSymlinkReadWarning = createExternalPathWarning({
 });
 assertEqual(sensitiveSymlinkReadWarning?.kind, "sensitive-path");
 
-const sensitiveBashSymlinkWarning = createExternalPathWarning({
+const sensitiveShellSymlinkWarning = createExternalPathWarning({
   command: "cat linked-config",
   permissionMode: "full-access",
   projectRoot,
@@ -224,9 +224,9 @@ const sensitiveBashSymlinkWarning = createExternalPathWarning({
       resolvedPath: "/workspace/project/linked-config",
     },
   ],
-  toolName: "bash",
+  toolName: "shell",
 });
-assertEqual(sensitiveBashSymlinkWarning?.kind, "sensitive-path");
+assertEqual(sensitiveShellSymlinkWarning?.kind, "sensitive-path");
 
 const ordinaryExternalReadWarning = createExternalPathWarning({
   path: "/etc/hosts",

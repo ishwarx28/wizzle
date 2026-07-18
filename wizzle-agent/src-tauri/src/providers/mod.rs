@@ -3,9 +3,10 @@ mod crypto;
 mod google;
 mod native_transport;
 mod openai_compatible;
-mod repository;
-mod tokenizer_assets;
-mod types;
+pub(crate) mod reasoning;
+pub(crate) mod repository;
+mod retry;
+pub(crate) mod types;
 
 use futures_util::future::{AbortHandle, Abortable, Aborted};
 use serde_json::{json, Value};
@@ -15,27 +16,56 @@ use uuid::Uuid;
 
 use crate::agent::{AgentRuntimeState, SessionRuntimeStateKind};
 use crate::logging::log_desktop_event;
+use reasoning::ProviderReasoningSelection;
 use types::ProviderResolvedModel;
 
 pub use types::{
-    CancelProviderChatInput, DeleteProviderInput, ImportProviderYamlInput,
-    ProviderChatCompletionInput, ProviderChatStreamInput, ProviderModelPayload, ProviderPayload,
-    ReadTokenizerAssetInput, RefreshProviderModelsInput, UpsertProviderInput,
+    CancelProviderChatInput, DeleteProviderInput, ProviderChatCompletionInput,
+    ProviderChatStreamInput, ProviderModelPayload, ProviderPayload, RefreshProviderModelsInput,
+    UpsertProviderInput,
 };
 
 const INTERRUPTED_ERROR: &str = "__WIZZLE_PROVIDER_CHAT_INTERRUPTED__";
 
+fn resolved_reasoning_selection(
+    selection: Option<ProviderReasoningSelection>,
+    legacy_level: Option<String>,
+) -> Option<ProviderReasoningSelection> {
+    selection.or_else(|| {
+        legacy_level.map(|variant_id| ProviderReasoningSelection {
+            variant_id,
+            ..ProviderReasoningSelection::default()
+        })
+    })
+}
+
 async fn dispatch_completion(
     client: &reqwest::Client,
+    window: &Window,
+    request_id: &str,
     model: &ProviderResolvedModel,
     body: Value,
-    reasoning_level: Option<&str>,
+    reasoning_selection: Option<&ProviderReasoningSelection>,
 ) -> Result<String, String> {
     match model.provider.provider_type.as_str() {
-        "anthropic" => anthropic::complete_chat(client, model, body, reasoning_level).await,
-        "google" => google::complete_chat(client, model, body, reasoning_level).await,
+        "anthropic" => {
+            anthropic::complete_chat(client, window, request_id, model, body, reasoning_selection)
+                .await
+        }
+        "google" => {
+            google::complete_chat(client, window, request_id, model, body, reasoning_selection)
+                .await
+        }
         "openai" | "openai_compatible" | "custom_openai_compatible" => {
-            openai_compatible::complete_chat(client, model, body, reasoning_level).await
+            openai_compatible::complete_chat(
+                client,
+                window,
+                request_id,
+                model,
+                body,
+                reasoning_selection,
+            )
+            .await
         }
         _ => Err("This provider type is not supported.".to_string()),
     }
@@ -47,25 +77,29 @@ async fn dispatch_stream(
     request_id: &str,
     model: &ProviderResolvedModel,
     body: Value,
-    reasoning_level: Option<&str>,
+    reasoning_selection: Option<&ProviderReasoningSelection>,
 ) -> Result<(), String> {
     match model.provider.provider_type.as_str() {
         "anthropic" => {
-            anthropic::stream_chat(client, window, request_id, model, body, reasoning_level).await
+            anthropic::stream_chat(client, window, request_id, model, body, reasoning_selection)
+                .await
         }
         "google" => {
-            google::stream_chat(client, window, request_id, model, body, reasoning_level).await
+            google::stream_chat(client, window, request_id, model, body, reasoning_selection).await
         }
         "openai" | "openai_compatible" | "custom_openai_compatible" => {
-            openai_compatible::stream_chat(client, window, request_id, model, body, reasoning_level)
-                .await
+            openai_compatible::stream_chat(
+                client,
+                window,
+                request_id,
+                model,
+                body,
+                reasoning_selection,
+            )
+            .await
         }
         _ => Err("This provider type is not supported.".to_string()),
     }
-}
-
-pub fn migrate_provider_api_key_encryption() -> Result<usize, String> {
-    repository::migrate_provider_api_key_encryption()
 }
 
 #[derive(Default)]
@@ -113,19 +147,14 @@ pub fn list_provider_models() -> Result<Vec<ProviderModelPayload>, String> {
 
 #[tauri::command]
 pub async fn refresh_provider_models(
+    remote_config: State<'_, crate::remote_config::RemoteConfigState>,
     input: RefreshProviderModelsInput,
 ) -> Result<Vec<ProviderModelPayload>, String> {
-    repository::refresh_provider_models(input).await
-}
-
-#[tauri::command]
-pub fn import_provider_yaml(input: ImportProviderYamlInput) -> Result<(), String> {
-    repository::import_provider_yaml(input)
-}
-
-#[tauri::command]
-pub fn read_tokenizer_asset(input: ReadTokenizerAssetInput) -> Result<String, String> {
-    repository::read_tokenizer_asset(&input.path)
+    let definition = match repository::managed_config_id(&input.provider_id)? {
+        Some(config_id) => remote_config.managed_provider(&config_id)?,
+        None => None,
+    };
+    repository::refresh_provider_models(input, definition.as_ref()).await
 }
 
 #[tauri::command]
@@ -147,6 +176,8 @@ pub async fn complete_provider_chat(
         }),
     );
 
+    let reasoning_selection =
+        resolved_reasoning_selection(input.reasoning_selection, input.reasoning_level);
     let request_id = input
         .request_id
         .clone()
@@ -166,9 +197,11 @@ pub async fn complete_provider_chat(
     let completion_result = Abortable::new(
         dispatch_completion(
             &client,
+            &window,
+            &request_id,
             &resolved_model,
             input.body,
-            input.reasoning_level.as_deref(),
+            reasoning_selection.as_ref(),
         ),
         abort_registration,
     )
@@ -218,6 +251,8 @@ pub async fn stream_provider_chat(
             "reasoningLevel": input.reasoning_level,
         }),
     );
+    let reasoning_selection =
+        resolved_reasoning_selection(input.reasoning_selection, input.reasoning_level);
     let request_id = input.request_id.clone();
     let resolved_model = repository::resolve_model(&input.model_uuid)?;
     let client = openai_compatible::stream_client()?;
@@ -238,7 +273,7 @@ pub async fn stream_provider_chat(
             &request_id,
             &resolved_model,
             input.body,
-            input.reasoning_level.as_deref(),
+            reasoning_selection.as_ref(),
         ),
         abort_registration,
     )

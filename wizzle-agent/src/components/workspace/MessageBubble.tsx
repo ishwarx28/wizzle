@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, ChevronDown, ChevronRight, ChevronUp, Copy, FileCode2, FileImage, FileText, Pencil } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ChevronRight, ChevronUp, Copy, FileCode2, FileImage, FileText, Pencil, RefreshCw } from "lucide-react";
 
 import { MarkdownRenderer } from "../common/MarkdownRenderer";
 import { ToolActivityGroup } from "./ToolActivityGroup";
@@ -12,12 +12,20 @@ import {
   shouldShowWorkingPlaceholder,
 } from "../../lib/activity-disclosure";
 import { buildActivitySegments } from "../../lib/tool-activity";
+import { compactFailedTurnError } from "../../lib/failed-turn-recovery";
 import type { DisplayMessage, MessagePart, PreviewFile } from "../../types/workspace";
 import { copyText } from "../../utils/clipboard";
 import { formatExactMessageTimestamp } from "../../utils/time";
 
 interface MessageBubbleProps {
   canEditUserMessage: boolean;
+  failedTurnRecovery?: {
+    canChooseDifferentModel: boolean;
+    canRetry: boolean;
+    isRetrying: boolean;
+    onChooseDifferentModel: () => void;
+    onRetry: () => void;
+  };
   fileMap: Map<string, PreviewFile>;
   /** Stream/step failure for this turn (#19 C); cleared when user sends again. */
   inlineStreamError?: string | null;
@@ -196,6 +204,7 @@ function ReasoningWorkingItem() {
 
 export function MessageBubble({
   canEditUserMessage,
+  failedTurnRecovery,
   fileMap,
   inlineStreamError = null,
   isEditingUserMessage,
@@ -437,34 +446,39 @@ export function MessageBubble({
 
         {shouldShowLinkedFiles ? (
           <div className="mt-3 space-y-1.5">
-            {visibleLinkedFiles.map((file) => (
-              <button
-                className={[
-                  "flex w-full items-center justify-between gap-3 rounded-[20px] border border-[var(--color-border)] bg-[var(--color-panel-card)] px-3.5 py-3 text-left transition",
-                  isUser && isEditingUserMessage
-                    ? "cursor-default opacity-70"
-                    : "hover:border-[var(--color-border-strong)] hover:bg-[var(--color-panel-hover)]",
-                ].join(" ")}
-                disabled={isUser && isEditingUserMessage}
-                key={file.id}
-                onClick={() => onOpenFile(file.id)}
-              >
-                <div className="flex min-w-0 items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--color-panel-muted)] text-[var(--color-text)]">
-                    {fileIcon(file.kind)}
+            {visibleLinkedFiles.map((file) => {
+              const isImplementationPlan = file.name === "implementation-plan.md";
+              return (
+                <button
+                  className={[
+                    "flex w-full items-center justify-between gap-3 rounded-[20px] border border-[var(--color-border)] bg-[var(--color-panel-card)] px-3.5 py-3 text-left transition",
+                    isUser && isEditingUserMessage
+                      ? "cursor-default opacity-70"
+                      : "hover:border-[var(--color-border-strong)] hover:bg-[var(--color-panel-hover)]",
+                  ].join(" ")}
+                  disabled={isUser && isEditingUserMessage}
+                  key={file.id}
+                  onClick={() => onOpenFile(file.id)}
+                >
+                  <div className="flex min-w-0 items-center gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--color-panel-muted)] text-[var(--color-text)]">
+                      {fileIcon(file.kind)}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="truncate text-ui-tight font-medium text-[var(--color-text)]">
+                        {isImplementationPlan ? "Implementation plan" : file.name}
+                      </p>
+                      <p className="truncate text-meta-tight text-[var(--color-text-tertiary)]">
+                        {file.summary}
+                      </p>
+                    </div>
                   </div>
-                  <div className="min-w-0">
-                    <p className="truncate text-ui-tight font-medium text-[var(--color-text)]">
-                      {file.name}
-                    </p>
-                    <p className="truncate text-meta-tight text-[var(--color-text-tertiary)]">
-                      {file.summary}
-                    </p>
-                  </div>
-                </div>
-                <span className="text-meta-tight text-[var(--color-text-secondary)]">Open</span>
-              </button>
-            ))}
+                  <span className="text-meta-tight text-[var(--color-text-secondary)]">
+                    {isImplementationPlan ? "Read plan" : "Open"}
+                  </span>
+                </button>
+              );
+            })}
             {hiddenLinkedFileCount > 0 ? (
               <button
                 className="flex w-full items-center justify-center gap-1.5 rounded-xl px-3 py-1.5 text-meta-tight text-[var(--color-text-secondary)] transition hover:bg-[var(--color-panel-hover)] hover:text-[var(--color-text)]"
@@ -548,12 +562,47 @@ export function MessageBubble({
         {inlineStreamError ? (
           <div
             className={[
-              "mt-2 rounded-xl border border-[color-mix(in_srgb,var(--color-danger)_35%,var(--color-border))] bg-[color-mix(in_srgb,var(--color-danger)_8%,var(--color-panel))] px-3 py-2 text-ui text-[var(--color-danger)]",
+              "mt-1.5 flex min-h-8 items-center gap-1.5 rounded-xl border border-[color-mix(in_srgb,var(--color-danger)_35%,var(--color-border))] bg-[color-mix(in_srgb,var(--color-danger)_8%,var(--color-panel))] px-2 py-1 text-[12px] text-[var(--color-danger)]",
               isUser ? "text-right" : "",
             ].join(" ")}
             role="alert"
+            title={inlineStreamError}
           >
-            {inlineStreamError}
+            <AlertTriangle aria-hidden className="h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0 flex-1 truncate text-left">
+              {compactFailedTurnError(inlineStreamError)}
+            </span>
+            {failedTurnRecovery ? (
+              <div className="flex shrink-0 items-center gap-1">
+                <button
+                  aria-label="Retry failed turn with the same model"
+                  className="inline-flex h-6 items-center gap-1 rounded-lg px-1.5 font-medium text-[var(--color-danger)] transition hover:bg-[color-mix(in_srgb,var(--color-danger)_12%,transparent)] disabled:cursor-not-allowed disabled:opacity-55"
+                  disabled={
+                    failedTurnRecovery.isRetrying || !failedTurnRecovery.canRetry
+                  }
+                  onClick={failedTurnRecovery.onRetry}
+                  type="button"
+                >
+                  <RefreshCw
+                    aria-hidden
+                    className={`h-3 w-3 ${failedTurnRecovery.isRetrying ? "animate-spin" : ""}`}
+                  />
+                  {failedTurnRecovery.isRetrying ? "Retrying" : "Retry"}
+                </button>
+                <button
+                  aria-label="Retry failed turn with a different model"
+                  className="inline-flex h-6 items-center rounded-lg px-1.5 font-medium text-[var(--color-danger)] transition hover:bg-[color-mix(in_srgb,var(--color-danger)_12%,transparent)] disabled:cursor-not-allowed disabled:opacity-55"
+                  disabled={
+                    failedTurnRecovery.isRetrying ||
+                    !failedTurnRecovery.canChooseDifferentModel
+                  }
+                  onClick={failedTurnRecovery.onChooseDifferentModel}
+                  type="button"
+                >
+                  Different model
+                </button>
+              </div>
+            ) : null}
           </div>
         ) : null}
       </div>

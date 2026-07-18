@@ -116,7 +116,7 @@ function compactReadResultForStorage(record: Record<string, unknown>): Record<st
   return next;
 }
 
-function compactBashResultForStorage(record: Record<string, unknown>): Record<string, unknown> {
+function compactShellResultForStorage(record: Record<string, unknown>): Record<string, unknown> {
   const next = { ...record };
   for (const field of ["combinedOutput", "stdout", "stderr"] as const) {
     const value = typeof next[field] === "string" ? (next[field] as string) : "";
@@ -175,8 +175,8 @@ export function sanitizeToolResultContentForStorage(
   let nextRecord: Record<string, unknown>;
   if (toolName === "read" || record.imageSrc !== undefined || record.binary === true) {
     nextRecord = compactReadResultForStorage(record);
-  } else if (toolName === "bash") {
-    nextRecord = compactBashResultForStorage(record);
+  } else if (toolName === "shell") {
+    nextRecord = compactShellResultForStorage(record);
   } else {
     // Any tool: still drop data-URL imageSrc if present.
     nextRecord = omitImageSrcFromRecord(record).value;

@@ -1,4 +1,11 @@
-import type { ModelId, ToolCall } from "../../types/workspace";
+import type {
+  ModelId,
+  ProviderRetryStatus,
+  ReasoningReplayEntry,
+  ReasoningSelection,
+  ToolCall,
+} from "../../types/workspace";
+import { mergeReasoningReplayEntry } from "../reasoning-config";
 import {
   streamWorkspaceChat,
   type ChatRequestMessage,
@@ -9,16 +16,17 @@ import {
 type StreamedAgentTurn = {
   content: string;
   reasoning: string;
+  reasoningReplay: ReasoningReplayEntry[];
   toolCalls: OpenAIChatToolCall[];
 };
 
 const KNOWN_AGENT_TOOL_NAMES = new Set([
-  "bash",
+  "shell",
   "clarify",
   "edit",
+  "implementation_plan",
   "read",
   "subagent",
-  "todo",
   "write",
 ]);
 
@@ -56,8 +64,8 @@ function ensureToolCallEntry(toolCalls: OpenAIChatToolCall[], toolCallIndex: num
 
 /**
  * Merge tool-name stream fragments.
- * Supports token deltas ("ba"+"sh"), cumulative resends ("ba"→"bas"→"bash"),
- * and full-name repeats ("bash"+"bash") without concatenating duplicates (#22).
+ * Supports token deltas ("sh"+"ell"), cumulative resends ("sh"→"she"→"shell"),
+ * and full-name repeats ("shell"+"shell") without concatenating duplicates (#22).
  */
 export function mergeStreamedToolNameFragment(current: string, delta: string): string {
   if (!delta) {
@@ -194,7 +202,7 @@ export function normalizeStreamedToolCalls(
 
     if (!KNOWN_AGENT_TOOL_NAMES.has(name)) {
       items.push({
-        error: `Unknown tool name "${name}". Expected one of: bash, clarify, edit, read, subagent, todo, write.`,
+        error: `Unknown tool name "${name}". Expected one of: shell, clarify, edit, implementation_plan, read, subagent, write.`,
         kind: "invalid",
         toolCall: normalizedCall,
       });
@@ -236,12 +244,15 @@ export function resolveAgentTurnToolChoice(
 export async function streamAgentTurn(options: {
   chatId: string;
   conversation: ChatRequestMessage[];
+  maxTokens?: number;
   modelId: ModelId;
   onChunk: (chunk: { kind: "content" | "reasoning"; text: string }) => void;
   onReasoningFinished?: () => void;
+  onProviderRetry?: (status: ProviderRetryStatus | null) => void;
   onToolCalls?: (toolCalls: ToolCall[]) => void;
   projectId: string;
   reasoningLevel?: string | null;
+  reasoningSelection?: ReasoningSelection;
   streamKey?: string;
   toolChoice?: "auto" | "none";
   tools: ProxyToolDefinition[];
@@ -251,6 +262,7 @@ export async function streamAgentTurn(options: {
   const streamedTurn: StreamedAgentTurn = {
     content: "",
     reasoning: "",
+    reasoningReplay: [],
     toolCalls: [],
   };
   let lastToolCallPreviewSignature = "";
@@ -258,6 +270,7 @@ export async function streamAgentTurn(options: {
   await streamWorkspaceChat({
     chatId: options.chatId,
     history: options.conversation,
+    maxTokens: options.maxTokens,
     modelId: options.modelId,
     onChunk: (chunk) => {
       if (chunk.kind === "content" || chunk.kind === "reasoning") {
@@ -268,6 +281,14 @@ export async function streamAgentTurn(options: {
         }
 
         options.onChunk(chunk);
+        return;
+      }
+
+      if (chunk.kind === "reasoningReplay") {
+        streamedTurn.reasoningReplay = mergeReasoningReplayEntry(
+          streamedTurn.reasoningReplay,
+          chunk.entry,
+        );
         return;
       }
 
@@ -302,8 +323,10 @@ export async function streamAgentTurn(options: {
       }
     },
     onReasoningFinished: options.onReasoningFinished,
+    onRetry: options.onProviderRetry,
     projectId: options.projectId,
     reasoningLevel: options.reasoningLevel ?? undefined,
+    reasoningSelection: options.reasoningSelection,
     streamKey: options.streamKey,
     toolChoice: resolveAgentTurnToolChoice(options.tools, options.toolChoice),
     tools: options.tools,

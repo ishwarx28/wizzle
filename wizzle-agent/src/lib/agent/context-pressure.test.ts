@@ -6,12 +6,18 @@ export {};
 
 import type { Message } from "../../types/workspace.ts";
 
+const { createTestRemoteConfig } = await import("../remote-config.test-fixture.ts");
+const { installRemoteConfigForTests } = await import("../remote-config.ts");
+installRemoteConfigForTests(createTestRemoteConfig());
+
 const {
   CONTEXT_CONTINUE_PROMPT,
-  CONTEXT_PRESSURE_SYSTEM_PROMPT,
   containsRawToolSyntax,
   extractUserAndFinalMessages,
+  persistPendingImplementationPlanForContextContinuation,
   pickFinalAssistantMessage,
+  resolveContextPressureSystemPrompt,
+  shouldAutoContinueAfterExceptionalFinish,
   shouldEnterContextPressure,
 } = await import("./context-pressure.ts");
 
@@ -21,11 +27,22 @@ function assert(condition: unknown, message: string): asserts condition {
   }
 }
 
-function main() {
-  assert(CONTEXT_PRESSURE_SYSTEM_PROMPT.split("\n").length <= 5, "short system ≤5 lines");
-  assert(CONTEXT_PRESSURE_SYSTEM_PROMPT.includes("brief status"), "brief request is in system prompt");
-  assert(CONTEXT_PRESSURE_SYSTEM_PROMPT.includes("Do not call tools"), "tools disabled by prompt");
+async function main() {
+  const contextPressureSystemPrompt = resolveContextPressureSystemPrompt();
+  assert(contextPressureSystemPrompt.split("\n").length <= 5, "short system ≤5 lines");
+  assert(contextPressureSystemPrompt.includes("brief status"), "brief request is in system prompt");
+  assert(contextPressureSystemPrompt.includes("Do not call tools"), "tools disabled by prompt");
   assert(CONTEXT_CONTINUE_PROMPT.includes("Continue previous task"), "continue prompt");
+  assert(
+    shouldAutoContinueAfterExceptionalFinish("context_pressure") &&
+      shouldAutoContinueAfterExceptionalFinish("max_steps"),
+    "both exceptional limits continue after settle and compaction",
+  );
+  assert(
+    !shouldAutoContinueAfterExceptionalFinish("done") &&
+      !shouldAutoContinueAfterExceptionalFinish("interrupted"),
+    "normal completion and user interruption never auto-continue",
+  );
 
   assert(
     shouldEnterContextPressure({ usedToolsInTurn: true, code: "current_message_too_large" }),
@@ -41,6 +58,35 @@ function main() {
       code: "system_tool_prompt_too_large",
     }),
     "no pressure for fixed-cost overflow",
+  );
+
+  let persistCount = 0;
+  assert(
+    await persistPendingImplementationPlanForContextContinuation({
+      hasPendingPlan: true,
+      persistPlan: async () => {
+        persistCount += 1;
+      },
+    }),
+    "unfinished plan is preserved instead of blocking context continuation",
+  );
+  assert(persistCount === 1, "unfinished plan is persisted at the pressure boundary");
+  assert(
+    !(await persistPendingImplementationPlanForContextContinuation({
+      hasPendingPlan: false,
+      persistPlan: async () => {
+        persistCount += 1;
+      },
+    })),
+    "completed plan needs no pressure-boundary persistence",
+  );
+  assert(persistCount === 1, "completed plan does not trigger persistence");
+  assert(
+    !(await persistPendingImplementationPlanForContextContinuation({
+      hasPendingPlan: true,
+      persistPlan: async () => false,
+    })),
+    "failed plan persistence is reported instead of claimed as preserved",
   );
 
   const messages: Message[] = [
@@ -130,4 +176,4 @@ function main() {
   console.log("context-pressure tests passed");
 }
 
-main();
+await main();

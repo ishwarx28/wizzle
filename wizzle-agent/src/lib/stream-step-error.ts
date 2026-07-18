@@ -1,6 +1,7 @@
 /**
  * User-facing copy for provider stream / agent step failures (#19 approach C).
- * No mid-stream auto-retry; partial content stays, error is shown under the bubble.
+ * Zero-output transient failures are retried by the provider layer. Once any
+ * output exists, partial content stays and the error is shown under the bubble.
  */
 
 export type SessionStreamError = {
@@ -16,7 +17,7 @@ export function formatStreamStepUserMessage(
     error.trim() || "Wizzle could not complete the reply.";
 
   if (options.hadPartialContent) {
-    return `${base} Partial content is kept above. Send a new message to continue.`;
+    return `${base} Partial content is kept above.`;
   }
 
   return base;

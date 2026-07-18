@@ -8,6 +8,7 @@ import {
   CircleHelp,
   CircleX,
   Copy,
+  Download,
   Folder,
   FolderOpenDot,
   FolderPlus,
@@ -49,6 +50,7 @@ import { AboutDialog } from "../common/AboutDialog";
 import { FeedbackDialog } from "../common/FeedbackDialog";
 import { LogoMark } from "../common/LogoMark";
 import type { Session } from "../../types/workspace";
+import type { AvailableAppUpdate } from "../../lib/app-update";
 
 type DialogState =
   | { type: "about" }
@@ -120,7 +122,15 @@ function sessionTileColorClass(state: SessionTileState | null) {
   return "text-[var(--color-text-tertiary)]";
 }
 
-export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
+export function Sidebar({
+  availableUpdate,
+  onOpenProviders,
+  onOpenUpdate,
+}: {
+  availableUpdate: AvailableAppUpdate | null;
+  onOpenProviders?: () => void;
+  onOpenUpdate: () => void;
+}) {
   const draftSessions = useWorkspaceStore((state) => state.draftSessions);
   const projects = useWorkspaceStore((state) => state.projects);
   const pendingToolApprovalsBySessionId = useWorkspaceStore(
@@ -715,37 +725,53 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
         </div>
 
         <div className="border-t border-[var(--color-border)] px-3 py-3">
-          <button
-            className="flex w-full items-center gap-2.5 rounded-2xl px-1 py-1 text-left transition hover:bg-[var(--color-panel-hover)]"
-            data-sidebar-menu-trigger
-            onClick={(event) => {
-              const rect = event.currentTarget.getBoundingClientRect();
+          <div className="flex items-center rounded-2xl transition hover:bg-[var(--color-panel-hover)]">
+            <button
+              className="flex min-w-0 flex-1 items-center gap-2.5 rounded-2xl px-1 py-1 text-left"
+              data-sidebar-menu-trigger
+              onClick={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect();
 
-              if (menuKey === "settings") {
-                setMenu(null);
-                setIsThemeExpanded(false);
-                return;
-              }
+                if (menuKey === "settings") {
+                  setMenu(null);
+                  setIsThemeExpanded(false);
+                  return;
+                }
 
-              const sidebar = event.currentTarget.closest("aside");
-              const sidebarRect = sidebar?.getBoundingClientRect();
+                const sidebar = event.currentTarget.closest("aside");
+                const sidebarRect = sidebar?.getBoundingClientRect();
 
-              setMenu({
-                key: "settings",
-                x: sidebarRect ? sidebarRect.left + 14 : rect.left,
-                y: rect.top - 12,
-                align: "start",
-                vertical: "above",
-                width: sidebarRect ? Math.max(sidebarRect.width - 28, 248) : 248,
-              });
-            }}
-          >
-          <LogoMark className="h-9 w-9 shrink-0" />
-          <div className="min-w-0">
-            <p className="truncate text-ui-tight font-normal text-[var(--color-text)] mb-0.5">Wizzle</p>
-            <p className="text-meta-tight text-[var(--color-text-tertiary)]">Click for settings</p>
+                setMenu({
+                  key: "settings",
+                  x: sidebarRect ? sidebarRect.left + 14 : rect.left,
+                  y: rect.top - 12,
+                  align: "start",
+                  vertical: "above",
+                  width: sidebarRect ? Math.max(sidebarRect.width - 28, 248) : 248,
+                });
+              }}
+            >
+              <LogoMark className="h-9 w-9 shrink-0" />
+              <div className="min-w-0">
+                <p className="mb-0.5 truncate text-ui-tight font-normal text-[var(--color-text)]">
+                  Wizzle
+                </p>
+                <p className="text-meta-tight text-[var(--color-text-tertiary)]">
+                  Click for settings
+                </p>
+              </div>
+            </button>
+            {availableUpdate ? (
+              <button
+                className="mr-1 flex shrink-0 items-center gap-1.5 rounded-full bg-[var(--color-accent)] px-3 py-1.5 text-[12px] font-medium text-[var(--color-accent-foreground)] transition hover:bg-[var(--color-accent-hover)]"
+                onClick={onOpenUpdate}
+                type="button"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Update
+              </button>
+            ) : null}
           </div>
-          </button>
         </div>
       </aside>
 
@@ -891,7 +917,16 @@ export function Sidebar({ onOpenProviders }: { onOpenProviders?: () => void }) {
 
       {dialog?.type === "feedback" ? <FeedbackDialog onClose={closeDialog} /> : null}
 
-      {dialog?.type === "about" ? <AboutDialog onClose={closeDialog} /> : null}
+      {dialog?.type === "about" ? (
+        <AboutDialog
+          availableUpdate={availableUpdate}
+          onClose={closeDialog}
+          onOpenUpdate={() => {
+            closeDialog();
+            onOpenUpdate();
+          }}
+        />
+      ) : null}
 
       {dialog?.type === "rename-session" ? (
         <AppDialog

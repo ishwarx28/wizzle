@@ -27,46 +27,57 @@ use crate::{
 };
 
 const AGENT_TOOL_CHUNK_EVENT: &str = "agent-tool-chunk";
+const BACKGROUND_PROCESS_PERSIST_BYTES: usize = 32 * 1024;
+const BACKGROUND_PROCESS_PERSIST_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(250);
 const MAX_STREAM_CAPTURE_BYTES: usize = MAX_COMMAND_OUTPUT_BYTES / 2;
 const PROCESS_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
-enum BashAction {
+enum ShellAction {
     ListProcesses,
     ReadProcess,
     Run,
     StopProcess,
 }
 
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum ShellExecutionType {
+    Background,
+    Foreground,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct BashToolArguments {
-    action: Option<BashAction>,
-    background: Option<bool>,
+struct ShellToolArguments {
+    action: Option<ShellAction>,
     command: Option<String>,
     cwd: Option<String>,
     process_id: Option<String>,
     timeout: Option<ToolTimeout>,
+    #[serde(rename = "type")]
+    execution_type: ShellExecutionType,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentToolChunkPayload {
     chunk: String,
-    stream: BashOutputStream,
+    stream: ShellOutputStream,
     tool_call_id: String,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum BashOutputStream {
+enum ShellOutputStream {
     Stderr,
     Stdout,
 }
 
 struct OutputChunk {
-    stream: BashOutputStream,
+    stream: ShellOutputStream,
     text: String,
 }
 
@@ -84,7 +95,7 @@ struct ProcessCompletion {
     timed_out: bool,
 }
 
-pub(super) struct BashRunContext<'a> {
+pub(super) struct ShellRunContext<'a> {
     pub allow_external_paths: bool,
     pub runtime: &'a AgentRuntimeState,
     pub session_id: Option<&'a str>,
@@ -96,15 +107,15 @@ pub(super) struct BashRunContext<'a> {
 pub async fn run(
     project_root: PathBuf,
     arguments: Value,
-    context: BashRunContext<'_>,
+    context: ShellRunContext<'_>,
 ) -> Result<AgentToolRunPayload, String> {
-    let arguments: BashToolArguments = serde_json::from_value(arguments)
-        .map_err(|error| format!("Invalid arguments for bash: {error}"))?;
-    let action = arguments.action.unwrap_or(BashAction::Run);
+    let arguments: ShellToolArguments = serde_json::from_value(arguments)
+        .map_err(|error| format!("Invalid arguments for shell: {error}"))?;
+    let action = arguments.action.unwrap_or(ShellAction::Run);
 
     match action {
-        BashAction::Run => run_command(project_root, arguments, &context).await,
-        BashAction::ListProcesses => {
+        ShellAction::Run => run_command(project_root, arguments, &context).await,
+        ShellAction::ListProcesses => {
             let session_id = require_session_id(context.session_id)?;
             let processes = sqlite_repository::list_processes(session_id)?;
             Ok(output::success(json!({
@@ -112,7 +123,7 @@ pub async fn run(
                 "processes": processes,
             })))
         }
-        BashAction::ReadProcess => {
+        ShellAction::ReadProcess => {
             let session_id = require_session_id(context.session_id)?;
             let process_id = require_process_id(&arguments)?;
             let process = sqlite_repository::read_process(session_id, process_id)?;
@@ -121,7 +132,7 @@ pub async fn run(
                 "process": process,
             })))
         }
-        BashAction::StopProcess => {
+        ShellAction::StopProcess => {
             let session_id = require_session_id(context.session_id)?;
             let process_id = require_process_id(&arguments)?;
             let process = context
@@ -137,25 +148,25 @@ pub async fn run(
 }
 
 fn require_session_id(session_id: Option<&str>) -> Result<&str, String> {
-    session_id.ok_or_else(|| "A stored session is required for bash process actions.".to_string())
+    session_id.ok_or_else(|| "A stored session is required for shell process actions.".to_string())
 }
 
-fn require_process_id(arguments: &BashToolArguments) -> Result<&str, String> {
+fn require_process_id(arguments: &ShellToolArguments) -> Result<&str, String> {
     arguments
         .process_id
         .as_deref()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "The bash process action requires processId.".to_string())
+        .ok_or_else(|| "The shell process action requires processId.".to_string())
 }
 
-fn require_command(arguments: &BashToolArguments) -> Result<String, String> {
+fn require_command(arguments: &ShellToolArguments) -> Result<String, String> {
     arguments
         .command
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| "The bash run action requires command.".to_string())
+        .ok_or_else(|| "The shell run action requires command.".to_string())
 }
 
 fn command_looks_unsafe(command: &str) -> Option<&'static str> {
@@ -166,7 +177,7 @@ fn command_looks_unsafe(command: &str) -> Option<&'static str> {
         || normalized.contains(" setsid ")
         || normalized.ends_with('&')
     {
-        return Some("Use background: true instead of shell background syntax.");
+        return Some("Use shell type \"background\" instead of shell background syntax.");
     }
 
     for marker in [
@@ -184,6 +195,164 @@ fn command_looks_unsafe(command: &str) -> Option<&'static str> {
     ] {
         if normalized.contains(marker) {
             return Some("That command is too destructive to run from Wizzle.");
+        }
+    }
+
+    None
+}
+
+fn starts_with_command(value: &str, command: &str) -> bool {
+    value == command
+        || value
+            .strip_prefix(command)
+            .is_some_and(|rest| rest.starts_with(' '))
+}
+
+fn has_argument(value: &str, argument: &str) -> bool {
+    value.split_whitespace().any(|word| word == argument)
+}
+
+fn is_vite_server_command(value: &str, prefix: &str) -> bool {
+    if value == prefix {
+        return true;
+    }
+
+    let Some(arguments) = value
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_prefix(' '))
+    else {
+        return false;
+    };
+    let first = arguments.split_whitespace().next().unwrap_or_default();
+
+    matches!(first, "dev" | "preview" | "serve")
+        || first.starts_with("--host")
+        || first.starts_with("--port")
+}
+
+/// Conservative classifier for commands with no natural short-lived exit.
+/// False negatives fall back to the foreground timeout; avoid false positives
+/// because auto-backgrounding a finite command changes ordering semantics.
+fn persistent_command_reason(command: &str) -> Option<&'static str> {
+    let normalized = command
+        .to_ascii_lowercase()
+        .replace("&&", "\n")
+        .replace("||", "\n")
+        .replace(';', "\n");
+
+    for raw_segment in normalized.lines() {
+        let segment = raw_segment.split_whitespace().collect::<Vec<_>>().join(" ");
+        let segment = segment.trim_matches(|character| matches!(character, '(' | ')' | '{' | '}'));
+
+        if segment.is_empty()
+            || starts_with_command(segment, "timeout")
+            || has_argument(segment, "--help")
+            || has_argument(segment, "--version")
+        {
+            continue;
+        }
+
+        if [
+            "npm run dev",
+            "npm run preview",
+            "npm run serve",
+            "npm run watch",
+            "pnpm dev",
+            "pnpm preview",
+            "pnpm run dev",
+            "pnpm run preview",
+            "pnpm run serve",
+            "pnpm run watch",
+            "yarn dev",
+            "yarn preview",
+            "yarn run dev",
+            "yarn run preview",
+            "yarn run serve",
+            "yarn run watch",
+            "bun run dev",
+            "bun run preview",
+            "bun run serve",
+            "bun run watch",
+        ]
+        .iter()
+        .any(|prefix| starts_with_command(segment, prefix))
+        {
+            return Some("Detected a persistent package-script server or watcher.");
+        }
+
+        if ["vite", "npx vite", "pnpm exec vite", "bunx vite"]
+            .iter()
+            .any(|prefix| is_vite_server_command(segment, prefix))
+            || [
+                "next dev",
+                "npx next dev",
+                "nuxt dev",
+                "npx nuxt dev",
+                "astro dev",
+                "npx astro dev",
+                "webpack serve",
+                "webpack-dev-server",
+                "parcel serve",
+                "nodemon",
+                "cargo watch",
+                "dotnet watch",
+                "flask run",
+                "rails server",
+                "python -m http.server",
+                "python3 -m http.server",
+                "php -s",
+                "uvicorn",
+                "gunicorn",
+                "kubectl port-forward",
+            ]
+            .iter()
+            .any(|prefix| starts_with_command(segment, prefix))
+        {
+            return Some("Detected a persistent development server or watcher.");
+        }
+
+        let follows_output = [
+            "tail",
+            "journalctl",
+            "kubectl logs",
+            "docker logs",
+            "docker compose logs",
+            "docker-compose logs",
+        ]
+        .iter()
+        .any(|prefix| starts_with_command(segment, prefix))
+            && (has_argument(segment, "-f")
+                || has_argument(segment, "-F")
+                || has_argument(segment, "--follow"));
+        if follows_output {
+            return Some("Detected a command that follows output indefinitely.");
+        }
+
+        let compose_up = ["docker compose up", "docker-compose up"]
+            .iter()
+            .any(|prefix| starts_with_command(segment, prefix))
+            && !has_argument(segment, "-d")
+            && !has_argument(segment, "--detach");
+        if compose_up {
+            return Some("Detected attached Docker services intended to keep running.");
+        }
+
+        let watch_mode = [
+            "jest",
+            "npm test",
+            "pnpm test",
+            "yarn test",
+            "tsc",
+            "webpack",
+        ]
+        .iter()
+        .any(|prefix| starts_with_command(segment, prefix))
+            && (has_argument(segment, "--watch") || has_argument(segment, "--watchall"));
+        let vitest_watch = starts_with_command(segment, "vitest")
+            && !has_argument(segment, "run")
+            && !has_argument(segment, "--run");
+        if watch_mode || vitest_watch {
+            return Some("Detected a test or compiler watch mode.");
         }
     }
 
@@ -221,7 +390,7 @@ fn resolve_command_cwd(
 
     if !path.is_dir() {
         return Err(format!(
-            "The bash cwd {} is not a directory.",
+            "The shell cwd {} is not a directory.",
             path.display()
         ));
     }
@@ -257,7 +426,7 @@ fn append_with_limit(buffer: &mut String, chunk: &str, max_bytes: usize) -> bool
 async fn read_child_stream<T>(
     stream: Option<T>,
     sender: mpsc::UnboundedSender<OutputChunk>,
-    output_stream: BashOutputStream,
+    output_stream: ShellOutputStream,
 ) -> Result<(), io::Error>
 where
     T: tokio::io::AsyncRead + Unpin,
@@ -330,12 +499,12 @@ async fn collect_output(
     let stdout_task = tokio::spawn(read_child_stream(
         child.stdout.take(),
         sender.clone(),
-        BashOutputStream::Stdout,
+        ShellOutputStream::Stdout,
     ));
     let stderr_task = tokio::spawn(read_child_stream(
         child.stderr.take(),
         sender.clone(),
-        BashOutputStream::Stderr,
+        ShellOutputStream::Stderr,
     ));
     drop(sender);
 
@@ -366,14 +535,14 @@ async fn collect_output(
                         }
 
                         match chunk.stream {
-                            BashOutputStream::Stdout => {
+                            ShellOutputStream::Stdout => {
                                 stdout_truncated |= append_with_limit(
                                     &mut stdout,
                                     &chunk.text,
                                     MAX_STREAM_CAPTURE_BYTES,
                                 );
                             }
-                            BashOutputStream::Stderr => {
+                            ShellOutputStream::Stderr => {
                                 stderr_truncated |= append_with_limit(
                                     &mut stderr,
                                     &chunk.text,
@@ -429,8 +598,8 @@ async fn collect_output(
 
 async fn run_command(
     project_root: PathBuf,
-    arguments: BashToolArguments,
-    context: &BashRunContext<'_>,
+    arguments: ShellToolArguments,
+    context: &ShellRunContext<'_>,
 ) -> Result<AgentToolRunPayload, String> {
     let command = require_command(&arguments)?;
 
@@ -444,19 +613,24 @@ async fn run_command(
         context.allow_external_paths,
     )?;
 
-    if arguments.background.unwrap_or(false) {
+    let persistent_reason = persistent_command_reason(&command);
+    let auto_backgrounded =
+        arguments.execution_type == ShellExecutionType::Foreground && persistent_reason.is_some();
+    if arguments.execution_type == ShellExecutionType::Background || auto_backgrounded {
         let session_id = require_session_id(context.session_id)?;
         let lock = context.runtime.background_process_lock(session_id)?;
         let _guard = lock.lock().await;
-        return start_background_process(
-            session_id,
-            command,
+        return start_background_process(BackgroundProcessRequest {
+            auto_backgrounded,
+            background_reason: persistent_reason,
+            command_text: command,
             cwd,
-            context.window,
-            context.runtime,
-            context.turn_id,
-            context.tool_call_id,
-        )
+            runtime: context.runtime,
+            session_id,
+            tool_call_id: context.tool_call_id,
+            turn_id: context.turn_id,
+            window: context.window,
+        })
         .await;
     }
 
@@ -464,7 +638,7 @@ async fn run_command(
         .session_id
         .map(str::to_string)
         .unwrap_or_else(|| project_root.to_string_lossy().to_string());
-    let lock = context.runtime.foreground_bash_lock(&session_key)?;
+    let lock = context.runtime.foreground_shell_lock(&session_key)?;
     let _guard = lock.lock().await;
     execute_foreground(
         command,
@@ -536,7 +710,7 @@ async fn execute_foreground(
     if let Some(session_id) = session_id {
         if runtime.is_interrupted(session_id) {
             return Ok(AgentToolRunPayload {
-                error: Some("The bash tool was interrupted.".to_string()),
+                error: Some("The shell tool was interrupted.".to_string()),
                 output: Some(
                     json!({
                         "ok": false,
@@ -552,7 +726,7 @@ async fn execute_foreground(
 
     if collected_output.timed_out {
         return Ok(output::error_with_output(
-            format!("The bash tool timed out after {}.", timeout.label()),
+            format!("The shell tool timed out after {}.", timeout.label()),
             details,
         ));
     }
@@ -571,15 +745,32 @@ async fn execute_foreground(
     })))
 }
 
-async fn start_background_process(
-    session_id: &str,
+struct BackgroundProcessRequest<'a> {
+    auto_backgrounded: bool,
+    background_reason: Option<&'a str>,
     command_text: String,
     cwd: PathBuf,
-    window: &Window,
-    runtime: &AgentRuntimeState,
-    turn_id: Option<&str>,
-    tool_call_id: Option<&str>,
+    runtime: &'a AgentRuntimeState,
+    session_id: &'a str,
+    tool_call_id: Option<&'a str>,
+    turn_id: Option<&'a str>,
+    window: &'a Window,
+}
+
+async fn start_background_process(
+    request: BackgroundProcessRequest<'_>,
 ) -> Result<AgentToolRunPayload, String> {
+    let BackgroundProcessRequest {
+        auto_backgrounded,
+        background_reason,
+        command_text,
+        cwd,
+        runtime,
+        session_id,
+        tool_call_id,
+        turn_id,
+        window,
+    } = request;
     let mut command = build_shell_command(&command_text);
     command
         .current_dir(&cwd)
@@ -625,6 +816,8 @@ async fn start_background_process(
     Ok(output::success(json!({
         "ok": true,
         "background": true,
+        "autoBackgrounded": auto_backgrounded,
+        "backgroundReason": background_reason,
         "process": process,
     })))
 }
@@ -640,12 +833,12 @@ fn spawn_background_monitor(
         let stdout_task = tokio::spawn(read_child_stream(
             child.stdout.take(),
             sender.clone(),
-            BashOutputStream::Stdout,
+            ShellOutputStream::Stdout,
         ));
         let stderr_task = tokio::spawn(read_child_stream(
             child.stderr.take(),
             sender.clone(),
-            BashOutputStream::Stderr,
+            ShellOutputStream::Stderr,
         ));
         drop(sender);
 
@@ -657,29 +850,52 @@ fn spawn_background_monitor(
         });
         let mut wait_result: Option<ExitStatus> = None;
         let mut streams_closed = false;
+        let mut pending_stdout = String::new();
+        let mut pending_stderr = String::new();
+        let mut persist_interval = tokio::time::interval(BACKGROUND_PROCESS_PERSIST_INTERVAL);
+        persist_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // `interval` ticks immediately once; consume it so the first write is coalesced.
+        persist_interval.tick().await;
 
         while wait_result.is_none() || !streams_closed {
             tokio::select! {
                 maybe_chunk = receiver.recv(), if !streams_closed => {
                     match maybe_chunk {
                         Some(chunk) => {
-                            let update = match chunk.stream {
-                                BashOutputStream::Stdout => {
-                                    sqlite_repository::update_process_tails(&process_id, &chunk.text, "")
+                            match chunk.stream {
+                                ShellOutputStream::Stdout => {
+                                    pending_stdout.push_str(&chunk.text);
                                 }
-                                BashOutputStream::Stderr => {
-                                    sqlite_repository::update_process_tails(&process_id, "", &chunk.text)
+                                ShellOutputStream::Stderr => {
+                                    pending_stderr.push_str(&chunk.text);
                                 }
-                            };
+                            }
 
-                            if let Ok(process) = update {
-                                runtime.emit_process_update(&window, process);
+                            if pending_stdout.len().saturating_add(pending_stderr.len())
+                                >= BACKGROUND_PROCESS_PERSIST_BYTES
+                            {
+                                flush_background_process_output(
+                                    &process_id,
+                                    &mut pending_stdout,
+                                    &mut pending_stderr,
+                                    &window,
+                                    &runtime,
+                                );
                             }
                         }
                         None => {
                             streams_closed = true;
                         }
                     }
+                }
+                _ = persist_interval.tick(), if !pending_stdout.is_empty() || !pending_stderr.is_empty() => {
+                    flush_background_process_output(
+                        &process_id,
+                        &mut pending_stdout,
+                        &mut pending_stderr,
+                        &window,
+                        &runtime,
+                    );
                 }
                 result = &mut wait_task, if wait_result.is_none() => {
                     wait_result = result.ok().and_then(Result::ok);
@@ -689,6 +905,13 @@ fn spawn_background_monitor(
 
         let _ = stdout_task.await;
         let _ = stderr_task.await;
+        flush_background_process_output(
+            &process_id,
+            &mut pending_stdout,
+            &mut pending_stderr,
+            &window,
+            &runtime,
+        );
 
         let status = wait_result;
         let process = match status {
@@ -708,6 +931,28 @@ fn spawn_background_monitor(
     });
 }
 
+fn flush_background_process_output(
+    process_id: &str,
+    pending_stdout: &mut String,
+    pending_stderr: &mut String,
+    window: &Window,
+    runtime: &AgentRuntimeState,
+) {
+    if pending_stdout.is_empty() && pending_stderr.is_empty() {
+        return;
+    }
+
+    let Ok(process) =
+        sqlite_repository::update_process_tails(process_id, pending_stdout, pending_stderr)
+    else {
+        return;
+    };
+
+    pending_stdout.clear();
+    pending_stderr.clear();
+    runtime.emit_process_update(window, process);
+}
+
 #[allow(dead_code)]
 fn _serialize_process_for_tests(process: WorkspaceProcessPayload) -> Value {
     json!(process)
@@ -715,7 +960,7 @@ fn _serialize_process_for_tests(process: WorkspaceProcessPayload) -> Value {
 
 #[cfg(test)]
 mod safety_tests {
-    use super::command_looks_unsafe;
+    use super::{command_looks_unsafe, persistent_command_reason, ShellToolArguments};
 
     #[test]
     fn blocks_catastrophic_commands_but_allows_project_relative_deletion() {
@@ -740,6 +985,58 @@ mod safety_tests {
             assert!(
                 command_looks_unsafe(command).is_none(),
                 "expected project-relative deletion to be allowed: {command}",
+            );
+        }
+    }
+
+    #[test]
+    fn shell_execution_type_is_required() {
+        assert!(
+            serde_json::from_value::<ShellToolArguments>(serde_json::json!({
+                "action": "run",
+                "command": "git status"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ShellToolArguments>(serde_json::json!({
+                "action": "run",
+                "command": "git status",
+                "type": "foreground"
+            }))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn detects_only_high_confidence_persistent_commands() {
+        for command in [
+            "npm run dev",
+            "cd web && vite --host 0.0.0.0",
+            "python3 -m http.server 8000",
+            "tail -f server.log",
+            "docker compose up",
+            "npm test -- --watch",
+            "kubectl port-forward service/api 8080:80",
+        ] {
+            assert!(
+                persistent_command_reason(command).is_some(),
+                "expected persistent command: {command}",
+            );
+        }
+
+        for command in [
+            "npm run build",
+            "vite build",
+            "tail -n 20 server.log",
+            "docker compose up -d",
+            "vitest run",
+            "rg 'npm run dev' src",
+            "timeout 5 npm run dev",
+        ] {
+            assert!(
+                persistent_command_reason(command).is_none(),
+                "expected finite command: {command}",
             );
         }
     }

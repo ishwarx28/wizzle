@@ -1,11 +1,12 @@
-import { resolveExternalWebUrl } from "./external-url";
-
 export const clientEnv = __WIZZLE_ENV__;
 
 const DEFAULT_MAX_PROMPT_SIZE = 20_480;
 const DEFAULT_COMPACTED_CONTEXT_TOKENS = 5_120;
 const DEFAULT_OUTPUT_RESERVED_PERCENT = 10;
-const DEFAULT_HEALTHY_CONTEXT_PERCENT = 30;
+const DEFAULT_CONTEXT_SAFETY_PERCENT = 5;
+const DEFAULT_COMPACTION_TRIGGER_PERCENT = 80;
+const DEFAULT_POST_COMPACTION_TARGET_PERCENT = 60;
+const DEFAULT_ACTIVE_TURN_PRESSURE_PERCENT = 90;
 
 export function resolveMaxPromptSize() {
   const rawValue = clientEnv.WIZZLE_MAX_PROMPT_SIZE;
@@ -58,23 +59,34 @@ export function resolveOutputReservedPercent() {
 }
 
 export function resolveHealthyContextPercent() {
+  return resolvePostCompactionTargetPercent();
+}
+
+export function resolveContextSafetyPercent() {
   return resolvePercentEnv(
-    clientEnv.WIZZLE_HEALTHY_CONTEXT_PERCENT,
-    DEFAULT_HEALTHY_CONTEXT_PERCENT,
+    clientEnv.WIZZLE_CONTEXT_SAFETY_PERCENT,
+    DEFAULT_CONTEXT_SAFETY_PERCENT,
   );
 }
 
-function resolveContactEmail(value: string | undefined) {
-  const email = value?.trim() ?? "";
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : "";
+export function resolveCompactionTriggerPercent() {
+  return resolvePercentEnv(
+    clientEnv.WIZZLE_COMPACTION_TRIGGER_PERCENT,
+    DEFAULT_COMPACTION_TRIGGER_PERCENT,
+  );
 }
 
-export function resolveAboutConfig(env: WizzleClientEnv = clientEnv) {
-  return {
-    email: resolveContactEmail(env.WIZZLE_CONTACT_EMAIL),
-    githubUrl: resolveExternalWebUrl(env.WIZZLE_CONTACT_GITHUB_URL?.trim() ?? ""),
-    linkedinUrl: resolveExternalWebUrl(env.WIZZLE_CONTACT_LINKEDIN_URL?.trim() ?? ""),
-    name: env.WIZZLE_CONTACT_NAME?.trim() || "Wizzle",
-    version: env.WIZZLE_APP_VERSION?.trim() || "Unknown",
-  };
+export function resolvePostCompactionTargetPercent() {
+  return resolvePercentEnv(
+    clientEnv.WIZZLE_POST_COMPACTION_TARGET_PERCENT ??
+      clientEnv.WIZZLE_HEALTHY_CONTEXT_PERCENT,
+    DEFAULT_POST_COMPACTION_TARGET_PERCENT,
+  );
+}
+
+export function resolveActiveTurnPressurePercent() {
+  return resolvePercentEnv(
+    clientEnv.WIZZLE_ACTIVE_TURN_PRESSURE_PERCENT,
+    DEFAULT_ACTIVE_TURN_PRESSURE_PERCENT,
+  );
 }

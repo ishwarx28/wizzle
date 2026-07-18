@@ -1,104 +1,36 @@
 use reqwest::Url;
-use rusqlite::{params, Connection, OptionalExtension};
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
-use std::{collections::HashSet, fs, path::PathBuf, sync::Mutex};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
-use crate::workspace::sqlite_repository::{db_error, now_unix_ms, open_database};
+use crate::workspace::sqlite_repository::{
+    db_error, now_unix_ms, open_database, open_write_database,
+};
 
 use super::{
     anthropic,
-    crypto::{decrypt_api_key, encrypt_api_key, payload_needs_migration},
+    crypto::{decrypt_api_key, encrypt_api_key},
     google, openai_compatible,
-    tokenizer_assets::{
-        self, cleanup_provider_tokenizers, clear_tokenizer, materialize_tokenizer,
-        normalize_tokenizer_source, resolve_local_path_if_present, TokenizerScope,
+    reasoning::{
+        deserialize_reasoning_config, serialize_reasoning_config, validate_provider_request_fields,
+        validate_reasoning_config,
     },
     types::{
-        ImportProviderYamlInput, ProviderModelDefinitionInput, ProviderModelPayload,
-        ProviderModelRecord, ProviderPayload, ProviderResolvedModel, ProviderSecretRecord,
-        RefreshProviderModelsInput, UpsertProviderInput,
+        ManagedProviderDefinition, ProviderHeaderInput, ProviderModelDefinitionInput,
+        ProviderModelPayload, ProviderModelRecord, ProviderPayload, ProviderRequestFieldInput,
+        ProviderResolvedModel, ProviderSecretRecord, RefreshProviderModelsInput,
+        SetupManagedProviderInput, UpdateManagedProviderApiKeyInput, UpsertProviderInput,
     },
 };
 
-const DEFAULT_REASONING_LEVELS: &[&str] = &["low", "medium", "high", "max", "xhigh"];
-const PROVIDER_YAML_MAX_BYTES: usize = 512 * 1024;
-const PROVIDER_YAML_PATH_ENV: &str = "WIZZLE_PROVIDERS_YAML_PATH";
-const PROVIDER_YAML_INLINE_ENV: &str = "WIZZLE_PROVIDERS_YAML";
-const DEFAULT_PROVIDERS_YAML_NAME: &str = "opencode-models.yaml";
-static PROVIDER_STARTUP_IMPORT_LOCK: Mutex<()> = Mutex::new(());
-
-pub fn migrate_provider_api_key_encryption() -> Result<usize, String> {
-    let mut conn = open_database()?;
-    let encrypted_keys = {
-        let mut statement = conn
-            .prepare(
-                "SELECT id, api_key_encrypted FROM providers WHERE api_key_encrypted IS NOT NULL",
-            )
-            .map_err(|error| db_error("Could not prepare provider key migration", error))?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })
-            .map_err(|error| db_error("Could not read provider keys for migration", error))?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|error| db_error("Could not parse provider keys for migration", error))?
-    };
-    let migrations = encrypted_keys
-        .into_iter()
-        .filter(|(_, payload)| !payload.is_empty() && payload_needs_migration(payload))
-        .map(|(provider_id, payload)| {
-            let api_key = decrypt_api_key(Some(payload.clone()))?
-                .ok_or_else(|| "Could not migrate an empty provider API key.".to_string())?;
-            Ok((provider_id, payload, encrypt_api_key(&api_key)?))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-
-    if migrations.is_empty() {
-        return Ok(0);
-    }
-
-    let tx = conn
-        .transaction()
-        .map_err(|error| db_error("Could not start provider key migration", error))?;
-    let mut migration_count = 0;
-    for (provider_id, previous_payload, next_payload) in migrations {
-        migration_count += tx
-            .execute(
-                "UPDATE providers SET api_key_encrypted = ?1 WHERE id = ?2 AND api_key_encrypted = ?3",
-                params![next_payload, provider_id, previous_payload],
-            )
-        .map_err(|error| db_error("Could not migrate a provider key", error))?;
-    }
-    tx.commit()
-        .map_err(|error| db_error("Could not finish provider key migration", error))?;
-    Ok(migration_count)
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProviderYamlFile {
-    providers: Vec<ProviderYamlEntry>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProviderYamlEntry {
-    api_key: Option<String>,
-    default_model_id: Option<String>,
-    endpoint: String,
-    models: Option<Vec<ProviderModelDefinitionInput>>,
-    name: String,
-    only_specified_models: Option<bool>,
-    #[serde(alias = "type")]
-    provider_type: String,
-    tokenizer_json: Option<String>,
-}
+const MAX_CUSTOM_HEADERS: usize = 32;
+const MAX_HEADER_VALUE_BYTES: usize = 8 * 1024;
 
 fn normalize_provider_type(provider_type: &str) -> Option<&'static str> {
     match provider_type.trim().to_ascii_lowercase().as_str() {
-        "custom" | "custom_openai" | "custom-openai-compatible" => Some("custom_openai_compatible"),
+        "custom" | "custom_openai" | "custom-openai-compatible" | "custom_openai_compatible" => {
+            Some("custom_openai_compatible")
+        }
         "openai-compatible" | "openai_compatible" => Some("openai_compatible"),
         "openai" => Some("openai"),
         "anthropic" | "claude" => Some("anthropic"),
@@ -115,20 +47,17 @@ fn validate_provider_type(provider_type: &str) -> Result<String, String> {
         })
 }
 
-fn validate_endpoint(endpoint: &str) -> Result<String, String> {
+pub(crate) fn validate_endpoint(endpoint: &str) -> Result<String, String> {
     let endpoint = endpoint.trim().trim_end_matches('/').to_string();
-
     if endpoint.is_empty() {
         return Err("Provider endpoint is required.".to_string());
     }
 
     let url =
         Url::parse(&endpoint).map_err(|_| "Provider endpoint must be a valid URL.".to_string())?;
-
     if !url.username().is_empty() || url.password().is_some() {
         return Err("Provider endpoint must not include credentials.".to_string());
     }
-
     if url.query().is_some() || url.fragment().is_some() {
         return Err("Provider endpoint must not include a query or fragment.".to_string());
     }
@@ -155,232 +84,130 @@ fn validate_endpoint(endpoint: &str) -> Result<String, String> {
             "Provider endpoint must use HTTPS, except localhost development URLs.".to_string(),
         );
     }
-
     Ok(endpoint)
 }
 
-fn normalize_list(values: Option<Vec<String>>, defaults: &[&str]) -> Vec<String> {
-    let Some(values) = values else {
-        return defaults.iter().map(|entry| entry.to_string()).collect();
-    };
-    let mut normalized = Vec::new();
-
-    for value in values {
-        let trimmed = value.trim();
-        if trimmed.is_empty() || normalized.iter().any(|entry| entry == trimmed) {
-            continue;
-        }
-        normalized.push(trimmed.to_string());
+fn validate_optional_limit(value: Option<u64>, label: &str) -> Result<Option<i64>, String> {
+    if matches!(value, Some(0)) || value.is_some_and(|entry| entry > i64::MAX as u64) {
+        return Err(format!("{label} must be a positive supported integer."));
     }
-
-    normalized
+    Ok(value.map(|entry| entry as i64))
 }
 
 fn normalize_capabilities(capabilities: Option<Vec<String>>) -> Vec<String> {
-    let mut normalized = normalize_list(capabilities, &["text"]);
-
-    if !normalized.iter().any(|entry| entry == "text") {
+    let mut normalized = Vec::new();
+    for capability in capabilities.unwrap_or_else(|| vec!["text".to_string()]) {
+        let capability = capability.trim().to_ascii_lowercase();
+        if matches!(capability.as_str(), "text" | "image" | "audio" | "video")
+            && !normalized.contains(&capability)
+        {
+            normalized.push(capability);
+        }
+    }
+    if !normalized.iter().any(|value| value == "text") {
         normalized.insert(0, "text".to_string());
     }
-
     normalized
 }
 
-fn serialize_string_list(values: &[String]) -> Result<String, String> {
-    serde_json::to_string(values).map_err(|_| "Could not save provider model metadata.".to_string())
-}
-
-fn deserialize_string_list(raw_value: String, fallback: &[&str]) -> Vec<String> {
-    serde_json::from_str::<Vec<String>>(&raw_value)
-        .unwrap_or_else(|_| fallback.iter().map(|entry| entry.to_string()).collect())
-}
-
-fn source_hash(source: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(source.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
-fn validate_yaml_source(source: &str) -> Result<(), String> {
-    if source.len() > PROVIDER_YAML_MAX_BYTES {
-        return Err("Provider YAML is too large.".to_string());
+pub(crate) fn normalize_headers(
+    headers: Vec<ProviderHeaderInput>,
+) -> Result<Vec<ProviderHeaderInput>, String> {
+    if headers.len() > MAX_CUSTOM_HEADERS {
+        return Err(format!(
+            "A provider can define at most {MAX_CUSTOM_HEADERS} custom headers."
+        ));
     }
-
-    Ok(())
-}
-
-fn candidate_yaml_paths(raw_path: &str) -> Vec<PathBuf> {
-    let path = PathBuf::from(raw_path);
-
-    if path.is_absolute() {
-        return vec![path];
-    }
-
-    let mut candidates = Vec::new();
-
-    if let Ok(current_dir) = std::env::current_dir() {
-        candidates.push(current_dir.join(&path));
-        candidates.push(current_dir.join("..").join(&path));
-        candidates.push(current_dir.join("..").join("..").join(&path));
-    }
-
-    candidates
-}
-
-fn read_provider_yaml_path(raw_path: &str) -> Result<String, String> {
-    let trimmed_path = raw_path.trim();
-
-    if trimmed_path.is_empty() {
-        return Err("Provider YAML path is empty.".to_string());
-    }
-
-    for path in candidate_yaml_paths(trimmed_path) {
-        if !path.is_file() {
-            continue;
+    let mut names = HashSet::new();
+    let mut normalized = Vec::with_capacity(headers.len());
+    for header in headers {
+        let name = header.name.trim().to_string();
+        let value = header.value.trim().to_string();
+        if name.is_empty()
+            || !name.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        byte,
+                        b'!' | b'#'
+                            | b'$'
+                            | b'%'
+                            | b'&'
+                            | b'\''
+                            | b'*'
+                            | b'+'
+                            | b'-'
+                            | b'.'
+                            | b'^'
+                            | b'_'
+                            | b'`'
+                            | b'|'
+                            | b'~'
+                    )
+            })
+        {
+            return Err("Custom header names must use valid HTTP token characters.".to_string());
         }
-
-        let metadata = fs::metadata(&path)
-            .map_err(|_| "Could not read provider YAML metadata.".to_string())?;
-
-        if metadata.len() as usize > PROVIDER_YAML_MAX_BYTES {
-            return Err("Provider YAML is too large.".to_string());
+        if value.len() > MAX_HEADER_VALUE_BYTES || value.contains(['\r', '\n']) {
+            return Err(format!("Custom header {name} has an invalid value."));
         }
-
-        return fs::read_to_string(&path)
-            .map_err(|_| "Could not read provider YAML file.".to_string());
+        let lower_name = name.to_ascii_lowercase();
+        if matches!(
+            lower_name.as_str(),
+            "connection" | "content-length" | "host" | "transfer-encoding"
+        ) {
+            return Err(format!("Custom header {name} is managed by Wizzle."));
+        }
+        if !names.insert(lower_name) {
+            return Err(format!("Custom header {name} is listed more than once."));
+        }
+        normalized.push(ProviderHeaderInput { name, value });
     }
-
-    Err("Provider YAML file was not found.".to_string())
+    Ok(normalized)
 }
 
-fn insert_or_update_model(
-    conn: &Connection,
-    provider_id: &str,
-    model: ProviderModelRecord,
-) -> Result<(), String> {
-    let now = now_unix_ms() as i64;
-    let model_uuid = Uuid::new_v4().to_string();
-    let capabilities = serialize_string_list(&model.capabilities)?;
-    let reasoning_levels = serialize_string_list(&model.reasoning_levels)?;
-    let tokenizer_json = normalize_tokenizer_source(model.tokenizer_json.clone());
-    let tokenizer_kind = model
-        .tokenizer_kind
-        .clone()
-        .or_else(|| tokenizer_json.as_ref().map(|_| "hf-json".to_string()));
-
-    conn.execute(
-        "
-        INSERT INTO models (
-          id,
-          provider_id,
-          model_id,
-          display_name,
-          capabilities,
-          reasoning_levels,
-          max_context,
-          max_output_tokens,
-          tokenizer_kind,
-          tokenizer_json,
-          created_at,
-          updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-        ON CONFLICT(provider_id, model_id) DO UPDATE SET
-          display_name = excluded.display_name,
-          capabilities = excluded.capabilities,
-          reasoning_levels = excluded.reasoning_levels,
-          max_context = excluded.max_context,
-          max_output_tokens = excluded.max_output_tokens,
-          tokenizer_kind = excluded.tokenizer_kind,
-          tokenizer_json = excluded.tokenizer_json,
-          updated_at = excluded.updated_at
-        ",
-        params![
-            model_uuid,
-            provider_id,
-            model.model_id,
-            model.display_name,
-            capabilities,
-            reasoning_levels,
-            model.max_context.map(|value| value as i64).unwrap_or(0),
-            model.max_output_tokens.map(|value| value as i64),
-            tokenizer_kind,
-            tokenizer_json,
-            now,
-            now
-        ],
-    )
-    .map_err(|error| db_error("Could not save provider model", error))?;
-
-    Ok(())
+fn normalize_request_fields(
+    fields: Vec<ProviderRequestFieldInput>,
+) -> Result<Vec<ProviderRequestFieldInput>, String> {
+    let fields = fields
+        .into_iter()
+        .map(|field| ProviderRequestFieldInput {
+            path: field.path.trim().to_string(),
+            value: field.value,
+        })
+        .collect::<Vec<_>>();
+    validate_provider_request_fields(&fields)?;
+    Ok(fields)
 }
 
-fn insert_discovered_model(
-    conn: &Connection,
-    provider_id: &str,
-    model: ProviderModelRecord,
-) -> Result<(), String> {
-    let now = now_unix_ms() as i64;
-    conn.execute(
-        "
-        INSERT OR IGNORE INTO models (
-          id, provider_id, model_id, display_name, capabilities, reasoning_levels,
-          max_context, max_output_tokens, tokenizer_kind, tokenizer_json, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, 0, NULL, NULL, NULL, ?6, ?6)
-        ",
-        params![
-            Uuid::new_v4().to_string(),
-            provider_id,
-            model.model_id,
-            serialize_string_list(&model.capabilities)?,
-            serialize_string_list(&model.reasoning_levels)?,
-            now,
-        ],
-    )
-    .map_err(|error| db_error("Could not save discovered provider model", error))?;
-    Ok(())
+fn serialize_json<T: serde::Serialize>(value: &T, context: &str) -> Result<String, String> {
+    serde_json::to_string(value).map_err(|_| format!("Could not save {context}."))
 }
 
-fn sync_model_tokenizer_asset(
-    provider_id: &str,
-    model_id: &str,
-    tokenizer_json: Option<&str>,
-) -> Result<(), String> {
-    let scope = TokenizerScope::Model { model_id };
-    match normalize_tokenizer_source(tokenizer_json.map(|value| value.to_string())) {
-        Some(source) => {
-            materialize_tokenizer(provider_id, scope, &source)?;
-        }
-        None => {
-            clear_tokenizer(provider_id, scope)?;
-        }
-    }
-    Ok(())
+fn deserialize_json<T: serde::de::DeserializeOwned + Default>(raw: String) -> T {
+    serde_json::from_str(&raw).unwrap_or_default()
 }
 
-fn sync_provider_tokenizer_asset(
-    provider_id: &str,
-    tokenizer_json: Option<&str>,
-) -> Result<(), String> {
-    match normalize_tokenizer_source(tokenizer_json.map(|value| value.to_string())) {
-        Some(source) => {
-            materialize_tokenizer(provider_id, TokenizerScope::Provider, &source)?;
-        }
-        None => {
-            clear_tokenizer(provider_id, TokenizerScope::Provider)?;
-        }
-    }
-    Ok(())
+fn reasoning_levels(model: &ProviderModelRecord) -> Vec<String> {
+    model
+        .reasoning
+        .as_ref()
+        .map(|config| {
+            config
+                .variants
+                .iter()
+                .map(|variant| variant.id.clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
-pub fn model_from_definition(
+fn model_from_definition(
     input: ProviderModelDefinitionInput,
 ) -> Result<ProviderModelRecord, String> {
     let model_id = input.model_id.trim().to_string();
-
     if model_id.is_empty() {
         return Err("Provider model id is required.".to_string());
     }
-
     for (label, value) in [
         ("Max context", input.max_context),
         ("Max output tokens", input.max_output_tokens),
@@ -391,69 +218,94 @@ pub fn model_from_definition(
             ));
         }
     }
-
-    let tokenizer_json = normalize_tokenizer_source(input.tokenizer_json);
-    let tokenizer_kind = input
-        .tokenizer_kind
-        .and_then(|value| {
-            let trimmed = value.trim().to_string();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
-        })
-        .or_else(|| tokenizer_json.as_ref().map(|_| "hf-json".to_string()));
-
+    let reasoning = validate_reasoning_config(input.reasoning)?;
     Ok(ProviderModelRecord {
         capabilities: normalize_capabilities(input.capabilities),
         display_name: input.display_name.and_then(|value| {
-            let trimmed = value.trim().to_string();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
+            let value = value.trim().to_string();
+            (!value.is_empty()).then_some(value)
         }),
         max_context: input.max_context,
         max_output_tokens: input.max_output_tokens,
         model_id,
-        reasoning_levels: normalize_list(input.reasoning_levels, DEFAULT_REASONING_LEVELS),
-        tokenizer_json,
-        tokenizer_kind,
+        reasoning,
+        reasoning_levels: Vec::new(),
     })
 }
 
-fn save_provider_with_conn(
+fn insert_or_update_model(
     conn: &Connection,
-    input: UpsertProviderInput,
-) -> Result<String, String> {
-    let is_edit = input.id.is_some();
-    let provider_id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let name = input.name.trim().to_string();
-    let provider_type = validate_provider_type(&input.provider_type)?;
-    let endpoint = validate_endpoint(&input.endpoint)?;
-    let tokenizer_json = normalize_tokenizer_source(input.tokenizer_json);
-    let default_model_id = input.default_model_id.and_then(|value| {
-        let trimmed = value.trim().to_string();
-        (!trimmed.is_empty()).then_some(trimmed)
-    });
-    let replace_models = input
-        .replace_models
-        .unwrap_or(input.only_specified_models.unwrap_or(false));
+    provider_id: &str,
+    mut model: ProviderModelRecord,
+) -> Result<(), String> {
+    model.reasoning = validate_reasoning_config(model.reasoning)?;
+    model.reasoning_levels = reasoning_levels(&model);
     let now = now_unix_ms() as i64;
+    conn.execute(
+        "
+        INSERT INTO models (
+          id, provider_id, model_id, display_name, capabilities, reasoning_levels,
+          reasoning_config, max_context, max_output_tokens, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+        ON CONFLICT(provider_id, model_id) DO UPDATE SET
+          display_name = excluded.display_name,
+          capabilities = excluded.capabilities,
+          reasoning_levels = excluded.reasoning_levels,
+          reasoning_config = excluded.reasoning_config,
+          max_context = excluded.max_context,
+          max_output_tokens = excluded.max_output_tokens,
+          updated_at = excluded.updated_at
+        ",
+        params![
+            Uuid::new_v4().to_string(),
+            provider_id,
+            model.model_id,
+            model.display_name,
+            serialize_json(&model.capabilities, "provider model capabilities")?,
+            serialize_json(&model.reasoning_levels, "provider model reasoning levels")?,
+            serialize_reasoning_config(model.reasoning.as_ref())?,
+            model.max_context.map(|value| value as i64).unwrap_or(0),
+            model.max_output_tokens.map(|value| value as i64),
+            now,
+        ],
+    )
+    .map_err(|error| db_error("Could not save provider model", error))?;
+    Ok(())
+}
 
-    if name.is_empty() {
-        return Err("Provider name is required.".to_string());
-    }
+fn insert_discovered_model(
+    conn: &Connection,
+    provider_id: &str,
+    mut model: ProviderModelRecord,
+) -> Result<(), String> {
+    model.reasoning = None;
+    model.reasoning_levels.clear();
+    let capabilities = normalize_capabilities(Some(model.capabilities));
+    let now = now_unix_ms() as i64;
+    conn.execute(
+        "
+        INSERT OR IGNORE INTO models (
+          id, provider_id, model_id, display_name, capabilities, reasoning_levels,
+          reasoning_config, max_context, max_output_tokens, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, NULL, ?4, '[]', NULL, 0, NULL, ?5, ?5)
+        ",
+        params![
+            Uuid::new_v4().to_string(),
+            provider_id,
+            model.model_id,
+            serialize_json(&capabilities, "provider model capabilities")?,
+            now,
+        ],
+    )
+    .map_err(|error| db_error("Could not save discovered provider model", error))?;
+    Ok(())
+}
 
-    let models = input
-        .models
-        .unwrap_or_default()
-        .into_iter()
-        .map(model_from_definition)
-        .collect::<Result<Vec<_>, _>>()?;
-
+fn replace_provider_models(
+    conn: &Connection,
+    provider_id: &str,
+    models: Vec<ProviderModelRecord>,
+) -> Result<(), String> {
     let mut model_ids = HashSet::with_capacity(models.len());
     for model in &models {
         if !model_ids.insert(model.model_id.clone()) {
@@ -463,72 +315,143 @@ fn save_provider_with_conn(
             ));
         }
     }
-
-    if input.only_specified_models.unwrap_or(false) && models.is_empty() {
-        return Err("At least one manually specified model is required.".to_string());
+    for model in models {
+        insert_or_update_model(conn, provider_id, model)?;
     }
 
+    let existing_ids = {
+        let mut statement = conn
+            .prepare("SELECT model_id FROM models WHERE provider_id = ?1")
+            .map_err(|error| db_error("Could not compare provider models", error))?;
+        let rows = statement
+            .query_map(params![provider_id], |row| row.get::<_, String>(0))
+            .map_err(|error| db_error("Could not compare provider models", error))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| db_error("Could not compare provider models", error))?
+    };
+    for model_id in existing_ids {
+        if !model_ids.contains(&model_id) {
+            conn.execute(
+                "DELETE FROM models WHERE provider_id = ?1 AND model_id = ?2",
+                params![provider_id, model_id],
+            )
+            .map_err(|error| db_error("Could not remove provider model", error))?;
+        }
+    }
+    Ok(())
+}
+
+fn auth_defaults(provider_type: &str) -> (bool, Option<String>, String) {
+    match provider_type {
+        "anthropic" => (true, Some("x-api-key".to_string()), String::new()),
+        "google" => (true, Some("x-goog-api-key".to_string()), String::new()),
+        _ => (
+            false,
+            Some("Authorization".to_string()),
+            "Bearer ".to_string(),
+        ),
+    }
+}
+
+fn save_custom_provider_with_conn(
+    conn: &Connection,
+    input: UpsertProviderInput,
+) -> Result<String, String> {
+    let is_edit = input.id.is_some();
+    let provider_id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let name = input.name.trim().to_string();
+    let provider_type = validate_provider_type(&input.provider_type)?;
+    let endpoint = validate_endpoint(&input.endpoint)?;
+    let default_max_context =
+        validate_optional_limit(input.default_max_context, "Default max context")?;
+    let default_max_output_tokens =
+        validate_optional_limit(input.default_max_output_tokens, "Default max output tokens")?;
+    let default_model_id = input.default_model_id.and_then(|value| {
+        let value = value.trim().to_string();
+        (!value.is_empty()).then_some(value)
+    });
+    let headers = normalize_headers(input.headers)?;
+    let request_fields = normalize_request_fields(input.request_fields)?;
+    let replace_models = input
+        .replace_models
+        .unwrap_or(input.only_specified_models.unwrap_or(false));
+    let models = input
+        .models
+        .unwrap_or_default()
+        .into_iter()
+        .map(model_from_definition)
+        .collect::<Result<Vec<_>, _>>()?;
+    let now = now_unix_ms() as i64;
+
+    if name.is_empty() {
+        return Err("Provider name is required.".to_string());
+    }
     if replace_models
         && default_model_id
             .as_ref()
-            .is_some_and(|model_id| !model_ids.contains(model_id))
+            .is_some_and(|id| !models.iter().any(|model| &model.model_id == id))
     {
         return Err("Default model ID must match one of the configured models.".to_string());
     }
 
-    let existing_api_key = conn
+    let existing = conn
         .query_row(
-            "SELECT api_key_encrypted FROM providers WHERE id = ?1",
+            "SELECT api_key_encrypted, managed_config_id FROM providers WHERE id = ?1",
             params![provider_id],
-            |row| row.get::<_, Option<Vec<u8>>>(0),
+            |row| {
+                Ok((
+                    row.get::<_, Option<Vec<u8>>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
         )
         .optional()
-        .map_err(|error| db_error("Could not read provider API key", error))?;
-
-    if is_edit && existing_api_key.is_none() {
+        .map_err(|error| db_error("Could not read provider", error))?;
+    if is_edit && existing.is_none() {
         return Err("Provider is no longer available.".to_string());
     }
-
-    // Validate + cache tokenizer assets before writing DB so a bad URL fails the save.
-    sync_provider_tokenizer_asset(&provider_id, tokenizer_json.as_deref())?;
-
-    for model in &models {
-        sync_model_tokenizer_asset(
-            &provider_id,
-            &model.model_id,
-            model.tokenizer_json.as_deref(),
-        )?;
+    if existing
+        .as_ref()
+        .and_then(|(_, managed_config_id)| managed_config_id.as_ref())
+        .is_some()
+    {
+        return Err("Managed providers only allow API key changes.".to_string());
     }
-
+    let existing_api_key = existing.and_then(|(api_key, _)| api_key);
     let api_key_encrypted = match input.api_key {
         Some(api_key) if !api_key.trim().is_empty() => Some(encrypt_api_key(api_key.trim())?),
         Some(_) => None,
-        None => existing_api_key.flatten(),
+        None => existing_api_key,
     };
+    let (api_key_required, auth_header_name, auth_header_prefix) = auth_defaults(&provider_type);
 
-    let tx = conn
-        .unchecked_transaction()
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(|error| db_error("Could not start provider save", error))?;
     tx.execute(
         "
         INSERT INTO providers (
-          id,
-          name,
-          type,
-          endpoint,
-          api_key_encrypted,
-          default_model_id,
-          tokenizer_json,
-          created_at,
-          updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+          id, name, type, endpoint, api_key_encrypted, default_model_id,
+          default_max_context, default_max_output_tokens, managed_config_id,
+          managed_setup_values, headers, request_fields, api_key_required,
+          auth_header_name, auth_header_prefix, chat_completions_path, models_path,
+          model_catalog_mode, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, '{}', ?9, ?10, ?11, ?12, ?13, NULL, NULL, 'manual', ?14, ?14)
         ON CONFLICT(id) DO UPDATE SET
           name = excluded.name,
           type = excluded.type,
           endpoint = excluded.endpoint,
           api_key_encrypted = excluded.api_key_encrypted,
           default_model_id = excluded.default_model_id,
-          tokenizer_json = excluded.tokenizer_json,
+          default_max_context = excluded.default_max_context,
+          default_max_output_tokens = excluded.default_max_output_tokens,
+          headers = excluded.headers,
+          request_fields = excluded.request_fields,
+          api_key_required = excluded.api_key_required,
+          auth_header_name = excluded.auth_header_name,
+          auth_header_prefix = excluded.auth_header_prefix,
+          chat_completions_path = NULL,
+          models_path = NULL,
+          model_catalog_mode = 'manual',
           updated_at = excluded.updated_at
         ",
         params![
@@ -538,9 +461,14 @@ fn save_provider_with_conn(
             endpoint,
             api_key_encrypted,
             default_model_id,
-            tokenizer_json,
+            default_max_context,
+            default_max_output_tokens,
+            serialize_json(&headers, "provider headers")?,
+            serialize_json(&request_fields, "provider request fields")?,
+            api_key_required as i64,
+            auth_header_name,
+            auth_header_prefix,
             now,
-            now
         ],
     )
     .map_err(|error| {
@@ -560,84 +488,322 @@ fn save_provider_with_conn(
         }
     })?;
 
-    for model in models {
+    for model in models.iter().cloned() {
         insert_or_update_model(&tx, &provider_id, model)?;
     }
-
-    let removed_model_ids = if replace_models {
-        let mut statement = tx
-            .prepare("SELECT model_id FROM models WHERE provider_id = ?1")
-            .map_err(|error| db_error("Could not compare provider models", error))?;
-        let rows = statement
-            .query_map(params![provider_id], |row| row.get::<_, String>(0))
-            .map_err(|error| db_error("Could not compare provider models", error))?;
-        let existing_ids = rows
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| db_error("Could not compare provider models", error))?;
-        drop(statement);
-
-        let removed = existing_ids
-            .into_iter()
-            .filter(|model_id| !model_ids.contains(model_id))
-            .collect::<Vec<_>>();
-        for model_id in &removed {
-            tx.execute(
-                "DELETE FROM models WHERE provider_id = ?1 AND model_id = ?2",
-                params![provider_id, model_id],
-            )
-            .map_err(|error| db_error("Could not remove provider model", error))?;
-        }
-        removed
-    } else {
-        Vec::new()
-    };
-
+    if replace_models {
+        replace_provider_models(&tx, &provider_id, models)?;
+    }
     tx.commit()
         .map_err(|error| db_error("Could not finish provider save", error))?;
-
-    for model_id in removed_model_ids {
-        let _ = clear_tokenizer(
-            &provider_id,
-            TokenizerScope::Model {
-                model_id: model_id.as_str(),
-            },
-        );
-    }
-
     Ok(provider_id)
 }
 
 pub fn upsert_provider(input: UpsertProviderInput) -> Result<String, String> {
-    let conn = open_database()?;
-    save_provider_with_conn(&conn, input)
+    let conn = open_write_database()?;
+    save_custom_provider_with_conn(&conn, input)
+}
+
+fn encode_path_segment(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                (byte as char).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
+}
+
+fn resolve_managed_endpoint(
+    definition: &ManagedProviderDefinition,
+    setup_values: &BTreeMap<String, String>,
+) -> Result<String, String> {
+    let known_fields = definition
+        .setup_fields
+        .iter()
+        .map(|field| field.id.as_str())
+        .collect::<HashSet<_>>();
+    if setup_values
+        .keys()
+        .any(|id| !known_fields.contains(id.as_str()))
+    {
+        return Err("Managed provider setup contains an unsupported field.".to_string());
+    }
+    let mut endpoint = definition.endpoint_template.clone();
+    for field in &definition.setup_fields {
+        let value = setup_values
+            .get(&field.id)
+            .map(|value| value.trim())
+            .unwrap_or_default();
+        if field.required && value.is_empty() {
+            return Err(format!("{} is required.", field.label));
+        }
+        endpoint = endpoint.replace(
+            &format!("{{{{{}}}}}", field.id),
+            &encode_path_segment(value),
+        );
+    }
+    if endpoint.contains("{{") || endpoint.contains("}}") {
+        return Err("Managed provider endpoint has an unresolved setup value.".to_string());
+    }
+    validate_endpoint(&endpoint)
+}
+
+struct ExistingManagedProvider {
+    api_key: Option<Vec<u8>>,
+    id: String,
+}
+
+fn existing_provider_for_managed(
+    conn: &Connection,
+    definition: &ManagedProviderDefinition,
+) -> Result<Option<ExistingManagedProvider>, String> {
+    conn.query_row(
+        "SELECT id, api_key_encrypted FROM providers
+         WHERE managed_config_id = ?1 OR (managed_config_id IS NULL AND name = ?2)
+         ORDER BY managed_config_id IS NOT NULL DESC LIMIT 1",
+        params![definition.config_id, definition.name],
+        |row| {
+            Ok(ExistingManagedProvider {
+                id: row.get(0)?,
+                api_key: row.get(1)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|error| db_error("Could not read managed provider", error))
+}
+
+fn sync_managed_models(
+    conn: &Connection,
+    provider_id: &str,
+    definition: &ManagedProviderDefinition,
+) -> Result<(), String> {
+    if definition.model_catalog_mode == "fixed" {
+        return replace_provider_models(conn, provider_id, definition.models.clone());
+    }
+
+    let existing_ids = {
+        let mut statement = conn
+            .prepare("SELECT model_id FROM models WHERE provider_id = ?1")
+            .map_err(|error| db_error("Could not read live provider models", error))?;
+        let rows = statement
+            .query_map(params![provider_id], |row| row.get::<_, String>(0))
+            .map_err(|error| db_error("Could not read live provider models", error))?;
+        rows.collect::<Result<HashSet<_>, _>>()
+            .map_err(|error| db_error("Could not parse live provider models", error))?
+    };
+    for model in definition
+        .models
+        .iter()
+        .filter(|model| existing_ids.contains(&model.model_id))
+    {
+        insert_or_update_model(conn, provider_id, model.clone())?;
+    }
+    Ok(())
+}
+
+fn save_managed_provider_with_conn(
+    conn: &Connection,
+    definition: &ManagedProviderDefinition,
+    api_key: Option<&str>,
+    setup_values: &BTreeMap<String, String>,
+    preserve_api_key: bool,
+    allow_missing_required_key: bool,
+) -> Result<String, String> {
+    let endpoint = resolve_managed_endpoint(definition, setup_values)?;
+    let existing = existing_provider_for_managed(conn, definition)?;
+    let provider_id = existing
+        .as_ref()
+        .map(|provider| provider.id.clone())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let existing_api_key = existing.and_then(|provider| provider.api_key);
+    let next_api_key = match api_key {
+        Some(value) if !value.trim().is_empty() => Some(encrypt_api_key(value.trim())?),
+        Some(_) => None,
+        None if preserve_api_key => existing_api_key,
+        None => None,
+    };
+    if definition.api_key_required && next_api_key.is_none() && !allow_missing_required_key {
+        return Err(format!("{} requires an API key.", definition.name));
+    }
+    let default_model_id = match definition.default_model_id.as_ref() {
+        Some(id) if definition.models.iter().any(|model| &model.model_id == id) => {
+            let available = definition.model_catalog_mode == "fixed"
+                || conn
+                    .query_row(
+                        "SELECT 1 FROM models WHERE provider_id = ?1 AND model_id = ?2",
+                        params![provider_id, id],
+                        |_| Ok(()),
+                    )
+                    .optional()
+                    .map_err(|error| db_error("Could not read provider default model", error))?
+                    .is_some();
+            available.then_some(id.clone())
+        }
+        _ => None,
+    };
+    let now = now_unix_ms() as i64;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .map_err(|error| db_error("Could not start managed provider save", error))?;
+    tx.execute(
+        "
+        INSERT INTO providers (
+          id, name, type, endpoint, api_key_encrypted, default_model_id,
+          default_max_context, default_max_output_tokens, managed_config_id,
+          managed_setup_values, headers, request_fields, api_key_required,
+          auth_header_name, auth_header_prefix, chat_completions_path, models_path,
+          model_catalog_mode, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, '[]', ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          type = excluded.type,
+          endpoint = excluded.endpoint,
+          api_key_encrypted = excluded.api_key_encrypted,
+          default_model_id = excluded.default_model_id,
+          default_max_context = excluded.default_max_context,
+          default_max_output_tokens = excluded.default_max_output_tokens,
+          managed_config_id = excluded.managed_config_id,
+          managed_setup_values = excluded.managed_setup_values,
+          headers = excluded.headers,
+          request_fields = '[]',
+          api_key_required = excluded.api_key_required,
+          auth_header_name = excluded.auth_header_name,
+          auth_header_prefix = excluded.auth_header_prefix,
+          chat_completions_path = excluded.chat_completions_path,
+          models_path = excluded.models_path,
+          model_catalog_mode = excluded.model_catalog_mode,
+          updated_at = excluded.updated_at
+        ",
+        params![
+            provider_id,
+            definition.name,
+            definition.provider_type,
+            endpoint,
+            next_api_key,
+            default_model_id,
+            definition.default_max_context.map(|value| value as i64),
+            definition
+                .default_max_output_tokens
+                .map(|value| value as i64),
+            definition.config_id,
+            serialize_json(setup_values, "managed provider setup")?,
+            serialize_json(&definition.headers, "managed provider headers")?,
+            definition.api_key_required as i64,
+            definition.auth_header_name,
+            definition.auth_header_prefix,
+            definition.chat_completions_path,
+            definition.models_path,
+            definition.model_catalog_mode,
+            now,
+        ],
+    )
+    .map_err(|error| db_error("Could not save managed provider", error))?;
+    sync_managed_models(&tx, &provider_id, definition)?;
+    tx.commit()
+        .map_err(|error| db_error("Could not finish managed provider save", error))?;
+    Ok(provider_id)
+}
+
+pub fn setup_managed_provider(
+    definition: &ManagedProviderDefinition,
+    input: SetupManagedProviderInput,
+) -> Result<String, String> {
+    if input.provider_config_id.trim() != definition.config_id {
+        return Err("Managed provider selection is no longer available.".to_string());
+    }
+    let conn = open_write_database()?;
+    save_managed_provider_with_conn(
+        &conn,
+        definition,
+        input.api_key.as_deref(),
+        &input.setup_values,
+        true,
+        false,
+    )
+}
+
+pub fn sync_managed_catalog(definitions: &[ManagedProviderDefinition]) -> Result<(), String> {
+    let conn = open_write_database()?;
+    let definitions = definitions
+        .iter()
+        .map(|definition| (definition.config_id.as_str(), definition))
+        .collect::<HashMap<_, _>>();
+    let configured = {
+        let mut statement = conn
+            .prepare(
+                "SELECT managed_config_id, managed_setup_values FROM providers
+                 WHERE managed_config_id IS NOT NULL",
+            )
+            .map_err(|error| db_error("Could not prepare managed provider sync", error))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| db_error("Could not read managed providers", error))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| db_error("Could not parse managed providers", error))?
+    };
+    for (config_id, setup_json) in configured {
+        let Some(definition) = definitions.get(config_id.as_str()) else {
+            continue;
+        };
+        let setup_values = deserialize_json::<BTreeMap<String, String>>(setup_json);
+        save_managed_provider_with_conn(&conn, definition, None, &setup_values, true, true)?;
+    }
+    Ok(())
+}
+
+pub fn update_managed_provider_api_key(
+    input: UpdateManagedProviderApiKeyInput,
+) -> Result<(), String> {
+    let conn = open_write_database()?;
+    let required = conn
+        .query_row(
+            "SELECT api_key_required FROM providers
+             WHERE id = ?1 AND managed_config_id IS NOT NULL",
+            params![input.provider_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| db_error("Could not read managed provider", error))?
+        .ok_or_else(|| "Managed provider is no longer available.".to_string())?
+        != 0;
+    let encrypted = match input.api_key {
+        Some(value) if !value.trim().is_empty() => Some(encrypt_api_key(value.trim())?),
+        Some(_) if required => return Err("This managed provider requires an API key.".to_string()),
+        Some(_) => None,
+        None => return Ok(()),
+    };
+    conn.execute(
+        "UPDATE providers SET api_key_encrypted = ?1, updated_at = ?2 WHERE id = ?3",
+        params![encrypted, now_unix_ms() as i64, input.provider_id],
+    )
+    .map_err(|error| db_error("Could not update managed provider API key", error))?;
+    Ok(())
 }
 
 pub fn delete_provider(provider_id: &str) -> Result<(), String> {
-    let conn = open_database()?;
+    let conn = open_write_database()?;
     conn.execute("DELETE FROM providers WHERE id = ?1", params![provider_id])
         .map_err(|error| db_error("Could not delete provider", error))?;
-    // Best-effort: DB row is already gone even if cache cleanup fails.
-    let _ = cleanup_provider_tokenizers(provider_id);
     Ok(())
 }
 
 pub fn list_providers() -> Result<Vec<ProviderPayload>, String> {
-    import_env_yaml_once()?;
     let conn = open_database()?;
     let mut statement = conn
         .prepare(
             "
-            SELECT
-              providers.id,
-              providers.name,
-              providers.type,
-              providers.endpoint,
-              providers.api_key_encrypted IS NOT NULL,
-              providers.default_model_id,
-              providers.tokenizer_json,
-              providers.created_at,
-              providers.updated_at,
-              COUNT(models.id)
+            SELECT providers.id, providers.name, providers.type, providers.endpoint,
+                   providers.api_key_encrypted IS NOT NULL, providers.default_model_id,
+                   providers.default_max_context, providers.default_max_output_tokens,
+                   providers.managed_config_id, providers.headers, providers.request_fields,
+                   providers.model_catalog_mode, providers.created_at, providers.updated_at,
+                   COUNT(models.id)
             FROM providers
             LEFT JOIN models ON models.provider_id = providers.id
             GROUP BY providers.id
@@ -645,112 +811,111 @@ pub fn list_providers() -> Result<Vec<ProviderPayload>, String> {
             ",
         )
         .map_err(|error| db_error("Could not list providers", error))?;
-
-    let providers = statement
+    let rows = statement
         .query_map([], |row| {
-            let id: String = row.get(0)?;
-            let tokenizer_json: Option<String> = row.get(6)?;
+            let managed_config_id = row.get::<_, Option<String>>(8)?;
             Ok(ProviderPayload {
-                id: id.clone(),
+                id: row.get(0)?,
                 name: row.get(1)?,
                 provider_type: row.get(2)?,
                 endpoint: row.get(3)?,
                 has_api_key: row.get::<_, i64>(4)? != 0,
                 default_model_id: row.get(5)?,
-                tokenizer_json: tokenizer_json.clone(),
-                tokenizer_local_path: resolve_local_path_if_present(
-                    &id,
-                    TokenizerScope::Provider,
-                    tokenizer_json.as_deref(),
-                ),
-                created_at_ms: row.get::<_, i64>(7)? as u64,
-                updated_at_ms: row.get::<_, i64>(8)? as u64,
-                model_count: row.get::<_, i64>(9)? as u64,
+                default_max_context: row.get::<_, Option<i64>>(6)?.map(|value| value as u64),
+                default_max_output_tokens: row.get::<_, Option<i64>>(7)?.map(|value| value as u64),
+                is_managed: managed_config_id.is_some(),
+                managed_config_id,
+                headers: deserialize_json(row.get(9)?),
+                request_fields: deserialize_json(row.get(10)?),
+                can_refresh_models: row.get::<_, String>(11)? == "provider_api",
+                created_at_ms: row.get::<_, i64>(12)? as u64,
+                updated_at_ms: row.get::<_, i64>(13)? as u64,
+                model_count: row.get::<_, i64>(14)? as u64,
             })
         })
-        .map_err(|error| db_error("Could not read providers", error))?
-        .collect::<Result<Vec<_>, _>>()
         .map_err(|error| db_error("Could not read providers", error))?;
-
-    Ok(providers)
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| db_error("Could not parse providers", error))
 }
 
 pub fn list_models() -> Result<Vec<ProviderModelPayload>, String> {
-    import_env_yaml_once()?;
     let conn = open_database()?;
     let mut statement = conn
         .prepare(
             "
-            SELECT
-              models.id,
-              models.provider_id,
-              providers.name,
-              providers.type,
-              models.model_id,
-              models.display_name,
-              models.capabilities,
-              models.reasoning_levels,
-              models.max_context,
-              models.max_output_tokens,
-              models.tokenizer_kind,
-              models.tokenizer_json,
-              models.is_pinned,
-              models.last_used_at
+            SELECT models.id, models.provider_id, providers.name, providers.type,
+                   models.model_id, models.display_name, models.capabilities,
+                   models.reasoning_levels, models.reasoning_config,
+                   CASE WHEN models.max_context > 0 THEN models.max_context
+                        ELSE COALESCE(providers.default_max_context, 128000) END,
+                   COALESCE(models.max_output_tokens, providers.default_max_output_tokens),
+                   NULLIF(models.max_context, 0), models.max_output_tokens,
+                   models.is_pinned, models.last_used_at
             FROM models
             JOIN providers ON providers.id = models.provider_id
             ORDER BY providers.name COLLATE NOCASE, models.model_id COLLATE NOCASE
             ",
         )
         .map_err(|error| db_error("Could not list provider models", error))?;
-
-    let models = statement
+    let rows = statement
         .query_map([], |row| {
-            let provider_id: String = row.get(1)?;
-            let model_id: String = row.get(4)?;
-            let tokenizer_json: Option<String> = row.get(11)?;
             Ok(ProviderModelPayload {
                 id: row.get(0)?,
-                provider_id: provider_id.clone(),
+                provider_id: row.get(1)?,
                 provider_name: row.get(2)?,
                 provider_type: row.get(3)?,
-                model_id: model_id.clone(),
+                model_id: row.get(4)?,
                 display_name: row.get(5)?,
-                capabilities: deserialize_string_list(row.get(6)?, &["text"]),
-                reasoning_levels: deserialize_string_list(row.get(7)?, DEFAULT_REASONING_LEVELS),
-                max_context: match row.get::<_, i64>(8)? {
-                    value if value > 0 => Some(value as u64),
-                    _ => None,
-                },
-                max_output_tokens: row.get::<_, Option<i64>>(9)?.map(|value| value as u64),
-                tokenizer_kind: row.get(10)?,
-                tokenizer_json: tokenizer_json.clone(),
-                tokenizer_local_path: resolve_local_path_if_present(
-                    &provider_id,
-                    TokenizerScope::Model {
-                        model_id: model_id.as_str(),
-                    },
-                    tokenizer_json.as_deref(),
-                ),
-                is_pinned: row.get::<_, i64>(12)? != 0,
-                last_used_at_ms: row.get::<_, Option<i64>>(13)?.map(|value| value as u64),
+                capabilities: deserialize_json(row.get(6)?),
+                reasoning_levels: deserialize_json(row.get(7)?),
+                reasoning: deserialize_reasoning_config(row.get(8)?),
+                max_context: Some(row.get::<_, i64>(9)? as u64),
+                max_output_tokens: row.get::<_, Option<i64>>(10)?.map(|value| value as u64),
+                configured_max_context: row.get::<_, Option<i64>>(11)?.map(|value| value as u64),
+                configured_max_output_tokens: row
+                    .get::<_, Option<i64>>(12)?
+                    .map(|value| value as u64),
+                is_pinned: row.get::<_, i64>(13)? != 0,
+                last_used_at_ms: row.get::<_, Option<i64>>(14)?.map(|value| value as u64),
             })
         })
-        .map_err(|error| db_error("Could not read provider models", error))?
-        .collect::<Result<Vec<_>, _>>()
         .map_err(|error| db_error("Could not read provider models", error))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| db_error("Could not parse provider models", error))
+}
 
-    Ok(models)
+pub fn managed_config_id(provider_id: &str) -> Result<Option<String>, String> {
+    open_database()?
+        .query_row(
+            "SELECT managed_config_id FROM providers WHERE id = ?1",
+            params![provider_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| db_error("Could not read provider catalog configuration", error))?
+        .ok_or_else(|| "Provider is no longer available.".to_string())
 }
 
 pub async fn refresh_provider_models(
     input: RefreshProviderModelsInput,
+    managed_definition: Option<&ManagedProviderDefinition>,
 ) -> Result<Vec<ProviderModelPayload>, String> {
-    // None selected → intentional no-op (I-25).
     if !input.fetch_all && !input.remove_invalid {
         return list_models();
     }
-
     let provider = load_provider_secret(&input.provider_id)?;
+    let catalog_mode = open_database()?
+        .query_row(
+            "SELECT model_catalog_mode FROM providers WHERE id = ?1",
+            params![input.provider_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| db_error("Could not read provider", error))?
+        .unwrap_or_else(|| "manual".to_string());
+    if catalog_mode != "manual" && catalog_mode != "provider_api" {
+        return Err("Managed provider models come from the remote Wizzle catalog.".to_string());
+    }
 
     let remote_models = match provider.provider_type.as_str() {
         "anthropic" => anthropic::fetch_models(&provider).await?,
@@ -760,297 +925,117 @@ pub async fn refresh_provider_models(
         }
         _ => return Err("Model refresh is not available for this provider type.".to_string()),
     };
-    let conn = open_database()?;
-    let remote_ids: HashSet<String> = remote_models
+    let remote_ids = remote_models
         .iter()
         .map(|model| model.model_id.clone())
-        .collect();
-
-    let tx = conn
-        .unchecked_transaction()
+        .collect::<HashSet<_>>();
+    let conn = open_write_database()?;
+    let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)
         .map_err(|error| db_error("Could not start provider model refresh", error))?;
-
     if input.fetch_all {
         for model in remote_models {
-            // Catalog entries only prove that an id exists. Preserve all explicit local metadata.
-            insert_discovered_model(&tx, &provider.id, model)?;
+            if let Some(declared) = managed_definition.and_then(|definition| {
+                definition
+                    .models
+                    .iter()
+                    .find(|declared| declared.model_id == model.model_id)
+            }) {
+                insert_or_update_model(&tx, &provider.id, declared.clone())?;
+            } else {
+                insert_discovered_model(&tx, &provider.id, model)?;
+            }
         }
     }
-
-    let removed_model_ids = if input.remove_invalid {
-        let local_model_ids: Vec<String> = {
+    if input.remove_invalid {
+        let local_ids = {
             let mut statement = tx
                 .prepare("SELECT model_id FROM models WHERE provider_id = ?1")
-                .map_err(|error| db_error("Could not list local models for refresh", error))?;
+                .map_err(|error| db_error("Could not list local models", error))?;
             let rows = statement
                 .query_map(params![provider.id], |row| row.get::<_, String>(0))
-                .map_err(|error| db_error("Could not list local models for refresh", error))?;
+                .map_err(|error| db_error("Could not list local models", error))?;
             rows.collect::<Result<Vec<_>, _>>()
-                .map_err(|error| db_error("Could not list local models for refresh", error))?
+                .map_err(|error| db_error("Could not parse local models", error))?
         };
-
-        let removed = local_model_ids
-            .into_iter()
-            .filter(|model_id| !remote_ids.contains(model_id))
-            .collect::<Vec<_>>();
-        for model_id in &removed {
-            tx.execute(
-                "DELETE FROM models WHERE provider_id = ?1 AND model_id = ?2",
-                params![provider.id, model_id],
-            )
-            .map_err(|error| db_error("Could not remove invalid provider model", error))?;
+        for model_id in local_ids {
+            if !remote_ids.contains(&model_id) {
+                tx.execute(
+                    "DELETE FROM models WHERE provider_id = ?1 AND model_id = ?2",
+                    params![provider.id, model_id],
+                )
+                .map_err(|error| db_error("Could not remove invalid provider model", error))?;
+            }
         }
-
         tx.execute(
             "UPDATE providers SET default_model_id = NULL, updated_at = ?1
              WHERE id = ?2 AND default_model_id IS NOT NULL AND default_model_id NOT IN
                (SELECT model_id FROM models WHERE provider_id = ?2)",
             params![now_unix_ms() as i64, provider.id],
         )
-        .map_err(|error| db_error("Could not update the provider default model", error))?;
-        removed
-    } else {
-        Vec::new()
-    };
-
+        .map_err(|error| db_error("Could not update provider default model", error))?;
+    }
+    if let Some(default_model_id) = managed_definition
+        .and_then(|definition| definition.default_model_id.as_ref())
+        .filter(|model_id| remote_ids.contains(*model_id))
+    {
+        tx.execute(
+            "UPDATE providers SET default_model_id = ?1, updated_at = ?2 WHERE id = ?3",
+            params![default_model_id, now_unix_ms() as i64, provider.id],
+        )
+        .map_err(|error| db_error("Could not update provider default model", error))?;
+    }
     tx.commit()
         .map_err(|error| db_error("Could not finish provider model refresh", error))?;
-
-    for model_id in removed_model_ids {
-        let _ = clear_tokenizer(
-            &provider.id,
-            TokenizerScope::Model {
-                model_id: model_id.as_str(),
-            },
-        );
-    }
-
     list_models()
-}
-
-pub fn read_tokenizer_asset(path: &str) -> Result<String, String> {
-    tokenizer_assets::read_tokenizer_asset(path)
-}
-
-pub fn import_provider_yaml(input: ImportProviderYamlInput) -> Result<(), String> {
-    validate_yaml_source(&input.yaml)?;
-    let source = input.source.unwrap_or_else(|| "manual".to_string());
-    import_provider_yaml_text(&input.yaml, &source)
-}
-
-pub fn import_provider_yaml_text(yaml: &str, source: &str) -> Result<(), String> {
-    validate_yaml_source(yaml)?;
-    let parsed = serde_yaml::from_str::<ProviderYamlFile>(yaml)
-        .map_err(|_| "Provider YAML could not be parsed.".to_string())?;
-
-    if parsed.providers.is_empty() {
-        return Err("Provider YAML must contain at least one provider.".to_string());
-    }
-
-    let conn = open_database()?;
-    let hash = source_hash(yaml);
-    let provider_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM providers", [], |row| row.get(0))
-        .map_err(|error| db_error("Could not count providers", error))?;
-
-    let already_imported: Option<String> = conn
-        .query_row(
-            "SELECT id FROM provider_imports WHERE source_hash = ?1",
-            params![hash],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| db_error("Could not read provider imports", error))?;
-
-    // Skip duplicate imports only when providers already exist (I-14: allow re-seed when empty).
-    if already_imported.is_some() && provider_count > 0 {
-        return Ok(());
-    }
-
-    for provider in parsed.providers {
-        let models = provider.models.unwrap_or_default();
-        let default_model_id = provider.default_model_id.or_else(|| {
-            models
-                .first()
-                .map(|model| model.model_id.trim().to_string())
-                .filter(|value| !value.is_empty())
-        });
-
-        let provider_id = save_provider_with_conn(
-            &conn,
-            UpsertProviderInput {
-                api_key: provider.api_key,
-                default_model_id,
-                endpoint: provider.endpoint,
-                id: None,
-                models: Some(models),
-                name: provider.name,
-                only_specified_models: provider.only_specified_models,
-                replace_models: provider.only_specified_models,
-                provider_type: provider.provider_type,
-                tokenizer_json: provider.tokenizer_json,
-            },
-        )?;
-
-        if provider_id.is_empty() {
-            return Err("Provider YAML could not be imported.".to_string());
-        }
-    }
-
-    conn.execute(
-        "
-        INSERT INTO provider_imports (id, source, source_hash, imported_at)
-        VALUES (?1, ?2, ?3, ?4)
-        ",
-        params![
-            Uuid::new_v4().to_string(),
-            source,
-            hash,
-            now_unix_ms() as i64
-        ],
-    )
-    .map_err(|error| db_error("Could not record provider import", error))?;
-
-    Ok(())
-}
-
-fn candidate_default_provider_yaml_paths() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-
-    if let Ok(current_dir) = std::env::current_dir() {
-        candidates.push(current_dir.join(DEFAULT_PROVIDERS_YAML_NAME));
-        candidates.push(current_dir.join("..").join(DEFAULT_PROVIDERS_YAML_NAME));
-        candidates.push(
-            current_dir
-                .join("..")
-                .join("..")
-                .join(DEFAULT_PROVIDERS_YAML_NAME),
-        );
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            candidates.push(parent.join(DEFAULT_PROVIDERS_YAML_NAME));
-            candidates.push(parent.join("..").join(DEFAULT_PROVIDERS_YAML_NAME));
-            candidates.push(parent.join("Resources").join(DEFAULT_PROVIDERS_YAML_NAME));
-        }
-    }
-
-    candidates
-}
-
-/// Seed bundled providers only for a database that has never completed a provider import.
-fn seed_default_providers_if_empty() -> Result<(), String> {
-    let conn = open_database()?;
-    let provider_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM providers", [], |row| row.get(0))
-        .map_err(|error| db_error("Could not count providers", error))?;
-    let import_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM provider_imports", [], |row| {
-            row.get(0)
-        })
-        .map_err(|error| db_error("Could not count provider imports", error))?;
-
-    if provider_count > 0 || import_count > 0 {
-        return Ok(());
-    }
-
-    drop(conn);
-
-    for path in candidate_default_provider_yaml_paths() {
-        if !path.is_file() {
-            continue;
-        }
-
-        let yaml = fs::read_to_string(&path)
-            .map_err(|_| "Could not read the default providers YAML.".to_string())?;
-        return import_provider_yaml_text(&yaml, "seed:default-providers");
-    }
-
-    import_provider_yaml_text(
-        include_str!("../../../../opencode-models.yaml"),
-        "seed:embedded-default-providers",
-    )
-}
-
-pub fn import_env_yaml_once() -> Result<(), String> {
-    let _guard = PROVIDER_STARTUP_IMPORT_LOCK
-        .lock()
-        .map_err(|_| "Could not initialize default providers.".to_string())?;
-
-    let (yaml_source, source_name) = match std::env::var(PROVIDER_YAML_PATH_ENV) {
-        Ok(value) if !value.trim().is_empty() => (
-            read_provider_yaml_path(&value)?,
-            format!("env:{PROVIDER_YAML_PATH_ENV}"),
-        ),
-        _ => match std::env::var(PROVIDER_YAML_INLINE_ENV) {
-            Ok(value) if !value.trim().is_empty() => {
-                (value, format!("env:{PROVIDER_YAML_INLINE_ENV}"))
-            }
-            _ => return seed_default_providers_if_empty(),
-        },
-    };
-
-    let conn = open_database()?;
-    let import_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM provider_imports", [], |row| {
-            row.get(0)
-        })
-        .map_err(|error| db_error("Could not read provider imports", error))?;
-    if import_count > 0 {
-        return Ok(());
-    }
-
-    drop(conn);
-
-    if yaml_source.trim_start().starts_with("http://") {
-        return Err("WIZZLE_PROVIDERS_YAML remote imports must use HTTPS.".to_string());
-    }
-
-    if yaml_source.trim_start().starts_with("https://") {
-        return Err(
-            "Remote provider YAML import is available through the manual import command."
-                .to_string(),
-        );
-    }
-
-    import_provider_yaml_text(&yaml_source, &source_name)
 }
 
 pub fn load_provider_secret(provider_id: &str) -> Result<ProviderSecretRecord, String> {
     let conn = open_database()?;
-    let provider = conn
-        .query_row(
-            "
-            SELECT id, name, type, endpoint, api_key_encrypted
-            FROM providers
-            WHERE id = ?1
-            ",
-            params![provider_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<Vec<u8>>>(4)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|error| db_error("Could not read provider", error))?;
-
-    let Some((id, name, provider_type, endpoint, encrypted_api_key)) = provider else {
-        return Err("Provider is no longer available.".to_string());
-    };
-
-    Ok(ProviderSecretRecord {
-        api_key: decrypt_api_key(encrypted_api_key)?,
-        endpoint,
-        id,
-        name,
-        provider_type,
+    conn.query_row(
+        "
+        SELECT id, name, type, endpoint, api_key_encrypted, api_key_required,
+               auth_header_name, auth_header_prefix, chat_completions_path, models_path,
+               headers, request_fields
+        FROM providers WHERE id = ?1
+        ",
+        params![provider_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<Vec<u8>>>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, String>(11)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(|error| db_error("Could not read provider", error))?
+    .map(|row| -> Result<ProviderSecretRecord, String> {
+        Ok(ProviderSecretRecord {
+            id: row.0,
+            name: row.1,
+            provider_type: row.2,
+            endpoint: row.3,
+            api_key: decrypt_api_key(row.4)?,
+            api_key_required: row.5 != 0,
+            auth_header_name: row.6,
+            auth_header_prefix: row.7,
+            chat_completions_path: row.8,
+            models_path: row.9,
+            headers: deserialize_json(row.10),
+            request_fields: deserialize_json(row.11),
+        })
     })
+    .transpose()?
+    .ok_or_else(|| "Provider is no longer available.".to_string())
 }
 
 pub fn resolve_model(model_uuid: &str) -> Result<ProviderResolvedModel, String> {
@@ -1058,22 +1043,12 @@ pub fn resolve_model(model_uuid: &str) -> Result<ProviderResolvedModel, String> 
     let row = conn
         .query_row(
             "
-            SELECT
-              models.id,
-              models.provider_id,
-              providers.name,
-              providers.type,
-              providers.endpoint,
-              providers.api_key_encrypted,
-              models.model_id,
-              models.display_name,
-              models.capabilities,
-              models.reasoning_levels,
-              models.max_context,
-              models.max_output_tokens,
-              models.tokenizer_kind
-            FROM models
-            JOIN providers ON providers.id = models.provider_id
+            SELECT models.id, models.provider_id, models.model_id, models.display_name,
+                   models.capabilities, models.reasoning_levels, models.reasoning_config,
+                   CASE WHEN models.max_context > 0 THEN models.max_context
+                        ELSE COALESCE(providers.default_max_context, 128000) END,
+                   COALESCE(models.max_output_tokens, providers.default_max_output_tokens)
+            FROM models JOIN providers ON providers.id = models.provider_id
             WHERE models.id = ?1
             ",
             params![model_uuid],
@@ -1082,69 +1057,36 @@ pub fn resolve_model(model_uuid: &str) -> Result<ProviderResolvedModel, String> 
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, Option<Vec<u8>>>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, i64>(10)?,
-                    row.get::<_, Option<i64>>(11)?,
-                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
                 ))
             },
         )
         .optional()
-        .map_err(|error| db_error("Could not read selected model", error))?;
-
-    let Some((
-        resolved_model_uuid,
-        provider_id,
-        provider_name,
-        provider_type,
-        endpoint,
-        encrypted_api_key,
-        model_id,
-        display_name,
-        capabilities,
-        reasoning_levels,
-        max_context,
-        max_output_tokens,
-        tokenizer_kind,
-    )) = row
-    else {
-        return Err("Selected model is no longer available.".to_string());
-    };
-
+        .map_err(|error| db_error("Could not read selected model", error))?
+        .ok_or_else(|| "Selected model is no longer available.".to_string())?;
+    let provider = load_provider_secret(&row.1)?;
     Ok(ProviderResolvedModel {
-        model_uuid: resolved_model_uuid,
+        model_uuid: row.0,
         model: ProviderModelRecord {
-            capabilities: deserialize_string_list(capabilities, &["text"]),
-            display_name,
-            max_context: if max_context > 0 {
-                Some(max_context as u64)
-            } else {
-                None
-            },
-            max_output_tokens: max_output_tokens.map(|value| value as u64),
-            model_id,
-            reasoning_levels: deserialize_string_list(reasoning_levels, DEFAULT_REASONING_LEVELS),
-            tokenizer_json: None,
-            tokenizer_kind,
+            model_id: row.2,
+            display_name: row.3,
+            capabilities: deserialize_json(row.4),
+            reasoning_levels: deserialize_json(row.5),
+            reasoning: deserialize_reasoning_config(row.6),
+            max_context: (row.7 > 0).then_some(row.7 as u64),
+            max_output_tokens: row.8.map(|value| value as u64),
         },
-        provider: ProviderSecretRecord {
-            api_key: decrypt_api_key(encrypted_api_key)?,
-            endpoint,
-            id: provider_id,
-            name: provider_name,
-            provider_type,
-        },
+        provider,
     })
 }
 
 pub fn mark_model_used(model_uuid: &str) -> Result<(), String> {
-    let conn = open_database()?;
+    let conn = open_write_database()?;
     conn.execute(
         "UPDATE models SET last_used_at = ?1 WHERE id = ?2",
         params![now_unix_ms() as i64, model_uuid],
@@ -1155,453 +1097,60 @@ pub fn mark_model_used(model_uuid: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        import_provider_yaml_text, insert_discovered_model, model_from_definition,
-        save_provider_with_conn, validate_endpoint, validate_provider_type,
-    };
+    use super::{normalize_headers, resolve_managed_endpoint, validate_endpoint};
     use crate::providers::types::{
-        ProviderModelDefinitionInput, ProviderModelRecord, UpsertProviderInput,
+        ManagedProviderDefinition, ManagedProviderSetupField, ProviderHeaderInput,
     };
-    use rusqlite::{params, Connection};
+    use std::collections::BTreeMap;
 
     #[test]
-    fn model_definition_normalizes_defaults() {
-        let model = model_from_definition(ProviderModelDefinitionInput {
-            capabilities: Some(vec!["image".to_string()]),
-            display_name: None,
-            max_context: None,
-            max_output_tokens: None,
-            model_id: "gpt-test".to_string(),
-            reasoning_levels: None,
-            tokenizer_kind: None,
-            tokenizer_json: None,
-        })
-        .expect("model definition");
-
-        assert_eq!(model.model_id, "gpt-test");
-        assert_eq!(model.max_context, None);
-        assert_eq!(model.capabilities, vec!["text", "image"]);
-        assert_eq!(
-            model.reasoning_levels,
-            vec!["low", "medium", "high", "max", "xhigh"]
-        );
-    }
-
-    #[test]
-    fn model_definition_empty_capabilities_defaults_to_text() {
-        let model = model_from_definition(ProviderModelDefinitionInput {
-            capabilities: Some(vec![]),
-            display_name: None,
-            max_context: None,
-            max_output_tokens: None,
-            model_id: "gpt-empty-caps".to_string(),
-            reasoning_levels: None,
-            tokenizer_kind: None,
-            tokenizer_json: None,
-        })
-        .expect("model definition");
-
-        assert_eq!(model.capabilities, vec!["text"]);
-    }
-
-    #[test]
-    fn model_definition_blank_capabilities_defaults_to_text() {
-        let model = model_from_definition(ProviderModelDefinitionInput {
-            capabilities: Some(vec!["".to_string(), "   ".to_string()]),
-            display_name: None,
-            max_context: None,
-            max_output_tokens: None,
-            model_id: "gpt-blank-caps".to_string(),
-            reasoning_levels: None,
-            tokenizer_kind: None,
-            tokenizer_json: None,
-        })
-        .expect("model definition");
-
-        assert_eq!(model.capabilities, vec!["text"]);
-    }
-
-    #[test]
-    fn model_definition_preserves_explicitly_empty_reasoning_levels() {
-        let model = model_from_definition(ProviderModelDefinitionInput {
-            capabilities: None,
-            display_name: None,
-            max_context: None,
-            max_output_tokens: None,
-            model_id: "non-reasoning-model".to_string(),
-            reasoning_levels: Some(vec![]),
-            tokenizer_kind: None,
-            tokenizer_json: None,
-        })
-        .expect("model definition");
-
-        assert!(model.reasoning_levels.is_empty());
-    }
-
-    #[test]
-    fn provider_yaml_rejects_empty_provider_list() {
-        let result = import_provider_yaml_text("providers: []", "test");
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn embedded_default_provider_yaml_is_available() {
-        let parsed = serde_yaml::from_str::<super::ProviderYamlFile>(include_str!(
-            "../../../../opencode-models.yaml"
-        ))
-        .expect("embedded default provider YAML");
-
-        assert!(!parsed.providers.is_empty());
-        assert!(parsed.providers.iter().all(|provider| {
-            validate_provider_type(&provider.provider_type).is_ok()
-                && !provider.models.as_deref().unwrap_or_default().is_empty()
-        }));
-    }
-
-    #[test]
-    fn accepts_native_and_openai_compatible_provider_types() {
-        assert_eq!(
-            validate_provider_type("anthropic").as_deref(),
-            Ok("anthropic")
-        );
-        assert_eq!(validate_provider_type("claude").as_deref(), Ok("anthropic"));
-        assert_eq!(validate_provider_type("google").as_deref(), Ok("google"));
-        assert_eq!(validate_provider_type("gemini").as_deref(), Ok("google"));
-        assert!(validate_provider_type("openai_compatble").is_err());
-        assert_eq!(
-            validate_provider_type("openai-compatible").as_deref(),
-            Ok("openai_compatible")
-        );
-    }
-
-    #[test]
-    fn provider_endpoint_requires_https_except_for_http_loopback() {
+    fn provider_endpoint_requires_https_except_loopback() {
         assert!(validate_endpoint("https://api.example.test/v1").is_ok());
         assert!(validate_endpoint("http://localhost:11434/v1").is_ok());
-        assert!(validate_endpoint("http://[::1]:11434/v1").is_ok());
-        assert!(validate_endpoint("ftp://localhost/models").is_err());
         assert!(validate_endpoint("http://api.example.test/v1").is_err());
         assert!(validate_endpoint("https://user:secret@example.test/v1").is_err());
-        assert!(validate_endpoint("https://api.anthropic.com/v1/messages").is_err());
-        assert!(validate_endpoint(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini:generateContent"
-        )
-        .is_err());
-        assert!(validate_endpoint("https://api.example.test/v1?key=secret").is_err());
-        assert!(validate_endpoint("https://api.example.test/v1/models").is_err());
         assert!(validate_endpoint("https://api.example.test/v1/chat/completions").is_err());
     }
 
     #[test]
-    fn discovered_model_does_not_overwrite_configured_metadata() {
-        let conn = Connection::open_in_memory().expect("in-memory database");
-        conn.execute_batch(
-            "
-            CREATE TABLE models (
-              id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, model_id TEXT NOT NULL,
-              display_name TEXT NULL, capabilities TEXT NOT NULL, reasoning_levels TEXT NOT NULL,
-              max_context INTEGER NOT NULL, max_output_tokens INTEGER NULL,
-              tokenizer_kind TEXT NULL, tokenizer_json TEXT NULL,
-              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-              UNIQUE(provider_id, model_id)
-            );
-            ",
-        )
-        .expect("model table");
-        conn.execute(
-            "INSERT INTO models VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 1)",
-            params![
-                "model-uuid",
-                "provider-1",
-                "custom-model",
-                "Custom name",
-                r#"["text","image"]"#,
-                r#"["low"]"#,
-                32_000,
-                4_096,
-                "hf-json",
-                "https://example.com/tokenizer.json",
-            ],
-        )
-        .expect("configured model");
-
-        insert_discovered_model(
-            &conn,
-            "provider-1",
-            ProviderModelRecord {
-                capabilities: Vec::new(),
-                display_name: None,
-                max_context: None,
-                max_output_tokens: None,
-                model_id: "custom-model".to_string(),
-                reasoning_levels: Vec::new(),
-                tokenizer_json: None,
-                tokenizer_kind: None,
-            },
-        )
-        .expect("catalog refresh");
-
-        let metadata = conn
-            .query_row(
-                "SELECT display_name, capabilities, reasoning_levels, max_context, max_output_tokens, tokenizer_kind, tokenizer_json FROM models",
-                [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?)),
-            )
-            .expect("preserved metadata");
-
-        assert_eq!(metadata.0, "Custom name");
-        assert_eq!(metadata.1, r#"["text","image"]"#);
-        assert_eq!(metadata.2, r#"["low"]"#);
-        assert_eq!(metadata.3, 32_000);
-        assert_eq!(metadata.4, 4_096);
-        assert_eq!(metadata.5, "hf-json");
-        assert_eq!(metadata.6, "https://example.com/tokenizer.json");
+    fn custom_headers_reject_transport_owned_values() {
+        assert!(normalize_headers(vec![ProviderHeaderInput {
+            name: "Content-Length".into(),
+            value: "1".into(),
+        }])
+        .is_err());
     }
 
     #[test]
-    fn provider_edit_preserves_missing_api_key() {
-        let conn = Connection::open_in_memory().expect("in-memory database");
-        conn.execute_batch(
-            "
-            CREATE TABLE providers (
-              id TEXT PRIMARY KEY,
-              name TEXT NOT NULL UNIQUE,
-              type TEXT NOT NULL,
-              endpoint TEXT NOT NULL,
-              api_key_encrypted BLOB NULL,
-              default_model_id TEXT NULL,
-              tokenizer_json TEXT NULL,
-              created_at INTEGER NOT NULL,
-              updated_at INTEGER NOT NULL
-            );
-            ",
-        )
-        .expect("provider table");
-        conn.execute(
-            "
-            INSERT INTO providers (
-              id, name, type, endpoint, api_key_encrypted, default_model_id,
-              tokenizer_json, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, 1, 1)
-            ",
-            params![
-                "provider-without-key",
-                "Provider without key",
-                "openai_compatible",
-                "https://api.example.test",
-            ],
-        )
-        .expect("provider without key");
-
-        save_provider_with_conn(
-            &conn,
-            UpsertProviderInput {
-                api_key: None,
-                default_model_id: None,
-                endpoint: "https://api-updated.example.test".to_string(),
-                id: Some("provider-without-key".to_string()),
-                models: None,
-                name: "Provider without key".to_string(),
-                only_specified_models: None,
-                replace_models: Some(false),
-                provider_type: "openai_compatible".to_string(),
-                tokenizer_json: None,
-            },
-        )
-        .expect("edit provider with missing key");
-
-        let updated = conn
-            .query_row(
-                "SELECT endpoint, api_key_encrypted FROM providers WHERE id = ?1",
-                params!["provider-without-key"],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
-            )
-            .expect("updated provider");
-
-        assert_eq!(updated.0, "https://api-updated.example.test");
-        assert!(updated.1.is_none());
-    }
-
-    #[test]
-    fn provider_edit_can_preserve_or_clear_a_stored_api_key() {
-        let conn = Connection::open_in_memory().expect("in-memory database");
-        conn.execute_batch(
-            "
-            CREATE TABLE providers (
-              id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, type TEXT NOT NULL,
-              endpoint TEXT NOT NULL, api_key_encrypted BLOB NULL,
-              default_model_id TEXT NULL, tokenizer_json TEXT NULL,
-              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-            );
-            INSERT INTO providers VALUES (
-              'provider-1', 'Provider', 'openai_compatible', 'https://api.example.test',
-              X'010203', NULL, NULL, 1, 1
-            );
-            ",
-        )
-        .expect("provider schema");
-
-        let edit = |api_key| UpsertProviderInput {
-            api_key,
+    fn managed_endpoint_substitutes_encoded_setup_values() {
+        let definition = ManagedProviderDefinition {
+            api_key_required: true,
+            auth_header_name: Some("Authorization".into()),
+            auth_header_prefix: "Bearer ".into(),
+            chat_completions_path: Some("/chat/completions".into()),
+            config_id: "cloudflare".into(),
+            default_max_context: Some(128_000),
+            default_max_output_tokens: Some(8_192),
             default_model_id: None,
-            endpoint: "https://api.example.test/v1".to_string(),
-            id: Some("provider-1".to_string()),
-            models: None,
-            name: "Provider".to_string(),
-            only_specified_models: None,
-            replace_models: Some(false),
-            provider_type: "openai_compatible".to_string(),
-            tokenizer_json: None,
+            endpoint_template: "https://example.test/accounts/{{accountId}}/v1".into(),
+            headers: vec![],
+            models: vec![],
+            model_catalog_mode: "fixed".into(),
+            models_path: Some("/models".into()),
+            name: "Cloudflare".into(),
+            provider_type: "openai_compatible".into(),
+            setup_fields: vec![ManagedProviderSetupField {
+                id: "accountId".into(),
+                label: "Account ID".into(),
+                required: true,
+                secret: false,
+            }],
         };
-
-        save_provider_with_conn(&conn, edit(None)).expect("preserve stored key");
-        let preserved = conn
-            .query_row(
-                "SELECT api_key_encrypted FROM providers WHERE id = 'provider-1'",
-                [],
-                |row| row.get::<_, Option<Vec<u8>>>(0),
-            )
-            .expect("stored key");
-        assert_eq!(preserved, Some(vec![1, 2, 3]));
-
-        save_provider_with_conn(&conn, edit(Some(String::new()))).expect("clear stored key");
-        let cleared = conn
-            .query_row(
-                "SELECT api_key_encrypted FROM providers WHERE id = 'provider-1'",
-                [],
-                |row| row.get::<_, Option<Vec<u8>>>(0),
-            )
-            .expect("cleared key");
-        assert!(cleared.is_none());
-    }
-
-    #[test]
-    fn provider_edit_replaces_the_configured_model_set() {
-        let conn = Connection::open_in_memory().expect("in-memory database");
-        conn.execute_batch(
-            "
-            PRAGMA foreign_keys = ON;
-            CREATE TABLE providers (
-              id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, type TEXT NOT NULL,
-              endpoint TEXT NOT NULL, api_key_encrypted BLOB NULL,
-              default_model_id TEXT NULL, tokenizer_json TEXT NULL,
-              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-            );
-            CREATE TABLE models (
-              id TEXT PRIMARY KEY, provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
-              model_id TEXT NOT NULL, display_name TEXT NULL, capabilities TEXT NOT NULL,
-              reasoning_levels TEXT NOT NULL, max_context INTEGER NOT NULL,
-              max_output_tokens INTEGER NULL, tokenizer_kind TEXT NULL,
-              tokenizer_json TEXT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-              UNIQUE(provider_id, model_id)
-            );
-            INSERT INTO providers VALUES (
-              'provider-1', 'Provider', 'openai_compatible', 'https://api.example.test',
-              NULL, 'custom-model', NULL, 1, 1
-            );
-            INSERT INTO models VALUES (
-              'custom-uuid', 'provider-1', 'custom-model', 'Custom', '[\"text\"]',
-              '[]', 32000, 4096, NULL, NULL, 1, 1
-            );
-            INSERT INTO models VALUES (
-              'removed-uuid', 'provider-1', 'remove-me', NULL, '[\"text\"]',
-              '[]', 0, NULL, NULL, NULL, 1, 1
-            );
-            ",
+        let endpoint = resolve_managed_endpoint(
+            &definition,
+            &BTreeMap::from([("accountId".into(), "abc/123".into())]),
         )
-        .expect("provider schema");
-
-        save_provider_with_conn(
-            &conn,
-            UpsertProviderInput {
-                api_key: None,
-                default_model_id: Some("custom-model".to_string()),
-                endpoint: "https://api.example.test/v1".to_string(),
-                id: Some("provider-1".to_string()),
-                models: Some(vec![ProviderModelDefinitionInput {
-                    capabilities: Some(vec!["text".to_string(), "image".to_string()]),
-                    display_name: Some("Custom edited".to_string()),
-                    max_context: Some(64_000),
-                    max_output_tokens: Some(8_192),
-                    model_id: "custom-model".to_string(),
-                    reasoning_levels: Some(vec![]),
-                    tokenizer_kind: Some("heuristic".to_string()),
-                    tokenizer_json: None,
-                }]),
-                name: "Provider".to_string(),
-                only_specified_models: None,
-                replace_models: Some(true),
-                provider_type: "openai_compatible".to_string(),
-                tokenizer_json: None,
-            },
-        )
-        .expect("replace provider models");
-
-        let models = conn
-            .prepare("SELECT id, model_id, display_name, reasoning_levels FROM models")
-            .expect("model query")
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })
-            .expect("models")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("model rows");
-
-        assert_eq!(
-            models,
-            vec![(
-                "custom-uuid".to_string(),
-                "custom-model".to_string(),
-                "Custom edited".to_string(),
-                "[]".to_string(),
-            )]
-        );
-    }
-
-    #[test]
-    fn provider_edit_rejects_a_default_outside_the_replacement_set() {
-        let conn = Connection::open_in_memory().expect("in-memory database");
-        conn.execute_batch(
-            "
-            CREATE TABLE providers (
-              id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, type TEXT NOT NULL,
-              endpoint TEXT NOT NULL, api_key_encrypted BLOB NULL,
-              default_model_id TEXT NULL, tokenizer_json TEXT NULL,
-              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-            );
-            INSERT INTO providers VALUES (
-              'provider-1', 'Provider', 'openai_compatible', 'https://api.example.test',
-              NULL, NULL, NULL, 1, 1
-            );
-            ",
-        )
-        .expect("provider schema");
-
-        let result = save_provider_with_conn(
-            &conn,
-            UpsertProviderInput {
-                api_key: None,
-                default_model_id: Some("missing-model".to_string()),
-                endpoint: "https://api.example.test".to_string(),
-                id: Some("provider-1".to_string()),
-                models: Some(vec![]),
-                name: "Provider".to_string(),
-                only_specified_models: None,
-                replace_models: Some(true),
-                provider_type: "openai_compatible".to_string(),
-                tokenizer_json: None,
-            },
-        );
-
-        assert_eq!(
-            result.err().as_deref(),
-            Some("Default model ID must match one of the configured models.")
-        );
+        .expect("endpoint");
+        assert_eq!(endpoint, "https://example.test/accounts/abc%2F123/v1");
     }
 }

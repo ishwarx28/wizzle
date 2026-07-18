@@ -171,7 +171,7 @@ struct AgentRuntimeInner {
     active_provider_requests: Mutex<HashMap<String, HashMap<String, AbortHandle>>>,
     background_process_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     coordinator: RunCoordinator,
-    foreground_bash_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    foreground_shell_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     provider_request_sessions: Mutex<HashMap<String, String>>,
     runtime_states: Mutex<HashMap<String, RuntimeEntry>>,
     session_write_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
@@ -283,11 +283,11 @@ impl AgentRuntimeState {
         )
     }
 
-    pub fn foreground_bash_lock(&self, session_id: &str) -> Result<Arc<AsyncMutex<()>>, String> {
+    pub fn foreground_shell_lock(&self, session_id: &str) -> Result<Arc<AsyncMutex<()>>, String> {
         lock_for_key(
-            &self.inner.foreground_bash_locks,
+            &self.inner.foreground_shell_locks,
             session_id,
-            "foreground bash",
+            "foreground shell",
         )
     }
 
@@ -524,7 +524,7 @@ impl AgentRuntimeState {
         self.inner
             .active_foreground_processes
             .lock()
-            .map_err(|_| "Could not track the active bash process.".to_string())?
+            .map_err(|_| "Could not track the active shell process.".to_string())?
             .insert(session_id.to_string(), pid);
         Ok(())
     }
@@ -646,7 +646,7 @@ impl AgentRuntimeState {
             terminate_pid(pid).await?;
         }
 
-        // Background bash (dev servers, watchers) must stop on interrupt too (#36).
+        // Background shell (dev servers, watchers) must stop on interrupt too (#36).
         let _ = self
             .stop_background_processes_for_session(window, session_id)
             .await;
@@ -676,7 +676,7 @@ impl AgentRuntimeState {
             tokio::time::sleep(std::time::Duration::from_millis(DELETE_WAIT_INTERVAL_MS)).await;
         }
 
-        let foreground_lock = self.foreground_bash_lock(session_id)?;
+        let foreground_lock = self.foreground_shell_lock(session_id)?;
         let _foreground_guard = foreground_lock.lock().await;
         let background_lock = self.background_process_lock(session_id)?;
         let _background_guard = background_lock.lock().await;

@@ -8,6 +8,7 @@ const {
   applyComposerQueueSendResult,
   cancelQueuedContextContinues,
   createComposerQueueItem,
+  drainComposerSessionQueue,
   enqueueContextContinue,
   markComposerQueueItemStatus,
   rekeyComposerSessionQueue,
@@ -17,7 +18,9 @@ const {
   selectVisibleComposerQueueItems,
   setComposerSessionQueue,
   getComposerSessionQueue,
+  inferComposerQueueItemKind,
 } = await import("./composer-session-queue.ts");
+const { CONTEXT_CONTINUE_PROMPT } = await import("./agent/context-pressure.ts");
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -25,7 +28,7 @@ function assert(condition: unknown, message: string): asserts condition {
   }
 }
 
-function main() {
+async function main() {
   resetComposerSessionQueuesForTests();
 
   const a = createComposerQueueItem({ attachments: [], prompt: "first" });
@@ -95,15 +98,31 @@ function main() {
   resetComposerSessionQueuesForTests();
   const userFirst = createComposerQueueItem({ attachments: [], prompt: "user later" });
   setComposerSessionQueue("s-continue", [userFirst]);
-  const cont = enqueueContextContinue("s-continue", "Continue previous task");
+  const cont = await enqueueContextContinue("s-continue", "Continue previous task");
   assert(cont.kind === "context_continue", "continue kind");
   const next = selectNextQueuedComposerItem(getComposerSessionQueue("s-continue"));
   assert(next?.id === cont.id, "continue selected ahead of user queue");
   assert(getComposerSessionQueue("s-continue")[0]?.id === cont.id, "continue at front");
   assert(cont.attachments.length === 0, "continue never carries attachments");
   assert(cont.prompt === "Continue previous task", "continue prompt is not modified");
+  assert(
+    inferComposerQueueItemKind(CONTEXT_CONTINUE_PROMPT) === "context_continue" &&
+      inferComposerQueueItemKind("Continue my task") === "user",
+    "persisted queue hydration restores only the stable internal continuation",
+  );
 
-  enqueueContextContinue("s-continue", "Continue previous task again");
+  let forceCompaction = false;
+  await drainComposerSessionQueue("s-continue", {
+    isSessionSending: () => forceCompaction,
+    resolveProjectIdForSession: () => "project-1",
+    sendPrompt: async (_prompt, _attachments, options) => {
+      forceCompaction = options?.forceCompaction === true;
+      return { accepted: true, ok: true };
+    },
+  });
+  assert(forceCompaction, "internal continue forces compaction before provider streaming");
+
+  await enqueueContextContinue("s-continue", "Continue previous task again");
   assert(
     getComposerSessionQueue("s-continue").filter((item) => item.kind === "context_continue")
       .length === 1,
@@ -123,4 +142,4 @@ function main() {
   console.log("composer-session-queue tests passed");
 }
 
-main();
+await main();

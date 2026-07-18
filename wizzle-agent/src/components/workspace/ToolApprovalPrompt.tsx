@@ -11,7 +11,7 @@ import { useEffect, useState } from "react";
 import { useWorkspaceStore } from "../../store/workspace-store";
 import type { ToolApprovalRequest } from "../../types/workspace";
 
-const BASH_EXTERNAL_PATH_WARNING =
+const SHELL_EXTERNAL_PATH_WARNING =
   "This command would access a file outside the selected project. Approve only if you trust this command.";
 
 function requestValue(request: {
@@ -20,13 +20,13 @@ function requestValue(request: {
   summary: string;
   toolName: ToolApprovalRequest["toolName"];
 }) {
-  return request.toolName === "bash"
+  return request.toolName === "shell"
     ? request.command?.trim() || request.summary
     : request.path?.trim() || request.summary;
 }
 
 function requestIcon(toolName: ToolApprovalRequest["toolName"]) {
-  if (toolName === "bash") {
+  if (toolName === "shell") {
     return <Command className="h-3.5 w-3.5" />;
   }
 
@@ -63,17 +63,17 @@ function warningTone(warning: ToolApprovalRequest["warning"]) {
 }
 
 function detailLabel(toolName: ToolApprovalRequest["toolName"]) {
-  return toolName === "bash" ? "Command" : "Path";
+  return toolName === "shell" ? "Command" : "Path";
 }
 
 function approvalMessageLines(request: ToolApprovalRequest) {
-  const description = request.toolName === "bash" ? request.description?.trim() : "";
+  const description = request.toolName === "shell" ? request.description?.trim() : "";
 
-  if (request.toolName === "bash" && request.warning?.kind === "external-path") {
+  if (request.toolName === "shell" && request.warning?.kind === "external-path") {
     return [
       description
         ? `Agent wants to ${description}; this would access a file outside the selected project. Approve only if you trust this command.`
-        : BASH_EXTERNAL_PATH_WARNING,
+        : SHELL_EXTERNAL_PATH_WARNING,
     ];
   }
 

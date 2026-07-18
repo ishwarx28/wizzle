@@ -1,9 +1,9 @@
-mod bash;
 mod edit;
 mod output;
 pub(crate) mod pathing;
 mod read;
 mod shared;
+mod shell;
 mod write;
 
 use serde_json::Value;
@@ -93,11 +93,11 @@ pub async fn run_agent_tool(
             let _path_guard = path_lock.lock().await;
             edit::run(project_root, arguments, allow_external_paths).await
         }
-        "bash" => {
-            bash::run(
+        "shell" => {
+            shell::run(
                 project_root,
                 arguments,
-                bash::BashRunContext {
+                shell::ShellRunContext {
                     allow_external_paths,
                     runtime,
                     session_id: input.session_id.as_deref(),

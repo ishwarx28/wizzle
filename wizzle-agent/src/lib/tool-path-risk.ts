@@ -36,7 +36,7 @@ const SAFE_DEVICE_PATHS = new Set([
   "/dev/stderr",
 ]);
 const SAFE_DEVICE_PATH_PREFIXES = ["/dev/fd/", "/dev/pts/"];
-const MANUAL_APPROVAL_BASH_ALLOWLIST = new Set([
+const MANUAL_APPROVAL_SHELL_ALLOWLIST = new Set([
   "ag",
   "cat",
   "cut",
@@ -100,7 +100,7 @@ const SECRET_COPY_OR_UPLOAD_COMMANDS = new Set([
   "sftp",
 ]);
 const PATH_OPERAND_COMMANDS = new Set([
-  ...MANUAL_APPROVAL_BASH_ALLOWLIST,
+  ...MANUAL_APPROVAL_SHELL_ALLOWLIST,
   "cp",
   "mv",
   "rm",
@@ -533,7 +533,7 @@ function buildNonPathOperandIndexes(commandName: string, tokens: string[]) {
   return skipIndexes;
 }
 
-function collectBashStagePathCandidates(command: string, candidates: Set<string>) {
+function collectShellStagePathCandidates(command: string, candidates: Set<string>) {
   const tokens = unwrapCommandTokens(extractShellTokens(command));
   const commandName = getCommandName(tokens[0] ?? "");
   const nonPathOperandIndexes = buildNonPathOperandIndexes(commandName, tokens);
@@ -565,12 +565,12 @@ function collectBashStagePathCandidates(command: string, candidates: Set<string>
   }
 }
 
-function collectBashPathCandidates(command: string) {
+function collectShellPathCandidates(command: string) {
   const candidates = new Set<string>();
   const stages = splitInspectionPipeline(command.trim()) ?? [command];
 
   for (const stage of stages) {
-    collectBashStagePathCandidates(stage, candidates);
+    collectShellStagePathCandidates(stage, candidates);
   }
 
   return [...candidates];
@@ -581,8 +581,8 @@ export function collectToolPathCandidates(input: {
   path?: string;
   toolName: ApprovalToolName;
 }) {
-  if (input.toolName === "bash") {
-    return collectBashPathCandidates(input.command ?? "");
+  if (input.toolName === "shell") {
+    return collectShellPathCandidates(input.command ?? "");
   }
 
   const path = input.path?.trim();
@@ -800,7 +800,7 @@ function searchCanReadHiddenFiles(commandName: string, tokens: string[]) {
   });
 }
 
-function isWhitelistedBashStage(command: string) {
+function isWhitelistedShellStage(command: string) {
   const rawTokens = extractShellTokens(command);
 
   if (getCommandName(rawTokens[0] ?? "") === "sudo") {
@@ -810,7 +810,7 @@ function isWhitelistedBashStage(command: string) {
   const tokens = unwrapCommandTokens(rawTokens);
   const commandName = getCommandName(tokens[0] ?? "");
 
-  if (!MANUAL_APPROVAL_BASH_ALLOWLIST.has(commandName)) {
+  if (!MANUAL_APPROVAL_SHELL_ALLOWLIST.has(commandName)) {
     return false;
   }
 
@@ -836,9 +836,9 @@ function isWhitelistedBashStage(command: string) {
   return !searchCanReadHiddenFiles(commandName, tokens);
 }
 
-export function isWhitelistedBashCommand(command: string) {
+export function isWhitelistedShellCommand(command: string) {
   const stages = splitInspectionPipeline(command.trim());
-  return Boolean(stages?.every(isWhitelistedBashStage));
+  return Boolean(stages?.every(isWhitelistedShellStage));
 }
 
 function wildcardToRegExp(pattern: string) {
@@ -868,7 +868,7 @@ function unwrapCommandTokens(tokens: string[]) {
 }
 
 function hasAnySensitivePath(command: string) {
-  return collectBashPathCandidates(command).some(isSensitivePath);
+  return collectShellPathCandidates(command).some(isSensitivePath);
 }
 
 function commandCopiesOrUploadsSensitiveFiles(commandName: string, command: string) {
@@ -1019,7 +1019,7 @@ export function classifyDangerousCommand(command: string) {
 
   if (
     SECRET_PRINT_COMMANDS.has(commandName) &&
-    collectBashPathCandidates(normalizedCommand).some(isSensitivePath)
+    collectShellPathCandidates(normalizedCommand).some(isSensitivePath)
   ) {
     return "The command can print credential-like file contents.";
   }
@@ -1032,7 +1032,7 @@ export function classifyDangerousCommand(command: string) {
 }
 
 function warningMessage(toolName: ApprovalToolName) {
-  if (toolName === "bash") {
+  if (toolName === "shell") {
     return "This command references a file path outside the selected project.";
   }
 
@@ -1057,9 +1057,9 @@ export function createExternalPathWarning(input: {
   resolvedPaths?: ResolvedPathCandidate[];
   toolName: ApprovalToolName;
 }): ToolApprovalRequest["warning"] {
-  if (input.toolName === "bash") {
+  if (input.toolName === "shell") {
     const command = input.command ?? "";
-    const pathCandidates = collectBashPathCandidates(command);
+    const pathCandidates = collectShellPathCandidates(command);
     const commandTokens = unwrapCommandTokens(extractShellTokens(command));
     const commandName = getCommandName(commandTokens[0] ?? "");
 
@@ -1138,7 +1138,7 @@ export function createExternalPathWarning(input: {
   }
 
   const hasExternalCwd =
-    input.toolName === "bash" &&
+    input.toolName === "shell" &&
     Boolean(input.cwd?.trim()) &&
     isResolvedCandidateExternal({
       candidate: input.cwd ?? "",
@@ -1146,9 +1146,9 @@ export function createExternalPathWarning(input: {
       resolved: input.resolvedCwd,
     });
   const hasExternalPath =
-    input.toolName === "bash"
+    input.toolName === "shell"
       ? hasExternalCwd ||
-        collectBashPathCandidates(input.command ?? "").some((candidate) =>
+        collectShellPathCandidates(input.command ?? "").some((candidate) =>
             isResolvedCandidateExternal({
               basePath: input.cwd,
               candidate,

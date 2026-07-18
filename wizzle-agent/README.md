@@ -58,23 +58,24 @@ The desktop app stores state under the user's home directory:
 - Session attachments: `~/.wizzle/sessions/<session-id>/attachments`
 - Legacy JSON files may still be read for migration, but new writes go through SQLite.
 
-## Provider Setup
+## Remote Configuration and Providers
 
-Copy the example env file, then adjust provider import settings if needed:
+Copy the example env file before starting the app:
 
 ```bash
 cp .env.example .env
 ```
 
-Useful values:
+`WIZZLE_CONFIG_URL` is required and must point directly to the public root YAML manifest. The manifest supplies developer metadata, update information, system prompts, and links to independently validated provider catalogs. Wizzle downloads it over HTTPS and keeps a last-known-good local cache for temporary network failures. There are no bundled provider, reasoning, prompt, or identity fallbacks.
 
-- `WIZZLE_PROVIDERS_YAML_PATH` points to the initial provider YAML file. The default is `../opencode-models.yaml`.
-- `WIZZLE_PROVIDER_KEY` optionally overrides the local encryption key used for stored provider API keys. Leave it empty for normal local development.
-- `WIZZLE_DESKTOP_LOG_MODE` and `VITE_WIZZLE_FRONTEND_LOG_MODE` control desktop/frontend logging.
+The `update` entry uses semantic versions and platform-specific signed updater endpoints. When the configured version is newer, Wizzle installs it inside the app; `critical` updates block the workspace until installation. Release builds embed `WIZZLE_UPDATER_PUBLIC_KEY`, while CI signs updater artifacts with `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 
-The initial provider file is `../opencode-models.yaml`. It seeds OpenAI-compatible providers and model metadata when no providers are configured. Additional providers can be added from the Providers page.
+The Providers page offers two paths:
 
-Provider records are stored locally. API keys are encrypted before being written to SQLite using a private key in Wizzle's local state directory, and are not exposed through frontend provider/model state.
+- **Setup existing provider** installs a managed provider from the remote catalog. Only its API key and any provider-declared setup values are editable locally.
+- **Add custom provider** stores a user-defined endpoint, models, headers, and JSON Pointer request fields locally.
+
+Provider records are stored locally. API keys are encrypted before being written to SQLite using a private key in Wizzle's local state directory, and are not exposed through frontend provider/model state. `WIZZLE_DESKTOP_LOG_MODE` and `VITE_WIZZLE_FRONTEND_LOG_MODE` control local logging.
 
 ## Direct Provider Calls
 
@@ -91,7 +92,7 @@ The provider layer supports OpenAI-compatible chat completions, Anthropic's nati
 
 ## Agent Prompt and Skills
 
-The frontend builds the agent system prompt from `src/lib/prompts/system-prompt.txt`, discovered `AGENTS.md` paths, and global skill metadata. The agent reads applicable instruction files before relying on their rules; the closest scoped file takes precedence. Replay history is trimmed by `src/lib/context-budget.ts` before model calls so large sessions stay inside the selected model's context budget.
+The frontend builds the agent system prompt from the validated remote prompt catalog, discovered `AGENTS.md` paths, and global skill metadata. Dedicated remote prompts cover title generation, enhancement, compaction, context pressure, subagents, and final-response recovery. For project work, the main agent first creates a durable Markdown implementation plan with approaches, affected files, ordered steps, and verification, then stops for user review. The plan opens in the in-app file sidebar through the Read plan tile; execution resumes from the user's next plain-language response and advances one completed step at a time. The agent reads applicable instruction files before relying on their rules; the closest scoped file takes precedence. Replay history is trimmed by `src/lib/context-budget.ts` before model calls so large sessions stay inside the selected model's context budget.
 
 ## Package Builds
 

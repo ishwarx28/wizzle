@@ -1,14 +1,14 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 
-import { resolveAboutConfig } from "../../lib/env";
+import { useAppAboutConfig } from "../../hooks/use-app-about-config";
 import { frontendLogger } from "../../lib/logger";
 import { AppDialog } from "./AppDialog";
 
 const MAX_FEEDBACK_LENGTH = 4_000;
 
 export function FeedbackDialog({ onClose }: { onClose: () => void }) {
-  const contact = resolveAboutConfig();
+  const contact = useAppAboutConfig();
   const [category, setCategory] = useState("Feedback");
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState<string | null>(null);

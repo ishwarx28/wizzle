@@ -11,7 +11,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build && node scripts/check-bundle-budget.mjs",
     "preview": "vite preview",
-    "test": "tsx --test --import ./scripts/register-raw-text-loader.mjs \"src/**/*.test.ts\" && node scripts/check-docs.mjs",
+    "test": "tsx --test \"src/**/*.test.ts\" && node scripts/check-docs.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

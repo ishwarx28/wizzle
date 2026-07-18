@@ -1,10 +1,12 @@
 import { PanelLeftOpen, PanelRightOpen } from "lucide-react";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { ChatView } from "../components/workspace/ChatView";
 import { AppDialog } from "../components/common/AppDialog";
+import { AppUpdateDialog } from "../components/common/AppUpdateDialog";
 import { FilePanel } from "../components/workspace/FilePanel";
 import { SessionProcessMenu } from "../components/workspace/SessionProcessMenu";
 import { SessionSubagentMenu } from "../components/workspace/SessionSubagentMenu";
@@ -12,6 +14,11 @@ import { Sidebar } from "../components/workspace/Sidebar";
 import { usePanelResize } from "../hooks/use-panel-resize";
 import { useWindowDrag } from "../hooks/use-window-drag";
 import { frontendLogger } from "../lib/logger";
+import {
+  resolveAvailableAppUpdate,
+  type AvailableAppUpdate,
+} from "../lib/app-update";
+import { loadRemoteConfig } from "../lib/remote-config";
 import {
   CLOSE_SUBAGENT_VIEW_EVENT,
   REQUEST_APP_EXIT_EVENT,
@@ -53,8 +60,11 @@ export function AppPage() {
   const [activePage, setActivePage] = useState<"chat" | "providers">("chat");
   const [startupError, setStartupError] = useState<string | null>(null);
   const [startupRetryKey, setStartupRetryKey] = useState(0);
+  const [isStartupReady, setIsStartupReady] = useState(false);
   const [isExitConfirmationOpen, setIsExitConfirmationOpen] = useState(false);
   const [isClosingApp, setIsClosingApp] = useState(false);
+  const [availableUpdate, setAvailableUpdate] = useState<AvailableAppUpdate | null>(null);
+  const [isUpdateDialogOpen, setIsUpdateDialogOpen] = useState(false);
   const isClosingAppRef = useRef(false);
   const hasHydratedWorkspace = useWorkspaceStore((state) => state.hasHydratedWorkspace);
   const draftSessions = useWorkspaceStore((state) => state.draftSessions);
@@ -92,21 +102,44 @@ export function AppPage() {
       projects.flatMap((project) => project.sessions).find((session) => session.id === selectedSessionId);
 
   useEffect(() => {
-    if (hasHydratedWorkspace) {
-      return;
-    }
-
     let isMounted = true;
+    setIsStartupReady(false);
+    setAvailableUpdate(null);
+    setIsUpdateDialogOpen(false);
 
-    void loadWorkspaceSnapshot()
-      .then((snapshot) => {
+    void loadRemoteConfig()
+      .then(async (remoteConfig) => {
+        const [snapshot, providers, models, currentVersion] = await Promise.all([
+          loadWorkspaceSnapshot(),
+          listProviders(),
+          listProviderModels(),
+          getVersion(),
+        ]);
+        return { currentVersion, models, providers, remoteConfig, snapshot };
+      })
+      .then(({ currentVersion, models, providers, remoteConfig, snapshot }) => {
         if (isMounted) {
+          const update = resolveAvailableAppUpdate(remoteConfig.update, currentVersion);
           setStartupError(null);
           hydrateWorkspace(snapshot);
+          setProviderConfig({ models, providers });
+          setAvailableUpdate(update);
+          setIsUpdateDialogOpen(update?.status === "critical");
+          setIsStartupReady(true);
+          if (remoteConfig.usingCachedConfig) {
+            useWorkspaceStore.setState({
+              providerModelsError:
+                "Wizzle is using its last validated configuration because the remote source is unavailable.",
+            });
+          }
           frontendLogger.info("frontend.app", "workspace_hydrated", {
+            configRevision: remoteConfig.revision,
+            modelCount: models.length,
             projectCount: snapshot.projects.length,
+            providerCount: providers.length,
             selectedProjectIdLength: snapshot.selectedProjectId.length,
             selectedSessionPresent: Boolean(snapshot.selectedSessionId),
+            usingCachedConfig: remoteConfig.usingCachedConfig,
           });
         }
       })
@@ -124,33 +157,7 @@ export function AppPage() {
     return () => {
       isMounted = false;
     };
-  }, [hasHydratedWorkspace, hydrateWorkspace, startupRetryKey]);
-
-  useEffect(() => {
-    let isMounted = true;
-
-    void Promise.all([listProviders(), listProviderModels()])
-      .then(([providers, models]) => {
-        if (isMounted) {
-          setProviderConfig({ models, providers });
-          frontendLogger.info("frontend.app", "provider_models_loaded", {
-            modelCount: models.length,
-            providerCount: providers.length,
-          });
-        }
-      })
-      .catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        frontendLogger.error("frontend.app", "provider_models_load_failed", { error, message });
-        if (isMounted) {
-          useWorkspaceStore.setState({ providerModelsError: message });
-        }
-      });
-
-    return () => {
-      isMounted = false;
-    };
-  }, [setProviderConfig]);
+  }, [hydrateWorkspace, setProviderConfig, startupRetryKey]);
 
   useEffect(() => {
     // App close / refresh: pending approvals cannot be completed by a dead process.
@@ -279,7 +286,11 @@ export function AppPage() {
             ].join(" ")}
             style={{ width: sidebarWidth }}
           >
-            <Sidebar onOpenProviders={() => setActivePage("providers")} />
+            <Sidebar
+              availableUpdate={availableUpdate}
+              onOpenProviders={() => setActivePage("providers")}
+              onOpenUpdate={() => setIsUpdateDialogOpen(true)}
+            />
           </div>
           {isSidebarOpen ? (
             <div
@@ -366,7 +377,7 @@ export function AppPage() {
               </div>
             ) : null}
 
-            {hasHydratedWorkspace && activePage === "providers" ? (
+            {isStartupReady && hasHydratedWorkspace && activePage === "providers" ? (
               <Suspense
                 fallback={
                   <div className="flex min-h-0 flex-1 items-center justify-center text-ui text-[var(--color-text-secondary)]">
@@ -376,7 +387,7 @@ export function AppPage() {
               >
                 <ProviderSettingsPage onBack={() => setActivePage("chat")} />
               </Suspense>
-            ) : hasHydratedWorkspace ? (
+            ) : isStartupReady && hasHydratedWorkspace ? (
               <ChatView />
             ) : startupError ? (
               <div className="flex min-h-0 flex-1 items-center justify-center px-8 py-10">
@@ -400,7 +411,7 @@ export function AppPage() {
               </div>
             ) : (
               <div className="flex min-h-0 flex-1 items-center justify-center px-8 py-10 text-ui text-[var(--color-text-secondary)]">
-                Loading workspace...
+                Loading remote configuration…
               </div>
             )}
           </div>
@@ -438,6 +449,17 @@ export function AppPage() {
           </div>
         </div>
       </div>
+
+      {isUpdateDialogOpen && availableUpdate ? (
+        <AppUpdateDialog
+          onClose={() => {
+            if (availableUpdate.status !== "critical") {
+              setIsUpdateDialogOpen(false);
+            }
+          }}
+          update={availableUpdate}
+        />
+      ) : null}
 
       {isExitConfirmationOpen ? (
         <AppDialog

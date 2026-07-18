@@ -1,4 +1,5 @@
 import type { PreviewFile } from "../types/workspace";
+import { CONTEXT_CONTINUE_PROMPT } from "./agent/context-pressure";
 import { loadComposerState, saveComposerState } from "./local-workspace";
 
 /**
@@ -19,6 +20,11 @@ export type ComposerQueueItem = {
   prompt: string;
   status: ComposerQueueItemStatus;
 };
+
+/** Queue SQL predates item kinds, so restore the internal marker from its stable prompt. */
+export function inferComposerQueueItemKind(prompt: string): ComposerQueueItemKind {
+  return prompt === CONTEXT_CONTINUE_PROMPT ? "context_continue" : "user";
+}
 
 const queuesBySessionId = new Map<string, ComposerQueueItem[]>();
 const listenersBySessionId = new Map<string, Set<() => void>>();
@@ -158,10 +164,10 @@ export function createComposerQueueItem(options: {
  * Enqueue at most one context-continue at the front. Replaces any other queued
  * context_continue items so pressure does not stack duplicate continues.
  */
-export function enqueueContextContinue(
+export async function enqueueContextContinue(
   sessionId: string,
   prompt: string,
-): ComposerQueueItem {
+): Promise<ComposerQueueItem> {
   const item = createComposerQueueItem({
     attachments: [],
     kind: "context_continue",
@@ -171,7 +177,7 @@ export function enqueueContextContinue(
     (entry) => entry.kind !== "context_continue" || entry.status === "sending",
   );
   setComposerSessionQueue(sessionId, [item, ...existing]);
-  void persistQueueOnly(sessionId, getComposerSessionQueue(sessionId));
+  await persistQueueOnly(sessionId, getComposerSessionQueue(sessionId));
   return item;
 }
 
@@ -209,7 +215,7 @@ export type DrainComposerSessionQueueDeps = {
   sendPrompt: (
     prompt: string,
     attachments: PreviewFile[],
-    options?: { projectId?: string; sessionId?: string },
+    options?: { forceCompaction?: boolean; projectId?: string; sessionId?: string },
   ) => Promise<ComposerQueueSendResult>;
 };
 
@@ -250,6 +256,7 @@ export async function drainComposerSessionQueue(
 
   try {
     const result = await deps.sendPrompt(next.prompt, next.attachments, {
+      forceCompaction: next.kind === "context_continue",
       projectId,
       sessionId,
     });

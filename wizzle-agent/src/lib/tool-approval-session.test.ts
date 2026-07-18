@@ -16,7 +16,7 @@ function approval(sessionId: string, toolCallId: string): ToolApprovalRequest {
     summary: "test",
     timeout: "30s",
     toolCallId,
-    toolName: "bash",
+    toolName: "shell",
   };
 }
 

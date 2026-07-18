@@ -10,8 +10,8 @@ use serde_json::{json, Value};
 use super::{
     output, pathing,
     shared::{
-        content_hash, run_blocking, MAX_LINE_LENGTH, MAX_READ_BYTES, MAX_READ_LINES,
-        MAX_READ_SOURCE_BYTES,
+        content_hash, run_blocking, DEFAULT_READ_LINES, MAX_LINE_LENGTH, MAX_READ_BYTES,
+        MAX_READ_LINES, MAX_READ_SOURCE_BYTES,
     },
 };
 use crate::agent::types::AgentToolRunPayload;
@@ -109,7 +109,7 @@ fn execute(
     let offset = arguments.offset.unwrap_or(1).max(1);
     let limit = arguments
         .limit
-        .unwrap_or(MAX_READ_LINES)
+        .unwrap_or(DEFAULT_READ_LINES)
         .clamp(1, MAX_READ_LINES);
     let page = build_text_page(&content, offset, limit);
     let mime = infer_text_mime(&path);
@@ -364,9 +364,9 @@ mod tests {
 
         assert_eq!(output["type"], "text-page");
         assert_eq!(output["offset"], 1);
-        assert_eq!(page_content.lines().count(), 2_000);
+        assert_eq!(page_content.lines().count(), 400);
         assert_eq!(output["truncated"], true);
-        assert_eq!(output["next"], 2_001);
+        assert_eq!(output["next"], 401);
 
         fs::remove_dir_all(root).expect("remove test root");
     }

@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 pub const MAX_COMMAND_OUTPUT_BYTES: usize = 120_000;
 pub const MAX_TOOL_FILE_CONTENT_BYTES: usize = 60_000;
 pub const MAX_READ_BYTES: usize = 51_200;
+pub const DEFAULT_READ_LINES: usize = 400;
 pub const MAX_READ_LINES: usize = 2_000;
 pub const MAX_LINE_LENGTH: usize = 2_000;
 pub const MAX_READ_SOURCE_BYTES: usize = 20 * 1024 * 1024;

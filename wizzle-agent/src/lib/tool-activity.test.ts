@@ -1,4 +1,9 @@
-import { buildActivitySegments, collectToolRuns, resolveClarifyToolPresentation } from "./tool-activity.ts";
+import {
+  buildActivitySegments,
+  collectToolRuns,
+  extractLinkedFileFromToolResult,
+  resolveClarifyToolPresentation,
+} from "./tool-activity.ts";
 import type { MessagePart } from "../types/workspace.ts";
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -126,7 +131,7 @@ function main() {
   }
 
   const backgroundActions = [
-    [{ action: "run", background: true, command: "npm run dev" }, { background: true, process: { id: "process-1", pid: 123, status: "running" } }, "Started a background process"],
+    [{ action: "run", command: "npm run dev", type: "background" }, { background: true, process: { id: "process-1", pid: 123, status: "running" } }, "Started a background process"],
     [{ action: "list_processes" }, { processes: [{ id: "process-1", pid: 123, status: "running" }] }, "Checked background processes"],
     [{ action: "read_process", processId: "process-1" }, { process: { id: "process-1", pid: 123, status: "running" } }, "Checked a background process"],
     [{ action: "stop_process", processId: "process-1" }, { process: { id: "process-1", pid: 123, status: "interrupted" } }, "Stopped a background process"],
@@ -134,76 +139,69 @@ function main() {
   for (const [input, output, expectedLabel] of backgroundActions) {
     const [run] = collectToolRuns([
       {
-        id: `bash-${input.action}-call`,
+        id: `shell-${input.action}-call`,
         input: JSON.stringify(input),
-        name: "bash",
+        name: "shell",
         status: "done",
-        toolCallId: `bash-${input.action}`,
+        toolCallId: `shell-${input.action}`,
         type: "tool_call",
       },
       {
-        id: `bash-${input.action}-result`,
+        id: `shell-${input.action}-result`,
         output: JSON.stringify({ ok: true, ...output }),
         status: "done",
-        toolCallId: `bash-${input.action}`,
+        toolCallId: `shell-${input.action}`,
         type: "tool_result",
       },
     ]);
     assert(run?.detailLabel === expectedLabel, `${input.action} uses its background-process label`);
   }
 
-  const [todoRun] = collectToolRuns([
+  const [planRun] = collectToolRuns([
     {
-      id: "todo-call",
-      input: JSON.stringify({
-        action: "create",
-        items: ["Implement notes"],
-        type: "creating_project",
-      }),
-      name: "todo",
+      id: "plan-call",
+      input: JSON.stringify({ action: "create" }),
+      name: "implementation_plan",
       status: "done",
-      toolCallId: "todo-1",
+      toolCallId: "plan-1",
       type: "tool_call",
     },
     {
-      id: "todo-result",
+      id: "plan-result",
       output: JSON.stringify({
-        addedItems: ["Inspect the workspace"],
-        currentItem: { id: "todo-a", status: "in_progress", title: "Inspect the workspace" },
-        items: [
-          { id: "todo-a", status: "in_progress", title: "Inspect the workspace" },
-          { id: "todo-b", status: "pending", title: "Implement notes" },
+        currentStep: { id: "plan-a", status: "pending", title: "Implement notes" },
+        path: "/tmp/implementation-plan.md",
+        steps: [
+          { id: "plan-a", status: "pending", title: "Implement notes" },
+          { id: "plan-b", status: "pending", title: "Verify notes" },
         ],
         ok: true,
-        type: "creating_project",
+        stopTurn: true,
       }),
       status: "done",
-      toolCallId: "todo-1",
+      toolCallId: "plan-1",
       type: "tool_result",
     },
   ]);
-  assert(todoRun?.kind === "todo", "TODO gets a dedicated compact UI kind");
-  assert(todoRun?.isExpandable, "TODO details are available on demand");
-  assert(todoRun?.detailLabel === "Created session TODO", "TODO create has a concise label");
-
-  const [clearTodoRun] = collectToolRuns([
-    {
-      id: "todo-clear-call",
-      input: JSON.stringify({ action: "clear" }),
-      name: "todo",
+  assert(planRun?.kind === "implementation_plan", "planner gets a dedicated compact UI kind");
+  assert(planRun?.isExpandable, "plan details are available on demand");
+  assert(planRun?.detailLabel === "Created implementation plan", "plan create has a concise label");
+  assert(
+    extractLinkedFileFromToolResult({
+      content: JSON.stringify({ path: "/tmp/implementation-plan.md", stopTurn: true }),
       status: "done",
-      toolCallId: "todo-clear",
-      type: "tool_call",
-    },
-    {
-      id: "todo-clear-result",
-      output: JSON.stringify({ items: [], ok: true }),
+      toolName: "implementation_plan",
+    })?.action === "plan",
+    "created plans become linked Read plan files",
+  );
+  assert(
+    !extractLinkedFileFromToolResult({
+      content: JSON.stringify({ path: "/tmp/implementation-plan.md", stopTurn: false }),
       status: "done",
-      toolCallId: "todo-clear",
-      type: "tool_result",
-    },
-  ]);
-  assert(!clearTodoRun?.isExpandable, "successful TODO clear stays collapsed");
+      toolName: "implementation_plan",
+    }),
+    "step updates do not duplicate the plan tile",
+  );
 
   const [clarifyRun] = collectToolRuns([
     {

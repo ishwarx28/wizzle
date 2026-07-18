@@ -16,7 +16,9 @@ import type {
   PersistedTurnSummaryRecord,
   PreviewFile,
   ProviderInfo,
+  ProviderHeader,
   ProviderModelInfo,
+  ProviderRequestField,
   SessionRuntimeState,
   Session,
   SessionEvent,
@@ -123,8 +125,11 @@ export async function listProviderModels() {
 
 export async function upsertProvider(input: {
   apiKey?: string;
+  defaultMaxContext?: number;
+  defaultMaxOutputTokens?: number;
   defaultModelId?: string;
   endpoint: string;
+  headers?: ProviderHeader[];
   id?: string;
   models?: Array<{
     capabilities?: string[];
@@ -132,17 +137,29 @@ export async function upsertProvider(input: {
     maxContext?: number;
     maxOutputTokens?: number;
     modelId: string;
-    reasoningLevels?: string[];
-    tokenizerJson?: string;
-    tokenizerKind?: string;
   }>;
   name: string;
   onlySpecifiedModels?: boolean;
   replaceModels?: boolean;
   providerType: string;
-  tokenizerJson?: string;
+  requestFields?: ProviderRequestField[];
 }) {
   return invoke<string>("upsert_provider", { input });
+}
+
+export async function setupManagedProvider(input: {
+  apiKey?: string;
+  providerConfigId: string;
+  setupValues: Record<string, string>;
+}) {
+  return invoke<string>("setup_managed_provider", { input });
+}
+
+export async function updateManagedProviderApiKey(input: {
+  apiKey?: string;
+  providerId: string;
+}) {
+  return invoke("update_managed_provider_api_key", { input });
 }
 
 export async function deleteProvider(providerId: string) {
@@ -165,15 +182,6 @@ export async function refreshProviderModels(
       fetchAll: options?.fetchAll ?? false,
       providerId,
       removeInvalid: options?.removeInvalid ?? false,
-    },
-  });
-}
-
-export async function importProviderYaml(yaml: string, source?: string) {
-  return invoke("import_provider_yaml", {
-    input: {
-      source: source ?? null,
-      yaml,
     },
   });
 }
@@ -348,6 +356,7 @@ function buildPersistedMessages(messages: Message[]) {
       id: message.id,
       linkedFileIds: message.linkedFileIds ?? [],
       reasoning: null,
+      reasoningReplay: message.reasoningReplay ?? null,
       reasoningDurationMs: null,
       role: message.role,
       startedAtMs: message.startedAtMs ?? null,
@@ -419,9 +428,9 @@ export async function reconcileEntireSessionForExplicitEditOrRepair(input: {
         replayTurnSummaries: buildPersistedTurnSummaries(input.session.replayTurnSummaries),
         selectedModelUuid: input.session.selectedModelUuid ?? input.session.modelId ?? null,
         systemPromptHash: input.session.systemPromptHash ?? null,
-        tokenizerKind: input.session.tokenizerKind ?? null,
+        systemPromptTokens: input.session.systemPromptTokens ?? 0,
         title: input.session.title,
-        toolDefTokens: toolDefinitionsMetadata.tokens,
+        toolDefTokens: input.session.toolDefTokens ?? toolDefinitionsMetadata.tokens,
         toolDefsHash: input.session.toolDefsHash ?? toolDefinitionsMetadata.hash,
         updatedAtMs: input.session.updatedAtMs ?? Date.now(),
       },
@@ -441,9 +450,9 @@ function buildPersistedSessionMetadata(session: Session) {
     reasoningLevel: session.reasoningLevel ?? null,
     selectedModelUuid: session.selectedModelUuid ?? session.modelId ?? null,
     systemPromptHash: session.systemPromptHash ?? null,
+    systemPromptTokens: session.systemPromptTokens ?? 0,
     title: session.title,
-    tokenizerKind: session.tokenizerKind ?? null,
-    toolDefTokens: toolDefinitionsMetadata.tokens,
+    toolDefTokens: session.toolDefTokens ?? toolDefinitionsMetadata.tokens,
     toolDefsHash: session.toolDefsHash ?? toolDefinitionsMetadata.hash,
     updatedAtMs: session.updatedAtMs ?? Date.now(),
   };
@@ -485,7 +494,6 @@ export async function updateSessionSelection(input: {
   permissionMode?: PermissionMode | null;
   reasoningLevel?: string | null;
   sessionId: string;
-  tokenizerKind?: string | null;
   updatedAtMs?: number;
 }) {
   const toolDefinitionsMetadata = resolveToolDefinitionsMetadata();
@@ -497,7 +505,6 @@ export async function updateSessionSelection(input: {
       projectId: input.projectId,
       selectedModelUuid: input.selectedModelUuid ?? null,
       sessionId: input.sessionId,
-      tokenizerKind: input.tokenizerKind ?? null,
       toolDefTokens: toolDefinitionsMetadata.tokens,
       toolDefsHash: toolDefinitionsMetadata.hash,
       updatedAtMs: input.updatedAtMs ?? Date.now(),

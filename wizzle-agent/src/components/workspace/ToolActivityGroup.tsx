@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Circle, CircleCheckBig, CircleDot, CircleX } from "lucide-react";
+import { ChevronDown, ChevronRight, Circle, CircleCheckBig, CircleDot } from "lucide-react";
 
 import { useAutoDisclosure } from "../../hooks/use-auto-disclosure";
 import { shouldOpenToolGroup } from "../../lib/activity-disclosure";
@@ -42,13 +42,13 @@ function processOutput(process: ProcessPayload | null | undefined) {
   return [process?.stdoutTail, process?.stderrTail].filter((value) => value?.trim()).join("\n\n").trim();
 }
 
-function bashAction(run: ToolRunEntry) {
+function shellAction(run: ToolRunEntry) {
   return run.callPayload?.action ?? "run";
 }
 
 function isBackgroundStart(run: ToolRunEntry) {
-  return bashAction(run) === "run" &&
-    (run.callPayload?.background === true || run.resultPayload?.background === true);
+  return shellAction(run) === "run" &&
+    (run.callPayload?.type === "background" || run.resultPayload?.background === true);
 }
 
 function ProcessFields({ process, showCommand = false }: { process?: ProcessPayload | null; showCommand?: boolean }) {
@@ -61,8 +61,8 @@ function ProcessFields({ process, showCommand = false }: { process?: ProcessPayl
   ]} />;
 }
 
-function BashToolDetails({ outputText, run }: { outputText: string; run: ToolRunEntry }) {
-  const action = bashAction(run);
+function ShellToolDetails({ outputText, run }: { outputText: string; run: ToolRunEntry }) {
+  const action = shellAction(run);
   const process = run.resultPayload?.process ?? {
     command: run.callPayload?.command,
     id: run.callPayload?.processId,
@@ -110,7 +110,16 @@ function BashToolDetails({ outputText, run }: { outputText: string; run: ToolRun
   }
 
   if (isBackgroundStart(run)) {
-    return <ProcessFields process={process} showCommand />;
+    return (
+      <div>
+        {run.resultPayload?.autoBackgrounded ? (
+          <p className="border-b border-[var(--color-border)] px-3 py-2 text-[11px] text-[var(--color-text-secondary)]">
+            Moved to background automatically. {run.resultPayload.backgroundReason ?? "The command appears designed to keep running."}
+          </p>
+        ) : null}
+        <ProcessFields process={process} showCommand />
+      </div>
+    );
   }
 
   return (
@@ -264,26 +273,24 @@ function SubagentToolDetails({ run }: { run: ToolRunEntry }) {
   return <SubagentFields fields={[["Action", action ?? "unknown"]]} />;
 }
 
-function TodoToolDetails({ run }: { run: ToolRunEntry }) {
+function ImplementationPlanToolDetails({ run }: { run: ToolRunEntry }) {
   const payload = { ...(run.callPayload ?? {}), ...(run.resultPayload ?? {}) };
-  const items = (payload.items ?? []).map((item) => typeof item === "string"
-    ? { status: "pending", title: item }
-    : item);
-  if (items.length === 0) {
-    return <p className="px-3 py-2 text-[12px] text-[var(--color-text-tertiary)]">No TODO items.</p>;
+  const steps = payload.steps ?? [];
+  if (steps.length === 0) {
+    return <p className="px-3 py-2 text-[12px] text-[var(--color-text-tertiary)]">No plan steps.</p>;
   }
   return (
     <div className="max-h-56 space-y-1 overflow-y-auto px-3 py-2">
-      {items.map((item, index) => {
-        const Icon = item.status === "completed" ? CircleCheckBig : item.status === "cancelled" ? CircleX : item.status === "in_progress" ? CircleDot : Circle;
+      {steps.map((step, index) => {
+        const Icon = step.status === "completed" ? CircleCheckBig : step.status === "in_progress" ? CircleDot : Circle;
         return (
-          <div className="flex items-start gap-2 text-[12px] leading-4" key={item.id ?? `${item.title}-${index}`}>
+          <div className="flex items-start gap-2 text-[12px] leading-4" key={step.id ?? `${step.title}-${index}`}>
             <Icon className={[
               "mt-0.5 h-3.5 w-3.5 shrink-0",
-              item.status === "completed" ? "text-[var(--color-brand-green)]" : "text-[var(--color-text-tertiary)]",
+              step.status === "completed" ? "text-[var(--color-brand-green)]" : "text-[var(--color-text-tertiary)]",
             ].join(" ")} />
-            <span className={item.status === "completed" || item.status === "cancelled" ? "text-[var(--color-text-tertiary)] line-through" : item.status === "in_progress" ? "font-medium text-[var(--color-text)]" : "text-[var(--color-text-secondary)]"}>
-              {item.title ?? "Untitled item"}
+            <span className={step.status === "completed" ? "text-[var(--color-text-tertiary)] line-through" : step.status === "in_progress" ? "font-medium text-[var(--color-text)]" : "text-[var(--color-text-secondary)]"}>
+              {step.title ?? "Untitled step"}
             </span>
           </div>
         );
@@ -334,7 +341,7 @@ function ToolRunRow({
     typeof run.resultPayload?.afterContent === "string";
   const errorText = run.resultPayload?.error ?? run.result?.error ?? "";
   const isExpandable = run.isExpandable || Boolean(outputText) || Boolean(errorText) || isActive;
-  const isBackgroundBash = run.kind === "bash" && isBackgroundStart(run);
+  const isBackgroundShell = run.kind === "shell" && isBackgroundStart(run);
 
   return (
     <div>
@@ -353,7 +360,7 @@ function ToolRunRow({
             <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-tertiary)]" />
           )}
           <span className="min-w-0 flex-1 truncate">{run.detailLabel}</span>
-          {isBackgroundBash ? (
+          {isBackgroundShell ? (
             <span className="shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 text-[11px] uppercase tracking-wide text-[var(--color-text-tertiary)]">
               Background
             </span>
@@ -362,7 +369,7 @@ function ToolRunRow({
       ) : (
         <div className="flex items-center gap-2 py-1 text-ui-tight text-[var(--color-text-secondary)]">
           <span className="min-w-0 flex-1 truncate">{run.detailLabel}</span>
-          {isBackgroundBash ? (
+          {isBackgroundShell ? (
             <span className="shrink-0 rounded-full border border-[var(--color-border)] px-1.5 py-0.5 text-[11px] uppercase tracking-wide text-[var(--color-text-tertiary)]">
               Background
             </span>
@@ -388,9 +395,9 @@ function ToolRunRow({
                   title={run.resourceLabel}
                 />
               ) : null}
-              {run.kind === "bash" ? (
+              {run.kind === "shell" ? (
                 <div className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-panel-muted)_68%,transparent)]">
-                  <BashToolDetails outputText={outputText} run={run} />
+                  <ShellToolDetails outputText={outputText} run={run} />
                 </div>
               ) : null}
               {run.kind === "subagent" ? (
@@ -401,9 +408,9 @@ function ToolRunRow({
                   <div className="max-h-[280px] overflow-auto"><SubagentToolDetails run={run} /></div>
                 </div>
               ) : null}
-              {run.kind === "todo" ? (
+              {run.kind === "implementation_plan" ? (
                 <div className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-panel-muted)_68%,transparent)]">
-                  <TodoToolDetails run={run} />
+                  <ImplementationPlanToolDetails run={run} />
                 </div>
               ) : null}
               {run.kind === "clarify" ? (

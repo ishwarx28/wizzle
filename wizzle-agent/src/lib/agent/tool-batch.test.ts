@@ -10,7 +10,7 @@ function main() {
   assert(
     findIncompleteToolCallIds([
       { id: "done", name: "read", status: "done" },
-      { id: "failed", name: "bash", status: "error" },
+      { id: "failed", name: "shell", status: "error" },
       { id: "stopped", name: "write", status: "interrupted" },
     ]).length === 0,
     "terminal batch is complete",
@@ -19,7 +19,7 @@ function main() {
     findIncompleteToolCallIds([
       { id: "done", name: "read", status: "done" },
       { id: "pending", name: "read", status: "pending" },
-      { id: "running", name: "bash", status: "running" },
+      { id: "running", name: "shell", status: "running" },
     ]).join(",") === "pending,running",
     "pending and running calls block context selection",
   );

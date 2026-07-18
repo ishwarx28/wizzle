@@ -33,6 +33,7 @@ pub struct WorkspaceMessagePayload {
     pub id: String,
     pub linked_file_ids: Option<Vec<String>>,
     pub reasoning: Option<String>,
+    pub reasoning_replay: Option<serde_json::Value>,
     pub reasoning_duration_ms: Option<u64>,
     pub role: String,
     pub tool_call_id: Option<String>,
@@ -96,6 +97,8 @@ pub struct WorkspaceSessionPayload {
     pub selected_model_uuid: Option<String>,
     #[serde(default)]
     pub system_prompt_hash: Option<String>,
+    #[serde(default)]
+    pub system_prompt_tokens: Option<u64>,
     #[serde(default)]
     pub tokenizer_kind: Option<String>,
     #[serde(default)]
@@ -204,6 +207,7 @@ pub struct StoredSessionMetadata {
     pub id: String,
     pub model_id: Option<String>,
     pub permission_mode: Option<String>,
+    /// Compatibility storage slot for a variant id or encoded structured selection.
     #[serde(default)]
     pub reasoning_level: Option<String>,
     pub project_id: String,
@@ -213,6 +217,8 @@ pub struct StoredSessionMetadata {
     pub selected_model_uuid: Option<String>,
     #[serde(default)]
     pub system_prompt_hash: Option<String>,
+    #[serde(default)]
+    pub system_prompt_tokens: Option<u64>,
     #[serde(default)]
     pub tokenizer_kind: Option<String>,
     #[serde(default)]
@@ -235,6 +241,8 @@ pub struct StoredMessageRecord {
     pub id: String,
     pub linked_file_ids: Vec<String>,
     pub reasoning: Option<String>,
+    #[serde(default)]
+    pub reasoning_replay: Option<serde_json::Value>,
     pub reasoning_duration_ms: Option<u64>,
     pub attachments: Vec<StoredAttachmentRecord>,
     pub role: String,
@@ -379,13 +387,14 @@ pub struct LoadWorkspaceSessionInput {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LoadTodoStateInput {
+pub struct LoadImplementationPlanStateInput {
     pub session_id: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SaveTodoStateInput {
+pub struct SaveImplementationPlanStateInput {
+    pub plan_markdown: String,
     pub session_id: String,
     pub state_json: String,
     pub updated_at_ms: u64,
@@ -393,7 +402,8 @@ pub struct SaveTodoStateInput {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TodoStatePayload {
+pub struct ImplementationPlanStatePayload {
+    pub plan_path: String,
     pub session_id: String,
     pub state_json: String,
     pub updated_at_ms: u64,
@@ -471,6 +481,8 @@ pub struct PersistedSessionMetadataInput {
     pub reasoning_level: Option<String>,
     pub selected_model_uuid: Option<String>,
     pub system_prompt_hash: Option<String>,
+    #[serde(default)]
+    pub system_prompt_tokens: Option<u64>,
     pub title: String,
     pub tokenizer_kind: Option<String>,
     pub tool_def_tokens: Option<u64>,
@@ -554,6 +566,8 @@ pub struct PersistedSessionInput {
     #[serde(default)]
     pub system_prompt_hash: Option<String>,
     #[serde(default)]
+    pub system_prompt_tokens: Option<u64>,
+    #[serde(default)]
     pub tokenizer_kind: Option<String>,
     #[serde(default)]
     pub tool_def_tokens: Option<u64>,
@@ -575,6 +589,8 @@ pub struct PersistedMessageInput {
     pub id: String,
     pub linked_file_ids: Option<Vec<String>>,
     pub reasoning: Option<String>,
+    #[serde(default)]
+    pub reasoning_replay: Option<serde_json::Value>,
     pub reasoning_duration_ms: Option<u64>,
     pub role: String,
     pub started_at_ms: Option<u64>,

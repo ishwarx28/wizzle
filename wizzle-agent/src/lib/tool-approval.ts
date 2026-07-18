@@ -4,7 +4,7 @@ import type { ToolExecutionPayload } from "./agent/message-factories";
 import {
   collectToolPathCandidates,
   createExternalPathWarning,
-  isWhitelistedBashCommand,
+  isWhitelistedShellCommand,
   type ResolvedPathCandidate,
 } from "./tool-path-risk";
 import { DEFAULT_TOOL_TIMEOUT } from "./agent/tool-timeouts";
@@ -38,7 +38,7 @@ function parseArguments(argumentsText: string): ToolArgumentPayload {
 }
 
 function summarizeRequest(toolName: ApprovalToolName, payload: ToolArgumentPayload) {
-  if (toolName === "bash") {
+  if (toolName === "shell") {
     return "Wizzle wants to run a command.";
   }
 
@@ -91,16 +91,16 @@ export async function createToolApprovalRequest(input: {
   toolCallId: string;
   toolName: string;
 }): Promise<ToolApprovalRequest | null> {
-  if (!["bash", "edit", "read", "write"].includes(input.toolName)) {
+  if (!["shell", "edit", "read", "write"].includes(input.toolName)) {
     return null;
   }
 
   const toolName = input.toolName as ApprovalToolName;
   const payload = parseArguments(input.arguments);
-  const command = toolName === "bash" ? payload.command?.trim() : undefined;
-  const description = toolName === "bash" ? payload.description?.trim() || undefined : undefined;
-  const path = toolName !== "bash" ? payload.path?.trim() : undefined;
-  const cwd = toolName === "bash" ? payload.cwd?.trim() : undefined;
+  const command = toolName === "shell" ? payload.command?.trim() : undefined;
+  const description = toolName === "shell" ? payload.description?.trim() || undefined : undefined;
+  const path = toolName !== "shell" ? payload.path?.trim() : undefined;
+  const cwd = toolName === "shell" ? payload.cwd?.trim() : undefined;
   const pathCandidates = collectToolPathCandidates({
     command,
     path,
@@ -129,10 +129,10 @@ export async function createToolApprovalRequest(input: {
   });
 
   const canRunWithoutApproval =
-    (toolName === "bash" && input.permissionMode === "full-access") ||
+    (toolName === "shell" && input.permissionMode === "full-access") ||
     (!warning &&
-      ((toolName === "bash" && isWhitelistedBashCommand(command ?? "")) ||
-        (toolName !== "bash" &&
+      ((toolName === "shell" && isWhitelistedShellCommand(command ?? "")) ||
+        (toolName !== "shell" &&
           (input.permissionMode === "full-access" || toolName === "read"))));
 
   if (canRunWithoutApproval) {

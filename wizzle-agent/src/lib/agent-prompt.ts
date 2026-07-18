@@ -1,5 +1,9 @@
 import type { AgentGlobalSkillFile, AgentInstructionFile } from "./agent-runtime";
-import baseSystemPrompt from "./prompts/system-prompt.txt?raw";
+import { getRemotePrompt } from "./remote-config";
+import {
+  resolveCommandShell,
+  type RuntimeOperatingSystem,
+} from "./runtime-environment";
 
 const MISSING_AGENTS_FILE =
   "No AGENTS.md file is currently available for this project. Treat this as already checked unless the user asks or there is reason to think it changed.";
@@ -21,7 +25,7 @@ function buildEnvironmentBlock(options: {
   currentYear: number;
   gitTrackedState: string;
   imageCapable: boolean;
-  operatingSystem: string;
+  operatingSystem: RuntimeOperatingSystem;
   platform: string;
   projectRoot: string;
 }) {
@@ -33,6 +37,7 @@ function buildEnvironmentBlock(options: {
     `Current year: ${options.currentYear}`,
     `Platform: ${options.platform}`,
     `OS: ${options.operatingSystem}`,
+    `Command shell: ${resolveCommandShell(options.operatingSystem)}`,
     `Git tracked state: ${options.gitTrackedState || "Unknown."}`,
     // Tell the model not to read images when the selected model cannot view them (#40/#41).
     options.imageCapable ? "image: enabled" : "image: disabled",
@@ -89,7 +94,7 @@ export function buildWorkspaceSystemPrompt(options: {
   /** When false, environment includes `image: disabled` so the model avoids image reads. */
   imageCapable?: boolean;
   instructionFiles: AgentInstructionFile[];
-  operatingSystem: string;
+  operatingSystem: RuntimeOperatingSystem;
   platform: string;
   projectRoot: string;
   sessionCacheDir: string | null;
@@ -97,7 +102,7 @@ export function buildWorkspaceSystemPrompt(options: {
   const imageCapable = options.imageCapable ?? true;
 
   return [
-    baseSystemPrompt.trim(),
+    getRemotePrompt("system"),
     buildEnvironmentBlock({
       currentYear: options.currentYear,
       gitTrackedState: options.gitTrackedState,

@@ -33,9 +33,9 @@ async function main() {
       description: "Run the test suite.",
     }),
     permissionMode: "manual-approve",
-    toolName: "bash",
+    toolName: "shell",
   });
-  assert(describedCommand?.description === "Run the test suite.", "preserves bash description");
+  assert(describedCommand?.description === "Run the test suite.", "preserves shell description");
 
   for (const command of [
     "pwd",
@@ -50,7 +50,7 @@ async function main() {
     const request = await approvalRequest({
       arguments: JSON.stringify({ command }),
       permissionMode: "manual-approve",
-      toolName: "bash",
+      toolName: "shell",
     });
     assert(request === null, `manual mode should allow whitelisted command: ${command}`);
   }
@@ -58,7 +58,7 @@ async function main() {
   const unsafeFind = await approvalRequest({
     arguments: JSON.stringify({ command: "find . -delete" }),
     permissionMode: "manual-approve",
-    toolName: "bash",
+    toolName: "shell",
   });
   assert(
     unsafeFind?.warning?.kind === "dangerous-command",
@@ -68,35 +68,35 @@ async function main() {
   const hiddenSearch = await approvalRequest({
     arguments: JSON.stringify({ command: "rg --hidden TOKEN ." }),
     permissionMode: "manual-approve",
-    toolName: "bash",
+    toolName: "shell",
   });
   assert(hiddenSearch !== null, "manual mode asks before searches that can read hidden files");
 
   const globRead = await approvalRequest({
     arguments: JSON.stringify({ command: "cat *.txt" }),
     permissionMode: "manual-approve",
-    toolName: "bash",
+    toolName: "shell",
   });
   assert(globRead !== null, "shell globs require approval because they can traverse symlinks");
 
   const commandSubstitution = await approvalRequest({
     arguments: JSON.stringify({ command: 'ls "$(printf src)"' }),
     permissionMode: "manual-approve",
-    toolName: "bash",
+    toolName: "shell",
   });
   assert(commandSubstitution !== null, "command substitutions are not whitelisted");
 
   const ordinaryCommand = await approvalRequest({
     arguments: JSON.stringify({ command: "npm test" }),
     permissionMode: "full-access",
-    toolName: "bash",
+    toolName: "shell",
   });
   assert(ordinaryCommand === null, "full access allows non-whitelisted shell commands");
 
   const privilegedRead = await approvalRequest({
     arguments: JSON.stringify({ command: "sudo ls" }),
     permissionMode: "full-access",
-    toolName: "bash",
+    toolName: "shell",
   });
   assert(
     privilegedRead === null,
@@ -106,21 +106,21 @@ async function main() {
   const outputWritingSort = await approvalRequest({
     arguments: JSON.stringify({ command: "sort input.txt -o output.txt" }),
     permissionMode: "manual-approve",
-    toolName: "bash",
+    toolName: "shell",
   });
   assert(outputWritingSort !== null, "commands with write modes are not whitelisted");
 
   const outsideCommand = await approvalRequest({
     arguments: JSON.stringify({ command: "ls /etc" }),
     permissionMode: "full-access",
-    toolName: "bash",
+    toolName: "shell",
   });
   assert(outsideCommand === null, "full access allows shell commands with external paths");
 
   const manualOutsideCommand = await approvalRequest({
     arguments: JSON.stringify({ command: "ls /etc" }),
     permissionMode: "manual-approve",
-    toolName: "bash",
+    toolName: "shell",
   });
   assert(
     manualOutsideCommand?.warning?.kind === "external-path",
@@ -130,7 +130,7 @@ async function main() {
   const manualPipelineOutsideCommand = await approvalRequest({
     arguments: JSON.stringify({ command: "find . -type f | cat /etc/hosts" }),
     permissionMode: "manual-approve",
-    toolName: "bash",
+    toolName: "shell",
   });
   assert(
     manualPipelineOutsideCommand?.warning?.kind === "external-path",
@@ -140,21 +140,21 @@ async function main() {
   const outsideCwd = await approvalRequest({
     arguments: JSON.stringify({ command: "ls", cwd: "/etc" }),
     permissionMode: "full-access",
-    toolName: "bash",
+    toolName: "shell",
   });
   assert(outsideCwd === null, "full access allows an external shell cwd");
 
   const dynamicTarget = await approvalRequest({
     arguments: JSON.stringify({ command: "ls $WIZZLE_TARGET" }),
     permissionMode: "full-access",
-    toolName: "bash",
+    toolName: "shell",
   });
   assert(dynamicTarget === null, "full access allows shell path variables");
 
   const dangerousCommand = await approvalRequest({
     arguments: JSON.stringify({ command: "rm -rf ." }),
     permissionMode: "full-access",
-    toolName: "bash",
+    toolName: "shell",
   });
   assert(dangerousCommand === null, "full access allows deletion inside the project");
 
