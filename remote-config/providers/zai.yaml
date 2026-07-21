@@ -1,0 +1,143 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "zai"
+provider:
+  id: "zai"
+  name: "Z.AI"
+  transport: "openai_chat_completions"
+  endpoint: "https://api.z.ai/api/paas/v4"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields: []
+  defaults:
+    modelId: "glm-4.7"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  thinking-type-toggle:
+    defaultVariantId: "default"
+    variants:
+      - id: "off"
+        label: "Off"
+        request:
+          - operation: "set"
+            path: "/thinking/type"
+            value: "disabled"
+      - id: "default"
+        label: "Default"
+        request: []
+      - id: "on"
+        label: "On"
+        request:
+          - operation: "set"
+            path: "/thinking/type"
+            value: "enabled"
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "glm-4.5"
+    displayName: "GLM-4.5"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 98304
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "glm-4.5-air"
+    displayName: "GLM-4.5-Air"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 98304
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "glm-4.5-flash"
+    displayName: "GLM-4.5-Flash"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 98304
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "glm-4.5v"
+    displayName: "GLM-4.5V"
+    capabilities: ["text", "image", "video"]
+    maxContext: 64000
+    maxOutputTokens: 16384
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "glm-4.6"
+    displayName: "GLM-4.6"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "glm-4.6v"
+    displayName: "GLM-4.6V"
+    capabilities: ["text", "image", "video"]
+    maxContext: 128000
+    maxOutputTokens: 32768
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "glm-4.7"
+    displayName: "GLM-4.7"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "glm-4.7-flash"
+    displayName: "GLM-4.7-Flash (free)"
+    capabilities: ["text"]
+    maxContext: 200000
+    maxOutputTokens: 131072
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "glm-4.7-flashx"
+    displayName: "GLM-4.7-FlashX"
+    capabilities: ["text"]
+    maxContext: 200000
+    maxOutputTokens: 131072
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "glm-5"
+    displayName: "GLM-5"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "glm-5-turbo"
+    displayName: "GLM-5-Turbo"
+    capabilities: ["text"]
+    maxContext: 200000
+    maxOutputTokens: 131072
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "glm-5.1"
+    displayName: "GLM-5.1"
+    capabilities: ["text"]
+    maxContext: 200000
+    maxOutputTokens: 131072
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "glm-5.2"
+    displayName: "GLM-5.2"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 131072
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "glm-5v-turbo"
+    displayName: "GLM-5V-Turbo"
+    capabilities: ["text", "image", "video"]
+    maxContext: 200000
+    maxOutputTokens: 131072
+    reasoningRef: "thinking-type-toggle"

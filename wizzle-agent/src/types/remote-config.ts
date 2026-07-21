@@ -11,6 +11,7 @@ export type RemoteDeveloper = {
 };
 
 export type RemoteUpdate = {
+  enabled: boolean;
   note: string;
   platform: "linux" | "macos" | "windows";
   status: "critical" | "normal";

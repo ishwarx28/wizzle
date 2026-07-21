@@ -1,0 +1,150 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "ollama-cloud"
+provider:
+  id: "ollama-cloud"
+  name: "Ollama Cloud"
+  transport: "openai_chat_completions"
+  endpoint: "https://ollama.com/v1"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields: []
+  defaults:
+    modelId: "deepseek-v4-flash"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  replay-openai:
+    variants: []
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "deepseek-v4-flash"
+    displayName: "deepseek-v4-flash (free)"
+    capabilities: ["text"]
+    maxContext: 1048576
+    maxOutputTokens: 1048576
+    reasoningRef: "replay-openai"
+  - modelId: "deepseek-v4-pro"
+    displayName: "deepseek-v4-pro (free)"
+    capabilities: ["text"]
+    maxContext: 1048576
+    maxOutputTokens: 1048576
+    reasoningRef: "replay-openai"
+  - modelId: "gemma4:31b"
+    displayName: "gemma4:31b (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "replay-openai"
+  - modelId: "glm-5.1"
+    displayName: "glm-5.1 (free)"
+    capabilities: ["text"]
+    maxContext: 202752
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "glm-5.2"
+    displayName: "GLM-5.2 (free)"
+    capabilities: ["text"]
+    maxContext: 976000
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "gpt-oss:120b"
+    displayName: "gpt-oss:120b (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "replay-openai"
+  - modelId: "gpt-oss:20b"
+    displayName: "gpt-oss:20b (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "replay-openai"
+  - modelId: "kimi-k2.5"
+    displayName: "kimi-k2.5 (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "replay-openai"
+  - modelId: "kimi-k2.6"
+    displayName: "kimi-k2.6 (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "replay-openai"
+  - modelId: "kimi-k2.7-code"
+    displayName: "kimi-k2.7-code (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "replay-openai"
+  - modelId: "minimax-m2.5"
+    displayName: "minimax-m2.5 (free)"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "minimax-m2.7"
+    displayName: "minimax-m2.7 (free)"
+    capabilities: ["text"]
+    maxContext: 196608
+    maxOutputTokens: 196608
+    reasoningRef: "replay-openai"
+  - modelId: "minimax-m3"
+    displayName: "minimax-m3 (free)"
+    capabilities: ["text", "image", "video"]
+    maxContext: 512000
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "mistral-large-3:675b"
+    displayName: "mistral-large-3:675b (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "nemotron-3-nano:30b"
+    displayName: "nemotron-3-nano:30b (free)"
+    capabilities: ["text"]
+    maxContext: 1048576
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "nemotron-3-super"
+    displayName: "nemotron-3-super (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "replay-openai"
+  - modelId: "nemotron-3-ultra"
+    displayName: "nemotron-3-ultra (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 128000
+    reasoningRef: "replay-openai"
+  - modelId: "qwen3.5:397b"
+    displayName: "qwen3.5:397b (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "replay-openai"

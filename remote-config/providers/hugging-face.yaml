@@ -1,0 +1,329 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "huggingface"
+provider:
+  id: "hugging-face"
+  name: "Hugging Face"
+  transport: "openai_chat_completions"
+  endpoint: "https://router.huggingface.co/v1"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields: []
+  defaults:
+    modelId: "deepseek-ai/DeepSeek-R1"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  replay-openai:
+    variants: []
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "deepseek-ai/DeepSeek-R1"
+    displayName: "DeepSeek-R1 (free)"
+    capabilities: ["text"]
+    maxContext: 64000
+    maxOutputTokens: 32768
+    reasoningRef: "replay-openai"
+  - modelId: "deepseek-ai/DeepSeek-R1-0528"
+    displayName: "DeepSeek-R1-0528 (free)"
+    capabilities: ["text"]
+    maxContext: 163840
+    maxOutputTokens: 163840
+    reasoningRef: "replay-openai"
+  - modelId: "deepseek-ai/DeepSeek-V3.2"
+    displayName: "DeepSeek-V3.2 (free)"
+    capabilities: ["text"]
+    maxContext: 163840
+    maxOutputTokens: 65536
+    reasoningRef: "replay-openai"
+  - modelId: "deepseek-ai/DeepSeek-V4-Flash"
+    displayName: "DeepSeek V4 Flash (free)"
+    capabilities: ["text"]
+    maxContext: 1048576
+    maxOutputTokens: 384000
+    reasoningRef: "replay-openai"
+  - modelId: "deepseek-ai/DeepSeek-V4-Pro"
+    displayName: "DeepSeek V4 Pro (free)"
+    capabilities: ["text"]
+    maxContext: 1048576
+    maxOutputTokens: 393216
+    reasoningRef: "replay-openai"
+  - modelId: "google/gemma-4-26B-A4B-it"
+    displayName: "Gemma 4 26B A4B IT (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "replay-openai"
+  - modelId: "google/gemma-4-31B-it"
+    displayName: "Gemma 4 31B IT (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "replay-openai"
+  - modelId: "meta-llama/Llama-3.3-70B-Instruct"
+    displayName: "Llama-3.3-70B-Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 4096
+  - modelId: "MiniMaxAI/MiniMax-M2"
+    displayName: "MiniMax-M2 (free)"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 128000
+    reasoningRef: "replay-openai"
+  - modelId: "MiniMaxAI/MiniMax-M2.1"
+    displayName: "MiniMax-M2.1 (free)"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "MiniMaxAI/MiniMax-M2.5"
+    displayName: "MiniMax-M2.5 (free)"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "MiniMaxAI/MiniMax-M2.7"
+    displayName: "MiniMax-M2.7 (free)"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "MiniMaxAI/MiniMax-M3"
+    displayName: "MiniMax-M3 (free)"
+    capabilities: ["text", "image"]
+    maxContext: 524288
+    maxOutputTokens: 128000
+    reasoningRef: "replay-openai"
+  - modelId: "moonshotai/Kimi-K2-Instruct"
+    displayName: "Kimi-K2-Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 16384
+  - modelId: "moonshotai/Kimi-K2-Instruct-0905"
+    displayName: "Kimi-K2-Instruct-0905 (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 16384
+  - modelId: "moonshotai/Kimi-K2-Thinking"
+    displayName: "Kimi-K2-Thinking (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "replay-openai"
+  - modelId: "moonshotai/Kimi-K2.5"
+    displayName: "Kimi-K2.5 (free)"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "replay-openai"
+  - modelId: "moonshotai/Kimi-K2.6"
+    displayName: "Kimi-K2.6 (free)"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "replay-openai"
+  - modelId: "moonshotai/Kimi-K2.7-Code"
+    displayName: "Kimi K2.7 Code (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "replay-openai"
+  - modelId: "openai/gpt-oss-120b"
+    displayName: "GPT OSS 120B (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "replay-openai"
+  - modelId: "openai/gpt-oss-20b"
+    displayName: "GPT OSS 20B (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "replay-openai"
+  - modelId: "Qwen/Qwen3-235B-A22B"
+    displayName: "Qwen3 235B-A22B (free)"
+    capabilities: ["text"]
+    maxContext: 40960
+    maxOutputTokens: 16384
+    reasoningRef: "replay-openai"
+  - modelId: "Qwen/Qwen3-235B-A22B-Thinking-2507"
+    displayName: "Qwen3-235B-A22B-Thinking-2507 (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "Qwen/Qwen3-32B"
+    displayName: "Qwen3 32B (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 16384
+    reasoningRef: "replay-openai"
+  - modelId: "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+    displayName: "Qwen3-Coder 30B-A3B Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+  - modelId: "Qwen/Qwen3-Coder-480B-A35B-Instruct"
+    displayName: "Qwen3-Coder-480B-A35B-Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 66536
+  - modelId: "Qwen/Qwen3-Coder-Next"
+    displayName: "Qwen3-Coder-Next (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+  - modelId: "Qwen/Qwen3-Next-80B-A3B-Instruct"
+    displayName: "Qwen3-Next-80B-A3B-Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 66536
+  - modelId: "Qwen/Qwen3-Next-80B-A3B-Thinking"
+    displayName: "Qwen3-Next-80B-A3B-Thinking (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 131072
+  - modelId: "Qwen/Qwen3.5-122B-A10B"
+    displayName: "Qwen3.5 122B-A10B (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "replay-openai"
+  - modelId: "Qwen/Qwen3.5-27B"
+    displayName: "Qwen3.5 27B (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "replay-openai"
+  - modelId: "Qwen/Qwen3.5-35B-A3B"
+    displayName: "Qwen3.5 35B-A3B (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "replay-openai"
+  - modelId: "Qwen/Qwen3.5-397B-A17B"
+    displayName: "Qwen3.5-397B-A17B (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "replay-openai"
+  - modelId: "Qwen/Qwen3.5-9B"
+    displayName: "Qwen3.5 9B (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "replay-openai"
+  - modelId: "Qwen/Qwen3.6-27B"
+    displayName: "Qwen3.6 27B (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "replay-openai"
+  - modelId: "Qwen/Qwen3.6-35B-A3B"
+    displayName: "Qwen3.6 35B-A3B (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "replay-openai"
+  - modelId: "stepfun-ai/Step-3.5-Flash"
+    displayName: "Step 3.5 Flash (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 256000
+    reasoningRef: "replay-openai"
+  - modelId: "stepfun-ai/Step-3.7-Flash"
+    displayName: "Step 3.7 Flash (free)"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 256000
+    reasoningRef: "replay-openai"
+  - modelId: "XiaomiMiMo/MiMo-V2-Flash"
+    displayName: "MiMo-V2-Flash (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 4096
+    reasoningRef: "replay-openai"
+  - modelId: "XiaomiMiMo/MiMo-V2.5-Pro"
+    displayName: "MiMo-V2.5-Pro (free)"
+    capabilities: ["text"]
+    maxContext: 1048576
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "zai-org/GLM-4.5"
+    displayName: "GLM-4.5 (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 98304
+    reasoningRef: "replay-openai"
+  - modelId: "zai-org/GLM-4.5-Air"
+    displayName: "GLM-4.5-Air (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 98304
+    reasoningRef: "replay-openai"
+  - modelId: "zai-org/GLM-4.5V"
+    displayName: "GLM-4.5V (free)"
+    capabilities: ["text", "image"]
+    maxContext: 65536
+    maxOutputTokens: 16384
+    reasoningRef: "replay-openai"
+  - modelId: "zai-org/GLM-4.6"
+    displayName: "GLM-4.6 (free)"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "zai-org/GLM-4.7"
+    displayName: "GLM-4.7 (free)"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "zai-org/GLM-4.7-Flash"
+    displayName: "GLM-4.7-Flash (free)"
+    capabilities: ["text"]
+    maxContext: 200000
+    maxOutputTokens: 128000
+    reasoningRef: "replay-openai"
+  - modelId: "zai-org/GLM-5"
+    displayName: "GLM-5 (free)"
+    capabilities: ["text"]
+    maxContext: 202752
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "zai-org/GLM-5.1"
+    displayName: "GLM-5.1 (free)"
+    capabilities: ["text"]
+    maxContext: 202752
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "zai-org/GLM-5.2"
+    displayName: "GLM-5.2 (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"

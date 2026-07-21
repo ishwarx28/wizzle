@@ -57,6 +57,9 @@ pub async fn install_app_update(
     on_event: Channel<AppUpdateProgress>,
 ) -> Result<(), String> {
     let configured = state.app_update()?;
+    if !configured.enabled {
+        return Err("In-app updates are disabled in the remote configuration.".to_string());
+    }
     let current_version = app.package_info().version.clone();
     let expected_version = Version::parse(&configured.version)
         .map_err(|_| "The configured update version is invalid.".to_string())?;

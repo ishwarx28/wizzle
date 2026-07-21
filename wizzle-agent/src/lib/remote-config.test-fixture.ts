@@ -32,6 +32,7 @@ export function createTestRemoteConfig(
     revision: "test",
     sourceUrl: "https://example.test/app-config.yaml",
     update: {
+      enabled: false,
       note: "Test release",
       platform: "macos",
       status: "normal",

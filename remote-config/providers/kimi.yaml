@@ -1,0 +1,88 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "kimi-for-coding"
+provider:
+  id: "kimi"
+  name: "Kimi"
+  transport: "anthropic_messages"
+  endpoint: "https://api.kimi.com/coding/v1"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "x-api-key"
+    prefix: ""
+  setupFields: []
+  defaults:
+    modelId: "k2p6"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  replay-anthropic:
+    variants: []
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/content_block"
+          assistantMessagePath: "/content/{/index}"
+          operation: "merge"
+          when:
+            responsePath: "/content_block/type"
+            equals: "thinking"
+        - responsePath: "/delta/thinking"
+          assistantMessagePath: "/content/{/index}/thinking"
+          operation: "append"
+          when:
+            responsePath: "/delta/type"
+            equals: "thinking_delta"
+        - responsePath: "/delta/signature"
+          assistantMessagePath: "/content/{/index}/signature"
+          operation: "append"
+          when:
+            responsePath: "/delta/type"
+            equals: "signature_delta"
+models:
+  - modelId: "k2p5"
+    displayName: "Kimi K2.5"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "replay-anthropic"
+  - modelId: "k2p6"
+    displayName: "Kimi K2.6"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "replay-anthropic"
+  - modelId: "k2p7"
+    displayName: "Kimi K2.7 Code"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "replay-anthropic"
+  - modelId: "k3"
+    displayName: "Kimi K3"
+    capabilities: ["text", "image", "video"]
+    maxContext: 1048576
+    maxOutputTokens: 131072
+    reasoningRef: "replay-anthropic"
+  - modelId: "kimi-for-coding-highspeed"
+    displayName: "Kimi For Coding HighSpeed"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "replay-anthropic"
+  - modelId: "kimi-k2-thinking"
+    displayName: "Kimi K2 Thinking"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "replay-anthropic"

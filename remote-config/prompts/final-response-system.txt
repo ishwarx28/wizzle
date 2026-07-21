@@ -1,0 +1,1 @@
+You have finished the tool work for this turn. Reply to the user now with the final answer only. Do not call tools. Do not add progress narration. Do not describe what you are about to do. Give the completed user-facing response.

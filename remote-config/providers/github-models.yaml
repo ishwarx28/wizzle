@@ -1,0 +1,329 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "github-models"
+provider:
+  id: "github-models"
+  name: "GitHub Models"
+  transport: "openai_chat_completions"
+  endpoint: "https://models.github.ai/inference"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields: []
+  defaults:
+    modelId: "ai21-labs/ai21-jamba-1.5-large"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  replay-openai:
+    variants: []
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "ai21-labs/ai21-jamba-1.5-large"
+    displayName: "AI21 Jamba 1.5 Large (free)"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 4096
+    reasoningRef: "replay-openai"
+  - modelId: "ai21-labs/ai21-jamba-1.5-mini"
+    displayName: "AI21 Jamba 1.5 Mini (free)"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 4096
+    reasoningRef: "replay-openai"
+  - modelId: "cohere/cohere-command-a"
+    displayName: "Cohere Command A (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+    reasoningRef: "replay-openai"
+  - modelId: "cohere/cohere-command-r"
+    displayName: "Cohere Command R (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+    reasoningRef: "replay-openai"
+  - modelId: "cohere/cohere-command-r-08-2024"
+    displayName: "Cohere Command R 08-2024 (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+  - modelId: "cohere/cohere-command-r-plus"
+    displayName: "Cohere Command R+ (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+  - modelId: "cohere/cohere-command-r-plus-08-2024"
+    displayName: "Cohere Command R+ 08-2024 (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+  - modelId: "core42/jais-30b-chat"
+    displayName: "JAIS 30b Chat (free)"
+    capabilities: ["text"]
+    maxContext: 8192
+    maxOutputTokens: 2048
+    reasoningRef: "replay-openai"
+  - modelId: "deepseek/deepseek-r1"
+    displayName: "DeepSeek-R1 (free)"
+    capabilities: ["text"]
+    maxContext: 65536
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "deepseek/deepseek-r1-0528"
+    displayName: "DeepSeek-R1-0528 (free)"
+    capabilities: ["text"]
+    maxContext: 65536
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "deepseek/deepseek-v3-0324"
+    displayName: "DeepSeek-V3-0324 (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "meta/llama-3.2-11b-vision-instruct"
+    displayName: "Llama-3.2-11B-Vision-Instruct (free)"
+    capabilities: ["text", "image", "audio"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "meta/llama-3.2-90b-vision-instruct"
+    displayName: "Llama-3.2-90B-Vision-Instruct (free)"
+    capabilities: ["text", "image", "audio"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "meta/llama-3.3-70b-instruct"
+    displayName: "Llama-3.3-70B-Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 32768
+    reasoningRef: "replay-openai"
+  - modelId: "meta/llama-4-maverick-17b-128e-instruct-fp8"
+    displayName: "Llama 4 Maverick 17B 128E Instruct FP8 (free)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "meta/llama-4-scout-17b-16e-instruct"
+    displayName: "Llama 4 Scout 17B 16E Instruct (free)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "meta/meta-llama-3-70b-instruct"
+    displayName: "Meta-Llama-3-70B-Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 8192
+    maxOutputTokens: 2048
+    reasoningRef: "replay-openai"
+  - modelId: "meta/meta-llama-3-8b-instruct"
+    displayName: "Meta-Llama-3-8B-Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 8192
+    maxOutputTokens: 2048
+    reasoningRef: "replay-openai"
+  - modelId: "meta/meta-llama-3.1-405b-instruct"
+    displayName: "Meta-Llama-3.1-405B-Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 32768
+    reasoningRef: "replay-openai"
+  - modelId: "meta/meta-llama-3.1-70b-instruct"
+    displayName: "Meta-Llama-3.1-70B-Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 32768
+    reasoningRef: "replay-openai"
+  - modelId: "meta/meta-llama-3.1-8b-instruct"
+    displayName: "Meta-Llama-3.1-8B-Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 32768
+    reasoningRef: "replay-openai"
+  - modelId: "microsoft/mai-ds-r1"
+    displayName: "MAI-DS-R1 (free)"
+    capabilities: ["text"]
+    maxContext: 65536
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "microsoft/phi-3-medium-128k-instruct"
+    displayName: "Phi-3-medium instruct (128k) (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+    reasoningRef: "replay-openai"
+  - modelId: "microsoft/phi-3-medium-4k-instruct"
+    displayName: "Phi-3-medium instruct (4k) (free)"
+    capabilities: ["text"]
+    maxContext: 4096
+    maxOutputTokens: 1024
+    reasoningRef: "replay-openai"
+  - modelId: "microsoft/phi-3-mini-128k-instruct"
+    displayName: "Phi-3-mini instruct (128k) (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+    reasoningRef: "replay-openai"
+  - modelId: "microsoft/phi-3-mini-4k-instruct"
+    displayName: "Phi-3-mini instruct (4k) (free)"
+    capabilities: ["text"]
+    maxContext: 4096
+    maxOutputTokens: 1024
+    reasoningRef: "replay-openai"
+  - modelId: "microsoft/phi-3-small-128k-instruct"
+    displayName: "Phi-3-small instruct (128k) (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+    reasoningRef: "replay-openai"
+  - modelId: "microsoft/phi-3-small-8k-instruct"
+    displayName: "Phi-3-small instruct (8k) (free)"
+    capabilities: ["text"]
+    maxContext: 8192
+    maxOutputTokens: 2048
+    reasoningRef: "replay-openai"
+  - modelId: "microsoft/phi-3.5-mini-instruct"
+    displayName: "Phi-3.5-mini instruct (128k) (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+    reasoningRef: "replay-openai"
+  - modelId: "microsoft/phi-3.5-moe-instruct"
+    displayName: "Phi-3.5-MoE instruct (128k) (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+    reasoningRef: "replay-openai"
+  - modelId: "microsoft/phi-3.5-vision-instruct"
+    displayName: "Phi-3.5-vision instruct (128k) (free)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+    reasoningRef: "replay-openai"
+  - modelId: "microsoft/phi-4"
+    displayName: "Phi-4 (free)"
+    capabilities: ["text"]
+    maxContext: 16000
+    maxOutputTokens: 4096
+    reasoningRef: "replay-openai"
+  - modelId: "microsoft/phi-4-mini-instruct"
+    displayName: "Phi-4-mini-instruct (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+    reasoningRef: "replay-openai"
+  - modelId: "microsoft/phi-4-mini-reasoning"
+    displayName: "Phi-4-mini-reasoning (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+    reasoningRef: "replay-openai"
+  - modelId: "microsoft/phi-4-multimodal-instruct"
+    displayName: "Phi-4-multimodal-instruct (free)"
+    capabilities: ["text", "image", "audio"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+    reasoningRef: "replay-openai"
+  - modelId: "microsoft/phi-4-reasoning"
+    displayName: "Phi-4-Reasoning (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+    reasoningRef: "replay-openai"
+  - modelId: "mistral-ai/codestral-2501"
+    displayName: "Codestral 25.01 (free)"
+    capabilities: ["text"]
+    maxContext: 32000
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "mistral-ai/ministral-3b"
+    displayName: "Ministral 3B (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "mistral-ai/mistral-large-2411"
+    displayName: "Mistral Large 24.11 (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 32768
+    reasoningRef: "replay-openai"
+  - modelId: "mistral-ai/mistral-medium-2505"
+    displayName: "Mistral Medium 3 (25.05) (free)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 32768
+    reasoningRef: "replay-openai"
+  - modelId: "mistral-ai/mistral-nemo"
+    displayName: "Mistral Nemo (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "mistral-ai/mistral-small-2503"
+    displayName: "Mistral Small 3.1 (free)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 32768
+    reasoningRef: "replay-openai"
+  - modelId: "openai/gpt-4.1"
+    displayName: "GPT-4.1 (free)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "openai/gpt-4.1-mini"
+    displayName: "GPT-4.1-mini (free)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "openai/gpt-4.1-nano"
+    displayName: "GPT-4.1-nano (free)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "openai/gpt-4o"
+    displayName: "GPT-4o (free)"
+    capabilities: ["text", "image", "audio"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "openai/gpt-4o-mini"
+    displayName: "GPT-4o mini (free)"
+    capabilities: ["text", "image", "audio"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "xai/grok-3"
+    displayName: "Grok 3 (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "xai/grok-3-mini"
+    displayName: "Grok 3 Mini (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"

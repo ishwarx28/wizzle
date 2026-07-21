@@ -1,0 +1,68 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  type: "local-curated"
+provider:
+  id: "lm-studio"
+  name: "LM Studio"
+  transport: "openai_chat_completions"
+  endpoint: "http://localhost:1234/v1"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "none"
+  setupFields: []
+  defaults:
+    modelId: "qwen3.5-4b-mlx"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "provider_api"
+    unknownModelPolicy: "include_without_reasoning"
+  headers: []
+reasoningRecipes:
+  replay-openai:
+    variants: []
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "qwen3.5-4b-mlx"
+    displayName: "Qwen 3.5 4B MLX"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "qwen3-8b"
+    displayName: "Qwen 3 8B"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "deepseek-r1-8b"
+    displayName: "DeepSeek R1 8B"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "gemma-3-12b"
+    displayName: "Gemma 3 12B"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "gpt-oss-20b"
+    displayName: "GPT OSS 20B"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"

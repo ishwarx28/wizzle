@@ -1,0 +1,379 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "nvidia"
+provider:
+  id: "nvidia-build"
+  name: "NVIDIA Build"
+  transport: "openai_chat_completions"
+  endpoint: "https://integrate.api.nvidia.com/v1"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields: []
+  defaults:
+    modelId: "nvidia/nemotron-3-ultra-550b-a55b"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  effort-low-high:
+    defaultVariantId: "default"
+    variants:
+      - id: "default"
+        label: "Default"
+        request: []
+      - id: "low"
+        label: "Low"
+        request:
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "low"
+      - id: "medium"
+        label: "Medium"
+        request:
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "medium"
+      - id: "high"
+        label: "High"
+        request:
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "high"
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+  nvidia-ultra:
+    defaultVariantId: "default"
+    variants:
+      - id: "off"
+        label: "Off"
+        request:
+          - operation: "set"
+            path: "/chat_template_kwargs/enable_thinking"
+            value: false
+      - id: "default"
+        label: "Default"
+        request: []
+      - id: "low"
+        label: "Low · 512 tokens"
+        request:
+          - operation: "set"
+            path: "/chat_template_kwargs/enable_thinking"
+            value: true
+          - operation: "set"
+            path: "/reasoning_budget"
+            value: 512
+      - id: "medium"
+        label: "Medium · 1024 tokens"
+        request:
+          - operation: "set"
+            path: "/chat_template_kwargs/enable_thinking"
+            value: true
+          - operation: "set"
+            path: "/reasoning_budget"
+            value: 1024
+      - id: "high"
+        label: "High · 2048 tokens"
+        request:
+          - operation: "set"
+            path: "/chat_template_kwargs/enable_thinking"
+            value: true
+          - operation: "set"
+            path: "/reasoning_budget"
+            value: 2048
+      - id: "max"
+        label: "Max · 8192 tokens"
+        request:
+          - operation: "set"
+            path: "/chat_template_kwargs/enable_thinking"
+            value: true
+          - operation: "set"
+            path: "/reasoning_budget"
+            value: 8192
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+  replay-openai:
+    variants: []
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "abacusai/dracarys-llama-3_1-70b-instruct"
+    displayName: "dracarys-llama-3.1-70b-instruct (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+  - modelId: "bytedance/seed-oss-36b-instruct"
+    displayName: "ByteDance-Seed/Seed-OSS-36B-Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 262000
+    maxOutputTokens: 262000
+  - modelId: "deepseek-ai/deepseek-v4-flash"
+    displayName: "DeepSeek V4 Flash (free)"
+    capabilities: ["text"]
+    maxContext: 1048576
+    maxOutputTokens: 393216
+    reasoningRef: "replay-openai"
+  - modelId: "deepseek-ai/deepseek-v4-pro"
+    displayName: "DeepSeek V4 Pro (free)"
+    capabilities: ["text"]
+    maxContext: 1048576
+    maxOutputTokens: 393216
+    reasoningRef: "replay-openai"
+  - modelId: "google/gemma-2-2b-it"
+    displayName: "Gemma 2 2b It (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+  - modelId: "google/gemma-3n-e2b-it"
+    displayName: "Gemma 3n E2b It (free)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+  - modelId: "google/gemma-3n-e4b-it"
+    displayName: "Gemma 3n E4b It (free)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+  - modelId: "google/gemma-4-31b-it"
+    displayName: "Gemma-4-31B-IT (free)"
+    capabilities: ["text", "image", "video"]
+    maxContext: 256000
+    maxOutputTokens: 16384
+    reasoningRef: "replay-openai"
+  - modelId: "meta/llama-3.1-70b-instruct"
+    displayName: "Llama 3.1 70b Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+  - modelId: "meta/llama-3.1-8b-instruct"
+    displayName: "Llama 3.1 8B Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 16000
+    maxOutputTokens: 4096
+  - modelId: "meta/llama-3.2-11b-vision-instruct"
+    displayName: "Llama 3.2 11b Vision Instruct (free)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+  - modelId: "meta/llama-3.2-1b-instruct"
+    displayName: "Llama 3.2 1b Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+  - modelId: "meta/llama-3.2-90b-vision-instruct"
+    displayName: "Llama-3.2-90B-Vision-Instruct (free)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+  - modelId: "meta/llama-3.3-70b-instruct"
+    displayName: "Llama 3.3 70b Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+  - modelId: "meta/llama-4-maverick-17b-128e-instruct"
+    displayName: "Llama 4 Maverick 17b 128e Instruct (free)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+  - modelId: "microsoft/phi-4-mini-instruct"
+    displayName: "Phi-4-Mini (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 8192
+  - modelId: "minimaxai/minimax-m2.7"
+    displayName: "MiniMax-M2.7 (free)"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "minimaxai/minimax-m3"
+    displayName: "MiniMax-M3 (free)"
+    capabilities: ["text", "image", "video"]
+    maxContext: 1000000
+    maxOutputTokens: 16384
+    reasoningRef: "replay-openai"
+  - modelId: "mistralai/mistral-7b-instruct-v03"
+    displayName: "Mistral-7B-Instruct-v0.3 (free)"
+    capabilities: ["text"]
+    maxContext: 65536
+    maxOutputTokens: 65536
+  - modelId: "mistralai/mistral-large-3-675b-instruct-2512"
+    displayName: "Mistral Large 3 675B Instruct 2512 (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "mistralai/mistral-nemotron"
+    displayName: "mistral-nemotron (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+  - modelId: "mistralai/mistral-small-4-119b-2603"
+    displayName: "mistral-small-4-119b-2603 (free)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "mistralai/mixtral-8x22b-instruct"
+    displayName: "Mistral: Mixtral 8x22B Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 65536
+    maxOutputTokens: 13108
+  - modelId: "mistralai/mixtral-8x7b-instruct"
+    displayName: "Mistral: Mixtral 8x7B Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 32768
+    maxOutputTokens: 16384
+  - modelId: "moonshotai/kimi-k2-instruct-0905"
+    displayName: "Kimi K2 0905 (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "moonshotai/kimi-k2.6"
+    displayName: "Kimi K2.6 (free)"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "replay-openai"
+  - modelId: "nvidia/nemotron-3-nano-30b-a3b"
+    displayName: "nemotron-3-nano-30b-a3b (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+    displayName: "Nemotron 3 Nano Omni (free)"
+    capabilities: ["text", "image", "video", "audio"]
+    maxContext: 256000
+    maxOutputTokens: 65536
+    reasoningRef: "replay-openai"
+  - modelId: "nvidia/nemotron-3-super-120b-a12b"
+    displayName: "Nemotron 3 Super (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "nvidia-ultra"
+  - modelId: "nvidia/nemotron-3-ultra-550b-a55b"
+    displayName: "Nemotron 3 Ultra 550B A55B (free)"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 65536
+    reasoningRef: "nvidia-ultra"
+  - modelId: "nvidia/nemotron-mini-4b-instruct"
+    displayName: "nemotron-mini-4b-instruct (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+  - modelId: "nvidia/nemotron-voicechat"
+    displayName: "nemotron-voicechat (free)"
+    capabilities: ["text", "audio"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+  - modelId: "nvidia/nvidia-nemotron-nano-9b-v2"
+    displayName: "nvidia-nemotron-nano-9b-v2 (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "openai/gpt-oss-120b"
+    displayName: "GPT-OSS-120B (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+    reasoningRef: "effort-low-high"
+  - modelId: "openai/gpt-oss-20b"
+    displayName: "GPT OSS 20B (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "effort-low-high"
+  - modelId: "qwen/qwen2.5-coder-32b-instruct"
+    displayName: "Qwen2.5 Coder 32b Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+  - modelId: "qwen/qwen3-coder-480b-a35b-instruct"
+    displayName: "Qwen3 Coder 480B A35B Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 66536
+  - modelId: "qwen/qwen3-next-80b-a3b-instruct"
+    displayName: "Qwen3-Next-80B-A3B-Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 16384
+  - modelId: "qwen/qwen3.5-122b-a10b"
+    displayName: "Qwen3.5 122B-A10B (free)"
+    capabilities: ["text", "image", "video", "audio"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "replay-openai"
+  - modelId: "qwen/qwen3.5-397b-a17b"
+    displayName: "Qwen3.5-397B-A17B (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "sarvamai/sarvam-m"
+    displayName: "sarvam-m (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+  - modelId: "stepfun-ai/step-3.5-flash"
+    displayName: "Step 3.5 Flash (free)"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 16384
+    reasoningRef: "replay-openai"
+  - modelId: "stepfun-ai/step-3.7-flash"
+    displayName: "Step 3.7 Flash (free)"
+    capabilities: ["text", "image"]
+    maxContext: 256000
+    maxOutputTokens: 16384
+    reasoningRef: "replay-openai"
+  - modelId: "upstage/solar-10_7b-instruct"
+    displayName: "solar-10.7b-instruct (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 8192
+  - modelId: "z-ai/glm-5.2"
+    displayName: "GLM-5.2 (free)"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"

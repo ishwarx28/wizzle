@@ -1,0 +1,91 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "cohere"
+provider:
+  id: "cohere"
+  name: "Cohere"
+  transport: "openai_chat_completions"
+  endpoint: "https://api.cohere.ai/compatibility/v1"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields: []
+  defaults:
+    modelId: "command-a-03-2025"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  replay-openai:
+    variants: []
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "command-a-03-2025"
+    displayName: "Command A (free)"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 8000
+  - modelId: "command-a-plus-05-2026"
+    displayName: "Command A Plus (free)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 64000
+    reasoningRef: "replay-openai"
+  - modelId: "command-a-reasoning-08-2025"
+    displayName: "Command A Reasoning (free)"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 32000
+    reasoningRef: "replay-openai"
+  - modelId: "command-a-translate-08-2025"
+    displayName: "Command A Translate (free)"
+    capabilities: ["text"]
+    maxContext: 8000
+    maxOutputTokens: 8000
+  - modelId: "command-r-08-2024"
+    displayName: "Command R (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4000
+  - modelId: "command-r-plus-08-2024"
+    displayName: "Command R+ (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4000
+  - modelId: "command-r7b-12-2024"
+    displayName: "Command R7B (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4000
+  - modelId: "command-r7b-arabic-02-2025"
+    displayName: "Command R7B Arabic (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4000
+  - modelId: "north-mini-code-1-0"
+    displayName: "North Mini Code"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 64000
+    reasoningRef: "replay-openai"

@@ -1,0 +1,116 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "moonshotai"
+provider:
+  id: "moonshot-ai"
+  name: "Moonshot AI"
+  transport: "openai_chat_completions"
+  endpoint: "https://api.moonshot.ai/v1"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields: []
+  defaults:
+    modelId: "kimi-k2.5"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  thinking-type-toggle:
+    defaultVariantId: "default"
+    variants:
+      - id: "off"
+        label: "Off"
+        request:
+          - operation: "set"
+            path: "/thinking/type"
+            value: "disabled"
+      - id: "default"
+        label: "Default"
+        request: []
+      - id: "on"
+        label: "On"
+        request:
+          - operation: "set"
+            path: "/thinking/type"
+            value: "enabled"
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "kimi-k2-0711-preview"
+    displayName: "Kimi K2 0711"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 16384
+  - modelId: "kimi-k2-0905-preview"
+    displayName: "Kimi K2 0905"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "kimi-k2-thinking"
+    displayName: "Kimi K2 Thinking"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "kimi-k2-thinking-turbo"
+    displayName: "Kimi K2 Thinking Turbo"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "kimi-k2-turbo-preview"
+    displayName: "Kimi K2 Turbo"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "kimi-k2.5"
+    displayName: "Kimi K2.5"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "kimi-k2.6"
+    displayName: "Kimi K2.6"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "kimi-k2.7-code"
+    displayName: "Kimi K2.7 Code"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "kimi-k2.7-code-highspeed"
+    displayName: "Kimi K2.7 Code HighSpeed"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "thinking-type-toggle"
+  - modelId: "kimi-k3"
+    displayName: "Kimi K3"
+    capabilities: ["text", "image", "video"]
+    maxContext: 1048576
+    maxOutputTokens: 131072
+    reasoningRef: "thinking-type-toggle"

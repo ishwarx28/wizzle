@@ -1,0 +1,314 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "opencode"
+provider:
+  id: "opencode"
+  name: "OpenCode"
+  transport: "openai_chat_completions"
+  endpoint: "https://opencode.ai/zen/v1"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: false
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields: []
+  defaults:
+    modelId: "deepseek-v4-flash-free"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  deepseek-v4:
+    defaultVariantId: "default"
+    variants:
+      - id: "off"
+        label: "Off"
+        request:
+          - operation: "set"
+            path: "/thinking/type"
+            value: "disabled"
+      - id: "default"
+        label: "Default"
+        request: []
+      - id: "high"
+        label: "High"
+        request:
+          - operation: "set"
+            path: "/thinking/type"
+            value: "enabled"
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "high"
+      - id: "max"
+        label: "Max"
+        request:
+          - operation: "set"
+            path: "/thinking/type"
+            value: "enabled"
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "max"
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+  replay-openai:
+    variants: []
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "big-pickle"
+    displayName: "Big Pickle (free)"
+    capabilities: ["text"]
+    maxContext: 200000
+    maxOutputTokens: 32000
+    reasoningRef: "replay-openai"
+  - modelId: "deepseek-v4-flash"
+    displayName: "DeepSeek V4 Flash"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 384000
+    reasoningRef: "deepseek-v4"
+  - modelId: "deepseek-v4-flash-free"
+    displayName: "DeepSeek V4 Flash (free)"
+    capabilities: ["text"]
+    maxContext: 200000
+    maxOutputTokens: 128000
+    reasoningRef: "deepseek-v4"
+  - modelId: "deepseek-v4-pro"
+    displayName: "DeepSeek V4 Pro"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 384000
+    reasoningRef: "deepseek-v4"
+  - modelId: "glm-4.6"
+    displayName: "GLM-4.6"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "glm-4.7"
+    displayName: "GLM-4.7"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "glm-4.7-free"
+    displayName: "GLM-4.7 (free)"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "glm-5"
+    displayName: "GLM-5"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "glm-5-free"
+    displayName: "GLM-5 (free)"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "glm-5.1"
+    displayName: "GLM-5.1"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "glm-5.2"
+    displayName: "GLM-5.2"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "grok-4.5"
+    displayName: "Grok 4.5"
+    capabilities: ["text", "image"]
+    maxContext: 500000
+    maxOutputTokens: 500000
+    reasoningRef: "replay-openai"
+  - modelId: "grok-build-0.1"
+    displayName: "Grok Build 0.1"
+    capabilities: ["text", "image"]
+    maxContext: 256000
+    maxOutputTokens: 256000
+    reasoningRef: "replay-openai"
+  - modelId: "grok-code"
+    displayName: "Grok Code Fast 1"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 256000
+    reasoningRef: "replay-openai"
+  - modelId: "hy3-free"
+    displayName: "Hy3 (free)"
+    capabilities: ["text"]
+    maxContext: 190000
+    maxOutputTokens: 64000
+    reasoningRef: "replay-openai"
+  - modelId: "hy3-preview-free"
+    displayName: "Hy3 preview (free)"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 64000
+    reasoningRef: "replay-openai"
+  - modelId: "kimi-k2"
+    displayName: "Kimi K2"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "kimi-k2-thinking"
+    displayName: "Kimi K2 Thinking"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "replay-openai"
+  - modelId: "kimi-k2.5"
+    displayName: "Kimi K2.5"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "replay-openai"
+  - modelId: "kimi-k2.5-free"
+    displayName: "Kimi K2.5 (free)"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "replay-openai"
+  - modelId: "kimi-k2.6"
+    displayName: "Kimi K2.6"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "replay-openai"
+  - modelId: "kimi-k2.7-code"
+    displayName: "Kimi K2.7 Code"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "replay-openai"
+  - modelId: "ling-2.6-flash-free"
+    displayName: "Ling 2.6 Flash (free)"
+    capabilities: ["text"]
+    maxContext: 262100
+    maxOutputTokens: 32800
+  - modelId: "mimo-v2-flash-free"
+    displayName: "MiMo V2 Flash (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "replay-openai"
+  - modelId: "mimo-v2-omni-free"
+    displayName: "MiMo V2 Omni (free)"
+    capabilities: ["text", "image", "audio"]
+    maxContext: 262144
+    maxOutputTokens: 64000
+    reasoningRef: "replay-openai"
+  - modelId: "mimo-v2-pro-free"
+    displayName: "MiMo V2 Pro (free)"
+    capabilities: ["text"]
+    maxContext: 1048576
+    maxOutputTokens: 64000
+    reasoningRef: "replay-openai"
+  - modelId: "mimo-v2.5-free"
+    displayName: "MiMo V2.5 (free)"
+    capabilities: ["text", "image", "audio", "video"]
+    maxContext: 200000
+    maxOutputTokens: 32000
+    reasoningRef: "replay-openai"
+  - modelId: "minimax-m2.1"
+    displayName: "MiniMax-M2.1"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "minimax-m2.1-free"
+    displayName: "MiniMax-M2.1 (free)"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "minimax-m2.5"
+    displayName: "MiniMax-M2.5"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "minimax-m2.5-free"
+    displayName: "MiniMax-M2.5 (free)"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "minimax-m2.7"
+    displayName: "MiniMax-M2.7"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "minimax-m3"
+    displayName: "MiniMax-M3"
+    capabilities: ["text", "image", "video"]
+    maxContext: 512000
+    maxOutputTokens: 128000
+    reasoningRef: "replay-openai"
+  - modelId: "minimax-m3-free"
+    displayName: "MiniMax-M3 (free)"
+    capabilities: ["text", "image", "video"]
+    maxContext: 200000
+    maxOutputTokens: 32000
+    reasoningRef: "replay-openai"
+  - modelId: "nemotron-3-super-free"
+    displayName: "Nemotron 3 Super (free)"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 128000
+    reasoningRef: "replay-openai"
+  - modelId: "nemotron-3-ultra-free"
+    displayName: "Nemotron 3 Ultra (free)"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "replay-openai"
+  - modelId: "north-mini-code-free"
+    displayName: "North Mini Code (free)"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 64000
+    reasoningRef: "replay-openai"
+  - modelId: "ring-2.6-1t-free"
+    displayName: "Ring 2.6 1T (free)"
+    capabilities: ["text"]
+    maxContext: 262000
+    maxOutputTokens: 66000
+    reasoningRef: "replay-openai"
+  - modelId: "trinity-large-preview-free"
+    displayName: "Trinity Large Preview (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 131072

@@ -1,0 +1,106 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "deepseek"
+provider:
+  id: "deepseek"
+  name: "DeepSeek"
+  transport: "openai_chat_completions"
+  endpoint: "https://api.deepseek.com"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields: []
+  defaults:
+    modelId: "deepseek-chat"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  deepseek-v4:
+    defaultVariantId: "default"
+    variants:
+      - id: "off"
+        label: "Off"
+        request:
+          - operation: "set"
+            path: "/thinking/type"
+            value: "disabled"
+      - id: "default"
+        label: "Default"
+        request: []
+      - id: "high"
+        label: "High"
+        request:
+          - operation: "set"
+            path: "/thinking/type"
+            value: "enabled"
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "high"
+      - id: "max"
+        label: "Max"
+        request:
+          - operation: "set"
+            path: "/thinking/type"
+            value: "enabled"
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "max"
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+  replay-openai:
+    variants: []
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "deepseek-chat"
+    displayName: "DeepSeek Chat"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 384000
+  - modelId: "deepseek-reasoner"
+    displayName: "DeepSeek Reasoner"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 384000
+    reasoningRef: "replay-openai"
+  - modelId: "deepseek-v4-flash"
+    displayName: "DeepSeek V4 Flash"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 384000
+    reasoningRef: "deepseek-v4"
+  - modelId: "deepseek-v4-pro"
+    displayName: "DeepSeek V4 Pro"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 384000
+    reasoningRef: "deepseek-v4"

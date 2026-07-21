@@ -56,6 +56,8 @@ struct AppConfigManifest {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteUpdateManifest {
+    #[serde(default = "default_update_enabled")]
+    enabled: bool,
     version: String,
     #[serde(default)]
     url: Option<String>,
@@ -90,6 +92,8 @@ pub struct RemoteDeveloperLink {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteUpdate {
+    #[serde(default = "default_update_enabled")]
+    pub enabled: bool,
     pub version: String,
     pub url: String,
     pub status: String,
@@ -415,6 +419,10 @@ fn default_update_platform() -> String {
     current_update_platform().to_string()
 }
 
+fn default_update_enabled() -> bool {
+    true
+}
+
 fn validate_update(update: &mut RemoteUpdateManifest) -> Result<RemoteUpdate, String> {
     update.version = update.version.trim().to_string();
     update.status = update.status.trim().to_ascii_lowercase();
@@ -452,6 +460,7 @@ fn validate_update(update: &mut RemoteUpdateManifest) -> Result<RemoteUpdate, St
     };
 
     Ok(RemoteUpdate {
+        enabled: update.enabled,
         version: update.version.clone(),
         url,
         status: update.status.clone(),
@@ -868,6 +877,7 @@ mod tests {
         let mut manifest = serde_yaml::from_str::<RemoteUpdateManifest>(
             r#"
 version: 2.1.0
+enabled: false
 status: critical
 note: Required security update
 platforms:
@@ -880,6 +890,7 @@ platforms:
         let update = validate_update(&mut manifest).expect("valid update");
 
         assert_eq!(update.platform, current_update_platform());
+        assert!(!update.enabled);
         assert_eq!(
             update.url,
             format!("https://example.test/{}.json", current_update_platform())

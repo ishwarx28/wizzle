@@ -1,0 +1,116 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "groq"
+provider:
+  id: "groq"
+  name: "Groq"
+  transport: "openai_chat_completions"
+  endpoint: "https://api.groq.com/openai/v1"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields: []
+  defaults:
+    modelId: "openai/gpt-oss-120b"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  effort-low-high:
+    defaultVariantId: "default"
+    variants:
+      - id: "default"
+        label: "Default"
+        request: []
+      - id: "low"
+        label: "Low"
+        request:
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "low"
+      - id: "medium"
+        label: "Medium"
+        request:
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "medium"
+      - id: "high"
+        label: "High"
+        request:
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "high"
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+  replay-openai:
+    variants: []
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "llama-3.1-8b-instant"
+    displayName: "Llama 3.1 8B (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 131072
+  - modelId: "llama-3.3-70b-versatile"
+    displayName: "Llama 3.3 70B (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+  - modelId: "meta-llama/llama-4-scout-17b-16e-instruct"
+    displayName: "Llama 4 Scout 17B 16E (free)"
+    capabilities: ["text", "image"]
+    maxContext: 131072
+    maxOutputTokens: 8192
+  - modelId: "openai/gpt-oss-120b"
+    displayName: "GPT OSS 120B (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 65536
+    reasoningRef: "effort-low-high"
+  - modelId: "openai/gpt-oss-20b"
+    displayName: "GPT OSS 20B (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 65536
+    reasoningRef: "effort-low-high"
+  - modelId: "openai/gpt-oss-safeguard-20b"
+    displayName: "Safety GPT OSS 20B (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 65536
+    reasoningRef: "effort-low-high"
+  - modelId: "qwen/qwen3-32b"
+    displayName: "Qwen3-32B (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 40960
+    reasoningRef: "replay-openai"

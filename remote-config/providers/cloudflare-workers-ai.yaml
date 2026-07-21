@@ -1,0 +1,121 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "cloudflare-workers-ai"
+provider:
+  id: "cloudflare-workers-ai"
+  name: "Cloudflare Workers AI"
+  transport: "openai_chat_completions"
+  endpoint: "https://api.cloudflare.com/client/v4/accounts/{{accountId}}/ai/v1"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields:
+    - id: "accountId"
+      label: "Cloudflare account ID"
+      required: true
+      secret: false
+  defaults:
+    modelId: "@cf/google/gemma-4-26b-a4b-it"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  replay-openai:
+    variants: []
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "@cf/google/gemma-4-26b-a4b-it"
+    displayName: "Gemma 4 26B A4B IT (free)"
+    capabilities: ["text", "image"]
+    maxContext: 256000
+    maxOutputTokens: 16384
+    reasoningRef: "replay-openai"
+  - modelId: "@cf/ibm-granite/granite-4.0-h-micro"
+    displayName: "Granite 4.0 H Micro (free)"
+    capabilities: ["text"]
+    maxContext: 131000
+    maxOutputTokens: 131000
+  - modelId: "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+    displayName: "Llama 3.3 70B Instruct fp8 Fast (free)"
+    capabilities: ["text"]
+    maxContext: 24000
+    maxOutputTokens: 24000
+  - modelId: "@cf/meta/llama-4-scout-17b-16e-instruct"
+    displayName: "Llama 4 Scout 17B 16E Instruct (free)"
+    capabilities: ["text", "image"]
+    maxContext: 131000
+    maxOutputTokens: 16384
+  - modelId: "@cf/mistralai/mistral-small-3.1-24b-instruct"
+    displayName: "Mistral Small 3.1 24B Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 128000
+  - modelId: "@cf/moonshotai/kimi-k2.6"
+    displayName: "Kimi K2.6 (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 256000
+    reasoningRef: "replay-openai"
+  - modelId: "@cf/moonshotai/kimi-k2.7-code"
+    displayName: "Kimi K2.7 Code (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "replay-openai"
+  - modelId: "@cf/nvidia/nemotron-3-120b-a12b"
+    displayName: "Nemotron 3 Super 120B (free)"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 256000
+    reasoningRef: "replay-openai"
+  - modelId: "@cf/openai/gpt-oss-120b"
+    displayName: "GPT OSS 120B (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+    reasoningRef: "replay-openai"
+  - modelId: "@cf/openai/gpt-oss-20b"
+    displayName: "GPT OSS 20B (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+    reasoningRef: "replay-openai"
+  - modelId: "@cf/qwen/qwen3-30b-a3b-fp8"
+    displayName: "Qwen3 30B A3b fp8 (free)"
+    capabilities: ["text"]
+    maxContext: 32768
+    maxOutputTokens: 32768
+    reasoningRef: "replay-openai"
+  - modelId: "@cf/zai-org/glm-4.7-flash"
+    displayName: "GLM-4.7-Flash (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "@cf/zai-org/glm-5.2"
+    displayName: "Glm 5.2 (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "replay-openai"

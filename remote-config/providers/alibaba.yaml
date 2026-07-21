@@ -1,0 +1,366 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "alibaba"
+provider:
+  id: "alibaba"
+  name: "Alibaba"
+  transport: "openai_chat_completions"
+  endpoint: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields: []
+  defaults:
+    modelId: "qwen3.5-plus"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  qwen-thinking-budget:
+    defaultVariantId: "default"
+    variants:
+      - id: "off"
+        label: "Off"
+        request:
+          - operation: "set"
+            path: "/enable_thinking"
+            value: false
+      - id: "default"
+        label: "Default"
+        request: []
+      - id: "low"
+        label: "Low · 512 tokens"
+        request:
+          - operation: "set"
+            path: "/enable_thinking"
+            value: true
+          - operation: "set"
+            path: "/thinking_budget"
+            value: 512
+      - id: "medium"
+        label: "Medium · 1024 tokens"
+        request:
+          - operation: "set"
+            path: "/enable_thinking"
+            value: true
+          - operation: "set"
+            path: "/thinking_budget"
+            value: 1024
+      - id: "high"
+        label: "High · 2048 tokens"
+        request:
+          - operation: "set"
+            path: "/enable_thinking"
+            value: true
+          - operation: "set"
+            path: "/thinking_budget"
+            value: 2048
+      - id: "xhigh"
+        label: "Extra high · 4096 tokens"
+        request:
+          - operation: "set"
+            path: "/enable_thinking"
+            value: true
+          - operation: "set"
+            path: "/thinking_budget"
+            value: 4096
+      - id: "max"
+        label: "Max · 8192 tokens"
+        request:
+          - operation: "set"
+            path: "/enable_thinking"
+            value: true
+          - operation: "set"
+            path: "/thinking_budget"
+            value: 8192
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+  replay-openai:
+    variants: []
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "qvq-max"
+    displayName: "QVQ Max"
+    capabilities: ["text", "image"]
+    maxContext: 131072
+    maxOutputTokens: 8192
+    reasoningRef: "replay-openai"
+  - modelId: "qwen-flash"
+    displayName: "Qwen Flash"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 32768
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen-max"
+    displayName: "Qwen Max"
+    capabilities: ["text"]
+    maxContext: 32768
+    maxOutputTokens: 8192
+  - modelId: "qwen-omni-turbo"
+    displayName: "Qwen-Omni Turbo"
+    capabilities: ["text", "image", "audio", "video"]
+    maxContext: 32768
+    maxOutputTokens: 2048
+  - modelId: "qwen-omni-turbo-realtime"
+    displayName: "Qwen-Omni Turbo Realtime"
+    capabilities: ["text", "image", "audio"]
+    maxContext: 32768
+    maxOutputTokens: 2048
+  - modelId: "qwen-plus"
+    displayName: "Qwen Plus"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 32768
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen-plus-character-ja"
+    displayName: "Qwen Plus Character (Japanese)"
+    capabilities: ["text"]
+    maxContext: 8192
+    maxOutputTokens: 512
+  - modelId: "qwen-turbo"
+    displayName: "Qwen Turbo"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 16384
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen-vl-max"
+    displayName: "Qwen-VL Max"
+    capabilities: ["text", "image"]
+    maxContext: 131072
+    maxOutputTokens: 8192
+  - modelId: "qwen-vl-plus"
+    displayName: "Qwen-VL Plus"
+    capabilities: ["text", "image"]
+    maxContext: 131072
+    maxOutputTokens: 8192
+  - modelId: "qwen2-5-14b-instruct"
+    displayName: "Qwen2.5 14B Instruct"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 8192
+  - modelId: "qwen2-5-32b-instruct"
+    displayName: "Qwen2.5 32B Instruct"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 8192
+  - modelId: "qwen2-5-72b-instruct"
+    displayName: "Qwen2.5 72B Instruct"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 8192
+  - modelId: "qwen2-5-7b-instruct"
+    displayName: "Qwen2.5 7B Instruct"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 8192
+  - modelId: "qwen2-5-omni-7b"
+    displayName: "Qwen2.5-Omni 7B"
+    capabilities: ["text", "image", "audio", "video"]
+    maxContext: 32768
+    maxOutputTokens: 2048
+  - modelId: "qwen2-5-vl-72b-instruct"
+    displayName: "Qwen2.5-VL 72B Instruct"
+    capabilities: ["text", "image"]
+    maxContext: 131072
+    maxOutputTokens: 8192
+  - modelId: "qwen2-5-vl-7b-instruct"
+    displayName: "Qwen2.5-VL 7B Instruct"
+    capabilities: ["text", "image"]
+    maxContext: 131072
+    maxOutputTokens: 8192
+  - modelId: "qwen3-14b"
+    displayName: "Qwen3 14B"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 8192
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3-235b-a22b"
+    displayName: "Qwen3 235B-A22B"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 16384
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3-32b"
+    displayName: "Qwen3 32B"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 16384
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3-8b"
+    displayName: "Qwen3 8B"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 8192
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3-coder-30b-a3b-instruct"
+    displayName: "Qwen3-Coder 30B-A3B Instruct"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+  - modelId: "qwen3-coder-480b-a35b-instruct"
+    displayName: "Qwen3-Coder 480B-A35B Instruct"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+  - modelId: "qwen3-coder-flash"
+    displayName: "Qwen3 Coder Flash"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 65536
+  - modelId: "qwen3-coder-plus"
+    displayName: "Qwen3 Coder Plus"
+    capabilities: ["text"]
+    maxContext: 1048576
+    maxOutputTokens: 65536
+  - modelId: "qwen3-max"
+    displayName: "Qwen3 Max"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+  - modelId: "qwen3-next-80b-a3b-instruct"
+    displayName: "Qwen3-Next 80B-A3B Instruct"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+  - modelId: "qwen3-next-80b-a3b-thinking"
+    displayName: "Qwen3-Next 80B-A3B (Thinking)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3-omni-flash"
+    displayName: "Qwen3-Omni Flash"
+    capabilities: ["text", "image", "audio", "video"]
+    maxContext: 65536
+    maxOutputTokens: 16384
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3-omni-flash-realtime"
+    displayName: "Qwen3-Omni Flash Realtime"
+    capabilities: ["text", "image", "audio", "video"]
+    maxContext: 65536
+    maxOutputTokens: 16384
+  - modelId: "qwen3-vl-235b-a22b"
+    displayName: "Qwen3-VL 235B-A22B"
+    capabilities: ["text", "image"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3-vl-30b-a3b"
+    displayName: "Qwen3-VL 30B-A3B"
+    capabilities: ["text", "image"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3-vl-plus"
+    displayName: "Qwen3-VL Plus"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3.5-122b-a10b"
+    displayName: "Qwen3.5 122B-A10B"
+    capabilities: ["text", "image", "video", "audio"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3.5-27b"
+    displayName: "Qwen3.5 27B"
+    capabilities: ["text", "image", "video", "audio"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3.5-35b-a3b"
+    displayName: "Qwen3.5 35B-A3B"
+    capabilities: ["text", "image", "video", "audio"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3.5-397b-a17b"
+    displayName: "Qwen3.5 397B-A17B"
+    capabilities: ["text", "image", "video", "audio"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3.5-plus"
+    displayName: "Qwen3.5 Plus"
+    capabilities: ["text", "image", "video"]
+    maxContext: 1000000
+    maxOutputTokens: 65536
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3.6-27b"
+    displayName: "Qwen3.6 27B"
+    capabilities: ["text", "image", "video", "audio"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3.6-35b-a3b"
+    displayName: "Qwen3.6 35B-A3B"
+    capabilities: ["text", "image", "video", "audio"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3.6-flash"
+    displayName: "Qwen3.6 Flash"
+    capabilities: ["text", "image", "video"]
+    maxContext: 1000000
+    maxOutputTokens: 65536
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3.6-max-preview"
+    displayName: "Qwen3.6 Max Preview"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3.6-plus"
+    displayName: "Qwen3.6 Plus"
+    capabilities: ["text", "image", "video"]
+    maxContext: 1000000
+    maxOutputTokens: 65536
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3.7-max"
+    displayName: "Qwen3.7 Max"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 65536
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwen3.7-plus"
+    displayName: "Qwen3.7 Plus"
+    capabilities: ["text", "image", "video"]
+    maxContext: 1000000
+    maxOutputTokens: 65536
+    reasoningRef: "qwen-thinking-budget"
+  - modelId: "qwq-plus"
+    displayName: "QwQ Plus"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 8192
+    reasoningRef: "qwen-thinking-budget"

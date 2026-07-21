@@ -1,0 +1,200 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "anthropic"
+provider:
+  id: "anthropic"
+  name: "Anthropic"
+  transport: "anthropic_messages"
+  endpoint: "https://api.anthropic.com"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "x-api-key"
+    prefix: ""
+  setupFields: []
+  defaults:
+    modelId: "claude-sonnet-4-6"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  anthropic-adaptive:
+    defaultVariantId: "default"
+    variants:
+      - id: "default"
+        label: "Default"
+        request: []
+      - id: "low"
+        label: "Low"
+        request:
+          - operation: "set"
+            path: "/thinking/type"
+            value: "adaptive"
+          - operation: "set"
+            path: "/output_config/effort"
+            value: "low"
+      - id: "medium"
+        label: "Medium"
+        request:
+          - operation: "set"
+            path: "/thinking/type"
+            value: "adaptive"
+          - operation: "set"
+            path: "/output_config/effort"
+            value: "medium"
+      - id: "high"
+        label: "High"
+        request:
+          - operation: "set"
+            path: "/thinking/type"
+            value: "adaptive"
+          - operation: "set"
+            path: "/output_config/effort"
+            value: "high"
+      - id: "max"
+        label: "Max"
+        request:
+          - operation: "set"
+            path: "/thinking/type"
+            value: "adaptive"
+          - operation: "set"
+            path: "/output_config/effort"
+            value: "max"
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/content_block"
+          assistantMessagePath: "/content/{/index}"
+          operation: "merge"
+          when:
+            responsePath: "/content_block/type"
+            equals: "thinking"
+        - responsePath: "/delta/thinking"
+          assistantMessagePath: "/content/{/index}/thinking"
+          operation: "append"
+          when:
+            responsePath: "/delta/type"
+            equals: "thinking_delta"
+        - responsePath: "/delta/signature"
+          assistantMessagePath: "/content/{/index}/signature"
+          operation: "append"
+          when:
+            responsePath: "/delta/type"
+            equals: "signature_delta"
+  replay-anthropic:
+    variants: []
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/content_block"
+          assistantMessagePath: "/content/{/index}"
+          operation: "merge"
+          when:
+            responsePath: "/content_block/type"
+            equals: "thinking"
+        - responsePath: "/delta/thinking"
+          assistantMessagePath: "/content/{/index}/thinking"
+          operation: "append"
+          when:
+            responsePath: "/delta/type"
+            equals: "thinking_delta"
+        - responsePath: "/delta/signature"
+          assistantMessagePath: "/content/{/index}/signature"
+          operation: "append"
+          when:
+            responsePath: "/delta/type"
+            equals: "signature_delta"
+models:
+  - modelId: "claude-fable-5"
+    displayName: "Claude Fable 5"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "replay-anthropic"
+  - modelId: "claude-haiku-4-5"
+    displayName: "Claude Haiku 4.5 (latest)"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 64000
+    reasoningRef: "replay-anthropic"
+  - modelId: "claude-haiku-4-5-20251001"
+    displayName: "Claude Haiku 4.5"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 64000
+    reasoningRef: "replay-anthropic"
+  - modelId: "claude-opus-4-1"
+    displayName: "Claude Opus 4.1 (latest)"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 32000
+    reasoningRef: "replay-anthropic"
+  - modelId: "claude-opus-4-1-20250805"
+    displayName: "Claude Opus 4.1"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 32000
+    reasoningRef: "replay-anthropic"
+  - modelId: "claude-opus-4-5"
+    displayName: "Claude Opus 4.5 (latest)"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 64000
+    reasoningRef: "replay-anthropic"
+  - modelId: "claude-opus-4-5-20251101"
+    displayName: "Claude Opus 4.5"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 64000
+    reasoningRef: "replay-anthropic"
+  - modelId: "claude-opus-4-6"
+    displayName: "Claude Opus 4.6"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "anthropic-adaptive"
+  - modelId: "claude-opus-4-7"
+    displayName: "Claude Opus 4.7"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "anthropic-adaptive"
+  - modelId: "claude-opus-4-8"
+    displayName: "Claude Opus 4.8"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "anthropic-adaptive"
+  - modelId: "claude-sonnet-4-5"
+    displayName: "Claude Sonnet 4.5 (latest)"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 64000
+    reasoningRef: "replay-anthropic"
+  - modelId: "claude-sonnet-4-5-20250929"
+    displayName: "Claude Sonnet 4.5"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 64000
+    reasoningRef: "replay-anthropic"
+  - modelId: "claude-sonnet-4-6"
+    displayName: "Claude Sonnet 4.6"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "anthropic-adaptive"
+  - modelId: "claude-sonnet-5"
+    displayName: "Claude Sonnet 5"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "anthropic-adaptive"

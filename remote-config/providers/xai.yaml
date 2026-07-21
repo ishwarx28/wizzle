@@ -1,0 +1,72 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "xai"
+provider:
+  id: "xai"
+  name: "xAI"
+  transport: "openai_chat_completions"
+  endpoint: "https://api.x.ai/v1"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields: []
+  defaults:
+    modelId: "grok-4.3"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  replay-openai:
+    variants: []
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "grok-4.20-0309-non-reasoning"
+    displayName: "Grok 4.20 (Non-Reasoning)"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 30000
+  - modelId: "grok-4.20-0309-reasoning"
+    displayName: "Grok 4.20 (Reasoning)"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 30000
+    reasoningRef: "replay-openai"
+  - modelId: "grok-4.3"
+    displayName: "Grok 4.3"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 30000
+    reasoningRef: "replay-openai"
+  - modelId: "grok-4.5"
+    displayName: "Grok 4.5"
+    capabilities: ["text", "image"]
+    maxContext: 500000
+    maxOutputTokens: 500000
+    reasoningRef: "replay-openai"
+  - modelId: "grok-build-0.1"
+    displayName: "Grok Build 0.1"
+    capabilities: ["text", "image"]
+    maxContext: 256000
+    maxOutputTokens: 256000
+    reasoningRef: "replay-openai"

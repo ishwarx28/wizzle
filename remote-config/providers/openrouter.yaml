@@ -1,0 +1,1617 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "openrouter"
+provider:
+  id: "openrouter"
+  name: "OpenRouter"
+  transport: "openai_chat_completions"
+  endpoint: "https://openrouter.ai/api/v1"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields: []
+  defaults:
+    modelId: "anthropic/claude-sonnet-4.6"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  openrouter-effort:
+    defaultVariantId: "default"
+    variants:
+      - id: "off"
+        label: "Off"
+        request:
+          - operation: "set"
+            path: "/reasoning/effort"
+            value: "none"
+      - id: "default"
+        label: "Default"
+        request: []
+      - id: "minimal"
+        label: "Minimal"
+        request:
+          - operation: "set"
+            path: "/reasoning/effort"
+            value: "minimal"
+      - id: "low"
+        label: "Low"
+        request:
+          - operation: "set"
+            path: "/reasoning/effort"
+            value: "low"
+      - id: "medium"
+        label: "Medium"
+        request:
+          - operation: "set"
+            path: "/reasoning/effort"
+            value: "medium"
+      - id: "high"
+        label: "High"
+        request:
+          - operation: "set"
+            path: "/reasoning/effort"
+            value: "high"
+      - id: "xhigh"
+        label: "Extra high"
+        request:
+          - operation: "set"
+            path: "/reasoning/effort"
+            value: "xhigh"
+      - id: "max"
+        label: "Max"
+        request:
+          - operation: "set"
+            path: "/reasoning/effort"
+            value: "max"
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "~anthropic/claude-fable-latest"
+    displayName: "Claude Fable Latest"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "~anthropic/claude-haiku-latest"
+    displayName: "Anthropic Claude Haiku Latest"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 64000
+    reasoningRef: "openrouter-effort"
+  - modelId: "~anthropic/claude-opus-latest"
+    displayName: "Claude Opus Latest"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "~anthropic/claude-sonnet-latest"
+    displayName: "Anthropic Claude Sonnet Latest"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "~google/gemini-flash-latest"
+    displayName: "Google Gemini Flash Latest"
+    capabilities: ["text", "image", "video", "audio"]
+    maxContext: 1048576
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "~google/gemini-pro-latest"
+    displayName: "Google Gemini Pro Latest"
+    capabilities: ["audio", "image", "text", "video"]
+    maxContext: 1048576
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "~moonshotai/kimi-latest"
+    displayName: "MoonshotAI Kimi Latest"
+    capabilities: ["text", "image"]
+    maxContext: 1048576
+    maxOutputTokens: 262144
+    reasoningRef: "openrouter-effort"
+  - modelId: "~openai/gpt-latest"
+    displayName: "OpenAI GPT Latest"
+    capabilities: ["image", "text"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "~openai/gpt-mini-latest"
+    displayName: "OpenAI GPT Mini Latest"
+    capabilities: ["image", "text"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "~x-ai/grok-latest"
+    displayName: "Grok Latest"
+    capabilities: ["text", "image"]
+    maxContext: 500000
+    maxOutputTokens: 1000000
+    reasoningRef: "openrouter-effort"
+  - modelId: "ai21/jamba-large-1.7"
+    displayName: "Jamba Large 1.7"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 4096
+  - modelId: "aion-labs/aion-2.0"
+    displayName: "Aion-2.0"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "aion-labs/aion-3.0"
+    displayName: "Aion-3.0"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "aion-labs/aion-3.0-mini"
+    displayName: "Aion-3.0-Mini"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "amazon/nova-2-lite-v1"
+    displayName: "Nova 2 Lite"
+    capabilities: ["text", "image", "video"]
+    maxContext: 1000000
+    maxOutputTokens: 65535
+    reasoningRef: "openrouter-effort"
+  - modelId: "amazon/nova-lite-v1"
+    displayName: "Nova Lite 1.0"
+    capabilities: ["text", "image"]
+    maxContext: 300000
+    maxOutputTokens: 5120
+  - modelId: "amazon/nova-micro-v1"
+    displayName: "Nova Micro 1.0"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 5120
+  - modelId: "amazon/nova-premier-v1"
+    displayName: "Nova Premier 1.0"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 32000
+  - modelId: "amazon/nova-pro-v1"
+    displayName: "Nova Pro 1.0"
+    capabilities: ["text", "image"]
+    maxContext: 300000
+    maxOutputTokens: 5120
+  - modelId: "anthropic/claude-3-haiku"
+    displayName: "Claude 3 Haiku"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 4096
+  - modelId: "anthropic/claude-fable-5"
+    displayName: "Claude Fable 5"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "anthropic/claude-haiku-4.5"
+    displayName: "Claude Haiku 4.5 (latest)"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 64000
+    reasoningRef: "openrouter-effort"
+  - modelId: "anthropic/claude-opus-4"
+    displayName: "Claude Opus 4"
+    capabilities: ["image", "text"]
+    maxContext: 200000
+    maxOutputTokens: 32000
+    reasoningRef: "openrouter-effort"
+  - modelId: "anthropic/claude-opus-4.1"
+    displayName: "Claude Opus 4.1 (latest)"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 32000
+    reasoningRef: "openrouter-effort"
+  - modelId: "anthropic/claude-opus-4.5"
+    displayName: "Claude Opus 4.5 (latest)"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 64000
+    reasoningRef: "openrouter-effort"
+  - modelId: "anthropic/claude-opus-4.6"
+    displayName: "Claude Opus 4.6"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "anthropic/claude-opus-4.7"
+    displayName: "Claude Opus 4.7"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "anthropic/claude-opus-4.7-fast"
+    displayName: "Claude Opus 4.7 (Fast)"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "anthropic/claude-opus-4.8"
+    displayName: "Claude Opus 4.8"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "anthropic/claude-opus-4.8-fast"
+    displayName: "Claude Opus 4.8 (Fast)"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "anthropic/claude-sonnet-4"
+    displayName: "Claude Sonnet 4"
+    capabilities: ["image", "text"]
+    maxContext: 1000000
+    maxOutputTokens: 64000
+    reasoningRef: "openrouter-effort"
+  - modelId: "anthropic/claude-sonnet-4.5"
+    displayName: "Claude Sonnet 4.5 (latest)"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 64000
+    reasoningRef: "openrouter-effort"
+  - modelId: "anthropic/claude-sonnet-4.6"
+    displayName: "Claude Sonnet 4.6"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "anthropic/claude-sonnet-5"
+    displayName: "Claude Sonnet 5"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "arcee-ai/trinity-large-thinking"
+    displayName: "Trinity Large Thinking"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 80000
+    reasoningRef: "openrouter-effort"
+  - modelId: "arcee-ai/virtuoso-large"
+    displayName: "Virtuoso Large"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 64000
+  - modelId: "bytedance-seed/seed-1.6"
+    displayName: "Seed 1.6"
+    capabilities: ["image", "text", "video"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "bytedance-seed/seed-1.6-flash"
+    displayName: "Seed 1.6 Flash"
+    capabilities: ["image", "text", "video"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "bytedance-seed/seed-2.0-lite"
+    displayName: "Seed-2.0-Lite"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 131072
+    reasoningRef: "openrouter-effort"
+  - modelId: "bytedance-seed/seed-2.0-mini"
+    displayName: "Seed-2.0-Mini"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 131072
+    reasoningRef: "openrouter-effort"
+  - modelId: "cohere/command-r-08-2024"
+    displayName: "Command R"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4000
+  - modelId: "cohere/command-r-plus-08-2024"
+    displayName: "Command R+"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4000
+  - modelId: "cohere/north-mini-code:free"
+    displayName: "North Mini Code (free)"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 64000
+    reasoningRef: "openrouter-effort"
+  - modelId: "deepseek/deepseek-chat"
+    displayName: "DeepSeek Chat"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 16000
+  - modelId: "deepseek/deepseek-chat-v3-0324"
+    displayName: "DeepSeek V3 0324"
+    capabilities: ["text"]
+    maxContext: 163840
+    maxOutputTokens: 65536
+  - modelId: "deepseek/deepseek-chat-v3.1"
+    displayName: "DeepSeek V3.1"
+    capabilities: ["text"]
+    maxContext: 163840
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "deepseek/deepseek-r1"
+    displayName: "DeepSeek-R1"
+    capabilities: ["text"]
+    maxContext: 163840
+    maxOutputTokens: 16000
+    reasoningRef: "openrouter-effort"
+  - modelId: "deepseek/deepseek-r1-0528"
+    displayName: "R1 0528"
+    capabilities: ["text"]
+    maxContext: 163840
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "deepseek/deepseek-v3.1-terminus"
+    displayName: "DeepSeek V3.1 Terminus"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "deepseek/deepseek-v3.2"
+    displayName: "DeepSeek V3.2"
+    capabilities: ["text"]
+    maxContext: 163840
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "deepseek/deepseek-v3.2-exp"
+    displayName: "DeepSeek V3.2 Exp"
+    capabilities: ["text"]
+    maxContext: 163840
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "deepseek/deepseek-v4-flash"
+    displayName: "DeepSeek V4 Flash"
+    capabilities: ["text"]
+    maxContext: 1048576
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "deepseek/deepseek-v4-pro"
+    displayName: "DeepSeek V4 Pro"
+    capabilities: ["text"]
+    maxContext: 1048576
+    maxOutputTokens: 384000
+    reasoningRef: "openrouter-effort"
+  - modelId: "google/gemini-2.5-flash"
+    displayName: "Gemini 2.5 Flash"
+    capabilities: ["text", "image", "audio", "video"]
+    maxContext: 1048576
+    maxOutputTokens: 65535
+    reasoningRef: "openrouter-effort"
+  - modelId: "google/gemini-2.5-flash-lite"
+    displayName: "Gemini 2.5 Flash-Lite"
+    capabilities: ["text", "image", "audio", "video"]
+    maxContext: 1048576
+    maxOutputTokens: 65535
+    reasoningRef: "openrouter-effort"
+  - modelId: "google/gemini-2.5-pro"
+    displayName: "Gemini 2.5 Pro"
+    capabilities: ["text", "image", "audio", "video"]
+    maxContext: 1048576
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "google/gemini-2.5-pro-preview"
+    displayName: "Gemini 2.5 Pro Preview 06-05"
+    capabilities: ["image", "text", "audio"]
+    maxContext: 1048576
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "google/gemini-2.5-pro-preview-05-06"
+    displayName: "Gemini 2.5 Pro Preview 05-06"
+    capabilities: ["text", "image", "audio", "video"]
+    maxContext: 1048576
+    maxOutputTokens: 65535
+    reasoningRef: "openrouter-effort"
+  - modelId: "google/gemini-3-flash-preview"
+    displayName: "Gemini 3 Flash Preview"
+    capabilities: ["text", "image", "video", "audio"]
+    maxContext: 1048576
+    maxOutputTokens: 65535
+    reasoningRef: "openrouter-effort"
+  - modelId: "google/gemini-3-pro-image"
+    displayName: "Nano Banana Pro"
+    capabilities: ["text", "image"]
+    maxContext: 65536
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "google/gemini-3.1-flash-lite"
+    displayName: "Gemini 3.1 Flash Lite"
+    capabilities: ["text", "image", "video", "audio"]
+    maxContext: 1048576
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "google/gemini-3.1-flash-lite-preview"
+    displayName: "Gemini 3.1 Flash Lite Preview"
+    capabilities: ["text", "image", "video", "audio"]
+    maxContext: 1048576
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "google/gemini-3.1-pro-preview"
+    displayName: "Gemini 3.1 Pro Preview"
+    capabilities: ["text", "image", "video", "audio"]
+    maxContext: 1048576
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "google/gemini-3.1-pro-preview-customtools"
+    displayName: "Gemini 3.1 Pro Preview Custom Tools"
+    capabilities: ["text", "image", "video", "audio"]
+    maxContext: 1048756
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "google/gemini-3.5-flash"
+    displayName: "Gemini 3.5 Flash"
+    capabilities: ["text", "image", "video", "audio"]
+    maxContext: 1048576
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "google/gemma-3-12b-it"
+    displayName: "Gemma 3 12B"
+    capabilities: ["text", "image"]
+    maxContext: 131072
+    maxOutputTokens: 16384
+  - modelId: "google/gemma-3-27b-it"
+    displayName: "Gemma 3 27B"
+    capabilities: ["text", "image"]
+    maxContext: 131072
+    maxOutputTokens: 131072
+  - modelId: "google/gemma-4-26b-a4b-it"
+    displayName: "Gemma 4 26B A4B IT"
+    capabilities: ["image", "text", "video"]
+    maxContext: 262144
+    maxOutputTokens: 256000
+    reasoningRef: "openrouter-effort"
+  - modelId: "google/gemma-4-26b-a4b-it:free"
+    displayName: "Gemma 4 26B A4B (free)"
+    capabilities: ["image", "text", "video"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "google/gemma-4-31b-it"
+    displayName: "Gemma 4 31B IT"
+    capabilities: ["image", "text", "video"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "openrouter-effort"
+  - modelId: "google/gemma-4-31b-it:free"
+    displayName: "Gemma 4 31B (free)"
+    capabilities: ["image", "text", "video"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "ibm-granite/granite-4.1-8b"
+    displayName: "Granite 4.1 8B"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 131072
+  - modelId: "inception/mercury-2"
+    displayName: "Mercury 2"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 50000
+    reasoningRef: "openrouter-effort"
+  - modelId: "inclusionai/ling-2.6-1t"
+    displayName: "Ling-2.6-1T"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+  - modelId: "inclusionai/ling-2.6-flash"
+    displayName: "Ling-2.6-flash"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+  - modelId: "inclusionai/ring-2.6-1t"
+    displayName: "Ring-2.6-1T"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "kwaipilot/kat-coder-air-v2.5"
+    displayName: "KAT-Coder-Air V2.5"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 80000
+  - modelId: "kwaipilot/kat-coder-pro-v2"
+    displayName: "KAT-Coder-Pro V2"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 80000
+  - modelId: "kwaipilot/kat-coder-pro-v2.5"
+    displayName: "KAT-Coder-Pro V2.5"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 80000
+  - modelId: "meta-llama/llama-3.1-70b-instruct"
+    displayName: "Llama 3.1 70B Instruct"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 16384
+  - modelId: "meta-llama/llama-3.1-8b-instruct"
+    displayName: "Llama 3.1 8B Instruct"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 131072
+  - modelId: "meta-llama/llama-3.3-70b-instruct"
+    displayName: "Llama-3.3-70B-Instruct"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 128000
+  - modelId: "meta-llama/llama-3.3-70b-instruct:free"
+    displayName: "Llama 3.3 70B Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 131072
+  - modelId: "meta-llama/llama-4-maverick"
+    displayName: "Llama 4 Maverick"
+    capabilities: ["text", "image"]
+    maxContext: 1048576
+    maxOutputTokens: 16384
+  - modelId: "meta-llama/llama-4-scout"
+    displayName: "Llama 4 Scout"
+    capabilities: ["text", "image"]
+    maxContext: 10000000
+    maxOutputTokens: 16384
+  - modelId: "meta/muse-spark-1.1"
+    displayName: "Muse Spark 1.1"
+    capabilities: ["text", "image", "video", "audio"]
+    maxContext: 1048576
+    maxOutputTokens: 1048576
+    reasoningRef: "openrouter-effort"
+  - modelId: "minimax/minimax-m1"
+    displayName: "MiniMax M1"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 40000
+    reasoningRef: "openrouter-effort"
+  - modelId: "minimax/minimax-m2"
+    displayName: "MiniMax-M2"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "openrouter-effort"
+  - modelId: "minimax/minimax-m2.1"
+    displayName: "MiniMax-M2.1"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "openrouter-effort"
+  - modelId: "minimax/minimax-m2.5"
+    displayName: "MiniMax-M2.5"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 196608
+    reasoningRef: "openrouter-effort"
+  - modelId: "minimax/minimax-m2.7"
+    displayName: "MiniMax-M2.7"
+    capabilities: ["text"]
+    maxContext: 204800
+    maxOutputTokens: 131072
+    reasoningRef: "openrouter-effort"
+  - modelId: "minimax/minimax-m3"
+    displayName: "MiniMax-M3"
+    capabilities: ["text", "image", "video"]
+    maxContext: 1048576
+    maxOutputTokens: 512000
+    reasoningRef: "openrouter-effort"
+  - modelId: "mistralai/codestral-2508"
+    displayName: "Codestral 2508"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 256000
+  - modelId: "mistralai/devstral-2512"
+    displayName: "Devstral 2"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "mistralai/ministral-14b-2512"
+    displayName: "Ministral 3 14B 2512"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "mistralai/ministral-3b-2512"
+    displayName: "Ministral 3 3B 2512"
+    capabilities: ["text", "image"]
+    maxContext: 131072
+    maxOutputTokens: 131072
+  - modelId: "mistralai/ministral-8b-2512"
+    displayName: "Ministral 3 8B 2512"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "mistralai/mistral-large"
+    displayName: "Mistral Large"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 128000
+  - modelId: "mistralai/mistral-large-2407"
+    displayName: "Mistral Large 2407"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 131072
+  - modelId: "mistralai/mistral-large-2512"
+    displayName: "Mistral Large 3"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "mistralai/mistral-medium-3"
+    displayName: "Mistral Medium 3"
+    capabilities: ["text", "image"]
+    maxContext: 131072
+    maxOutputTokens: 131072
+  - modelId: "mistralai/mistral-medium-3-5"
+    displayName: "Mistral Medium 3.5"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "openrouter-effort"
+  - modelId: "mistralai/mistral-medium-3.1"
+    displayName: "Mistral Medium 3.1"
+    capabilities: ["text", "image"]
+    maxContext: 131072
+    maxOutputTokens: 262144
+  - modelId: "mistralai/mistral-nemo"
+    displayName: "Mistral Nemo"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 16384
+  - modelId: "mistralai/mistral-saba"
+    displayName: "Saba"
+    capabilities: ["text"]
+    maxContext: 32768
+    maxOutputTokens: 32768
+  - modelId: "mistralai/mistral-small-2603"
+    displayName: "Mistral Small 4"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "openrouter-effort"
+  - modelId: "mistralai/mistral-small-3.2-24b-instruct"
+    displayName: "Mistral Small 3.2 24B"
+    capabilities: ["image", "text"]
+    maxContext: 131072
+    maxOutputTokens: 16384
+  - modelId: "mistralai/mixtral-8x22b-instruct"
+    displayName: "Mixtral 8x22B Instruct"
+    capabilities: ["text"]
+    maxContext: 65536
+    maxOutputTokens: 65536
+  - modelId: "mistralai/voxtral-small-24b-2507"
+    displayName: "Voxtral Small 24B 2507"
+    capabilities: ["text", "audio"]
+    maxContext: 32000
+    maxOutputTokens: 32000
+  - modelId: "moonshotai/kimi-k2"
+    displayName: "Kimi K2 0711"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 100352
+  - modelId: "moonshotai/kimi-k2-0905"
+    displayName: "Kimi K2 0905"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 100352
+  - modelId: "moonshotai/kimi-k2-thinking"
+    displayName: "Kimi K2 Thinking"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "openrouter-effort"
+  - modelId: "moonshotai/kimi-k2.5"
+    displayName: "Kimi K2.5"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "openrouter-effort"
+  - modelId: "moonshotai/kimi-k2.6"
+    displayName: "Kimi K2.6"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "openrouter-effort"
+  - modelId: "moonshotai/kimi-k2.7-code"
+    displayName: "Kimi K2.7 Code"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "openrouter-effort"
+  - modelId: "moonshotai/kimi-k3"
+    displayName: "Kimi K3"
+    capabilities: ["text", "image"]
+    maxContext: 1048576
+    maxOutputTokens: 1048576
+    reasoningRef: "openrouter-effort"
+  - modelId: "nex-agi/nex-n2-mini"
+    displayName: "Nex-N2-Mini"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "openrouter-effort"
+  - modelId: "nex-agi/nex-n2-pro"
+    displayName: "Nex-N2-Pro"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "openrouter-effort"
+  - modelId: "nvidia/llama-3.3-nemotron-super-49b-v1.5"
+    displayName: "Llama 3.3 Nemotron Super 49B v1.5"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 16384
+    reasoningRef: "openrouter-effort"
+  - modelId: "nvidia/nemotron-3-nano-30b-a3b"
+    displayName: "Nemotron 3 Nano 30B A3B"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 228000
+    reasoningRef: "openrouter-effort"
+  - modelId: "nvidia/nemotron-3-nano-30b-a3b:free"
+    displayName: "Nemotron 3 Nano 30B A3B (free)"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 256000
+    reasoningRef: "openrouter-effort"
+  - modelId: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+    displayName: "Nemotron 3 Nano Omni (free)"
+    capabilities: ["text", "image", "video", "audio"]
+    maxContext: 256000
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "nvidia/nemotron-3-super-120b-a12b"
+    displayName: "Nemotron 3 Super 120B A12B"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 16384
+    reasoningRef: "openrouter-effort"
+  - modelId: "nvidia/nemotron-3-super-120b-a12b:free"
+    displayName: "Nemotron 3 Super (free)"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 262144
+    reasoningRef: "openrouter-effort"
+  - modelId: "nvidia/nemotron-3-ultra-550b-a55b"
+    displayName: "Nemotron 3 Ultra 550B A55B"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 16384
+    reasoningRef: "openrouter-effort"
+  - modelId: "nvidia/nemotron-3-ultra-550b-a55b:free"
+    displayName: "Nemotron 3 Ultra (free)"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "nvidia/nemotron-nano-12b-v2-vl:free"
+    displayName: "Nemotron Nano 12B 2 VL (free)"
+    capabilities: ["text", "image", "video"]
+    maxContext: 128000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "nvidia/nemotron-nano-9b-v2:free"
+    displayName: "Nemotron Nano 9B V2 (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-3.5-turbo"
+    displayName: "GPT-3.5-turbo"
+    capabilities: ["text"]
+    maxContext: 16385
+    maxOutputTokens: 4096
+  - modelId: "openai/gpt-3.5-turbo-0613"
+    displayName: "GPT-3.5 Turbo (older v0613)"
+    capabilities: ["text"]
+    maxContext: 4095
+    maxOutputTokens: 4096
+  - modelId: "openai/gpt-3.5-turbo-16k"
+    displayName: "GPT-3.5 Turbo 16k"
+    capabilities: ["text"]
+    maxContext: 16385
+    maxOutputTokens: 4096
+  - modelId: "openai/gpt-4"
+    displayName: "GPT-4"
+    capabilities: ["text"]
+    maxContext: 8191
+    maxOutputTokens: 4096
+  - modelId: "openai/gpt-4-turbo"
+    displayName: "GPT-4 Turbo"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+  - modelId: "openai/gpt-4-turbo-preview"
+    displayName: "GPT-4 Turbo Preview"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+  - modelId: "openai/gpt-4.1"
+    displayName: "GPT-4.1"
+    capabilities: ["text", "image"]
+    maxContext: 1047576
+    maxOutputTokens: 32768
+  - modelId: "openai/gpt-4.1-mini"
+    displayName: "GPT-4.1 mini"
+    capabilities: ["text", "image"]
+    maxContext: 1047576
+    maxOutputTokens: 32768
+  - modelId: "openai/gpt-4.1-nano"
+    displayName: "GPT-4.1 nano"
+    capabilities: ["image", "text"]
+    maxContext: 1047576
+    maxOutputTokens: 32768
+  - modelId: "openai/gpt-4o"
+    displayName: "GPT-4o"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "openai/gpt-4o-2024-05-13"
+    displayName: "GPT-4o (2024-05-13)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+  - modelId: "openai/gpt-4o-2024-08-06"
+    displayName: "GPT-4o (2024-08-06)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "openai/gpt-4o-2024-11-20"
+    displayName: "GPT-4o (2024-11-20)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "openai/gpt-4o-mini"
+    displayName: "GPT-4o mini"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "openai/gpt-4o-mini-2024-07-18"
+    displayName: "GPT-4o-mini (2024-07-18)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "openai/gpt-5"
+    displayName: "GPT-5"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5-codex"
+    displayName: "GPT-5-Codex"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5-mini"
+    displayName: "GPT-5 Mini"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5-nano"
+    displayName: "GPT-5 Nano"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5-pro"
+    displayName: "GPT-5 Pro"
+    capabilities: ["image", "text"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.1"
+    displayName: "GPT-5.1"
+    capabilities: ["image", "text"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.1-chat"
+    displayName: "GPT-5.1 Chat"
+    capabilities: ["image", "text"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "openai/gpt-5.1-codex"
+    displayName: "GPT-5.1 Codex"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.1-codex-max"
+    displayName: "GPT-5.1 Codex Max"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.1-codex-mini"
+    displayName: "GPT-5.1 Codex mini"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 100000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.2"
+    displayName: "GPT-5.2"
+    capabilities: ["image", "text"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.2-chat"
+    displayName: "GPT-5.2 Chat"
+    capabilities: ["image", "text"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "openai/gpt-5.2-codex"
+    displayName: "GPT-5.2 Codex"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.2-pro"
+    displayName: "GPT-5.2 Pro"
+    capabilities: ["image", "text"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.3-chat"
+    displayName: "GPT-5.3 Chat"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "openai/gpt-5.3-codex"
+    displayName: "GPT-5.3 Codex"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.4"
+    displayName: "GPT-5.4"
+    capabilities: ["text", "image"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.4-mini"
+    displayName: "GPT-5.4 mini"
+    capabilities: ["image", "text"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.4-nano"
+    displayName: "GPT-5.4 nano"
+    capabilities: ["image", "text"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.4-pro"
+    displayName: "GPT-5.4 Pro"
+    capabilities: ["text", "image"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.5"
+    displayName: "GPT-5.5"
+    capabilities: ["text", "image"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.5-pro"
+    displayName: "GPT-5.5 Pro"
+    capabilities: ["text", "image"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.6-luna"
+    displayName: "GPT-5.6 Luna"
+    capabilities: ["text", "image"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.6-luna-pro"
+    displayName: "GPT-5.6 Luna Pro"
+    capabilities: ["text", "image"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.6-sol"
+    displayName: "GPT-5.6 Sol"
+    capabilities: ["text", "image"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.6-sol-pro"
+    displayName: "GPT-5.6 Sol Pro"
+    capabilities: ["text", "image"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.6-terra"
+    displayName: "GPT-5.6 Terra"
+    capabilities: ["text", "image"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-5.6-terra-pro"
+    displayName: "GPT-5.6 Terra Pro"
+    capabilities: ["text", "image"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-audio"
+    displayName: "GPT Audio"
+    capabilities: ["text", "audio"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "openai/gpt-audio-mini"
+    displayName: "GPT Audio Mini"
+    capabilities: ["text", "audio"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "openai/gpt-chat-latest"
+    displayName: "GPT Chat Latest"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+  - modelId: "openai/gpt-oss-120b"
+    displayName: "GPT OSS 120B"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 131072
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-oss-20b"
+    displayName: "GPT OSS 20B"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 131072
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-oss-20b:free"
+    displayName: "gpt-oss-20b (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/gpt-oss-safeguard-20b"
+    displayName: "gpt-oss-safeguard-20b"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/o1"
+    displayName: "o1"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 100000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/o3"
+    displayName: "o3"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 100000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/o3-deep-research"
+    displayName: "o3-deep-research"
+    capabilities: ["image", "text"]
+    maxContext: 200000
+    maxOutputTokens: 100000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/o3-mini"
+    displayName: "o3-mini"
+    capabilities: ["text"]
+    maxContext: 200000
+    maxOutputTokens: 100000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/o3-mini-high"
+    displayName: "o3 Mini High"
+    capabilities: ["text"]
+    maxContext: 200000
+    maxOutputTokens: 100000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/o3-pro"
+    displayName: "o3-pro"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 100000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/o4-mini"
+    displayName: "o4-mini"
+    capabilities: ["image", "text"]
+    maxContext: 200000
+    maxOutputTokens: 100000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/o4-mini-deep-research"
+    displayName: "o4-mini-deep-research"
+    capabilities: ["image", "text"]
+    maxContext: 200000
+    maxOutputTokens: 100000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openai/o4-mini-high"
+    displayName: "o4 Mini High"
+    capabilities: ["image", "text"]
+    maxContext: 200000
+    maxOutputTokens: 100000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openrouter/auto"
+    displayName: "Auto Router"
+    capabilities: ["text", "image", "audio", "video"]
+    maxContext: 2000000
+    maxOutputTokens: 2000000
+    reasoningRef: "openrouter-effort"
+  - modelId: "openrouter/free"
+    displayName: "Free Models Router (free)"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 8000
+    reasoningRef: "openrouter-effort"
+  - modelId: "poolside/laguna-m.1"
+    displayName: "Laguna M.1"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "poolside/laguna-m.1:free"
+    displayName: "Laguna M.1 (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "poolside/laguna-xs-2.1"
+    displayName: "Laguna XS 2.1"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "poolside/laguna-xs-2.1:free"
+    displayName: "Laguna XS 2.1 (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen-2.5-72b-instruct"
+    displayName: "Qwen2.5 72B Instruct"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 16384
+  - modelId: "qwen/qwen-2.5-7b-instruct"
+    displayName: "Qwen2.5 7B Instruct"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+  - modelId: "qwen/qwen-plus"
+    displayName: "Qwen Plus"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 32768
+  - modelId: "qwen/qwen-plus-2025-07-28"
+    displayName: "Qwen Plus 0728"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 32768
+  - modelId: "qwen/qwen-plus-2025-07-28:thinking"
+    displayName: "Qwen Plus 0728 (thinking)"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3-14b"
+    displayName: "Qwen3 14B"
+    capabilities: ["text"]
+    maxContext: 131702
+    maxOutputTokens: 40960
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3-235b-a22b"
+    displayName: "Qwen3 235B-A22B"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 8192
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3-235b-a22b-2507"
+    displayName: "Qwen3 235B A22B Instruct 2507"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 16384
+  - modelId: "qwen/qwen3-235b-a22b-thinking-2507"
+    displayName: "Qwen3 235B A22B Thinking 2507"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3-30b-a3b"
+    displayName: "Qwen3 30B A3B"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 16384
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3-30b-a3b-instruct-2507"
+    displayName: "Qwen3 30B A3B Instruct 2507"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 32000
+  - modelId: "qwen/qwen3-30b-a3b-thinking-2507"
+    displayName: "Qwen3 30B A3B Thinking 2507"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3-32b"
+    displayName: "Qwen3 32B"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 16384
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3-8b"
+    displayName: "Qwen3 8B"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 8192
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3-coder"
+    displayName: "Qwen3 Coder 480B A35B"
+    capabilities: ["text"]
+    maxContext: 1048576
+    maxOutputTokens: 65536
+  - modelId: "qwen/qwen3-coder-30b-a3b-instruct"
+    displayName: "Qwen3-Coder 30B-A3B Instruct"
+    capabilities: ["text"]
+    maxContext: 160000
+    maxOutputTokens: 32768
+  - modelId: "qwen/qwen3-coder-flash"
+    displayName: "Qwen3 Coder Flash"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 65536
+  - modelId: "qwen/qwen3-coder-next"
+    displayName: "Qwen3 Coder Next"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "qwen/qwen3-coder-plus"
+    displayName: "Qwen3 Coder Plus"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 65536
+  - modelId: "qwen/qwen3-coder:free"
+    displayName: "Qwen3 Coder 480B A35B (free)"
+    capabilities: ["text"]
+    maxContext: 1048576
+    maxOutputTokens: 262000
+  - modelId: "qwen/qwen3-max"
+    displayName: "Qwen3 Max"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+  - modelId: "qwen/qwen3-max-thinking"
+    displayName: "Qwen3 Max Thinking"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3-next-80b-a3b-instruct"
+    displayName: "Qwen3-Next 80B-A3B Instruct"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "qwen/qwen3-next-80b-a3b-instruct:free"
+    displayName: "Qwen3 Next 80B A3B Instruct (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "qwen/qwen3-next-80b-a3b-thinking"
+    displayName: "Qwen3-Next 80B-A3B (Thinking)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3-vl-235b-a22b-instruct"
+    displayName: "Qwen3 VL 235B A22B Instruct"
+    capabilities: ["text", "image"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+  - modelId: "qwen/qwen3-vl-235b-a22b-thinking"
+    displayName: "Qwen3 VL 235B A22B Thinking"
+    capabilities: ["text", "image"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3-vl-30b-a3b-instruct"
+    displayName: "Qwen3 VL 30B A3B Instruct"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+  - modelId: "qwen/qwen3-vl-30b-a3b-thinking"
+    displayName: "Qwen3 VL 30B A3B Thinking"
+    capabilities: ["text", "image"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3-vl-32b-instruct"
+    displayName: "Qwen3 VL 32B Instruct"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 32768
+  - modelId: "qwen/qwen3-vl-8b-instruct"
+    displayName: "Qwen3 VL 8B Instruct"
+    capabilities: ["image", "text"]
+    maxContext: 256000
+    maxOutputTokens: 32768
+  - modelId: "qwen/qwen3-vl-8b-thinking"
+    displayName: "Qwen3 VL 8B Thinking"
+    capabilities: ["image", "text"]
+    maxContext: 256000
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3.5-122b-a10b"
+    displayName: "Qwen3.5 122B-A10B"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3.5-27b"
+    displayName: "Qwen3.5 27B"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3.5-35b-a3b"
+    displayName: "Qwen3.5 35B-A3B"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3.5-397b-a17b"
+    displayName: "Qwen3.5 397B-A17B"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3.5-9b"
+    displayName: "Qwen3.5 9B"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3.5-flash-02-23"
+    displayName: "Qwen3.5-Flash"
+    capabilities: ["text", "image", "video"]
+    maxContext: 1000000
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3.5-plus-02-15"
+    displayName: "Qwen3.5 Plus 2026-02-15"
+    capabilities: ["text", "image", "video"]
+    maxContext: 1000000
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3.5-plus-20260420"
+    displayName: "Qwen3.5 Plus 2026-04-20"
+    capabilities: ["text", "image", "video"]
+    maxContext: 1000000
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3.6-27b"
+    displayName: "Qwen3.6 27B"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3.6-35b-a3b"
+    displayName: "Qwen3.6 35B-A3B"
+    capabilities: ["text", "image", "video"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3.6-flash"
+    displayName: "Qwen3.6 Flash"
+    capabilities: ["text", "image", "video"]
+    maxContext: 1000000
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3.6-max-preview"
+    displayName: "Qwen3.6 Max Preview"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3.6-plus"
+    displayName: "Qwen3.6 Plus"
+    capabilities: ["text", "image", "video"]
+    maxContext: 1000000
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3.7-max"
+    displayName: "Qwen3.7 Max"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "qwen/qwen3.7-plus"
+    displayName: "Qwen3.7 Plus"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "rekaai/reka-edge"
+    displayName: "Reka Edge"
+    capabilities: ["image", "text", "video"]
+    maxContext: 16384
+    maxOutputTokens: 16384
+  - modelId: "relace/relace-search"
+    displayName: "Relace Search"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 128000
+  - modelId: "sakana/fugu-ultra"
+    displayName: "Fugu Ultra"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "sao10k/l3.1-euryale-70b"
+    displayName: "Llama 3.1 Euryale 70B v2.2"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 16384
+  - modelId: "stepfun/step-3.5-flash"
+    displayName: "Step 3.5 Flash"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "openrouter-effort"
+  - modelId: "stepfun/step-3.7-flash"
+    displayName: "Step 3.7 Flash"
+    capabilities: ["text", "image", "video"]
+    maxContext: 256000
+    maxOutputTokens: 256000
+    reasoningRef: "openrouter-effort"
+  - modelId: "tencent/hy3"
+    displayName: "Hy3"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 131072
+    reasoningRef: "openrouter-effort"
+  - modelId: "tencent/hy3-preview"
+    displayName: "Hy3 preview"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "openrouter-effort"
+  - modelId: "tencent/hy3:free"
+    displayName: "Hy3 (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "openrouter-effort"
+  - modelId: "thedrummer/unslopnemo-12b"
+    displayName: "UnslopNemo 12B"
+    capabilities: ["text"]
+    maxContext: 32768
+    maxOutputTokens: 32768
+  - modelId: "upstage/solar-pro-3"
+    displayName: "Solar Pro 3"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "x-ai/grok-4.20"
+    displayName: "Grok 4.20"
+    capabilities: ["text", "image"]
+    maxContext: 2000000
+    maxOutputTokens: 2000000
+    reasoningRef: "openrouter-effort"
+  - modelId: "x-ai/grok-4.3"
+    displayName: "Grok 4.3"
+    capabilities: ["text", "image"]
+    maxContext: 1000000
+    maxOutputTokens: 1000000
+    reasoningRef: "openrouter-effort"
+  - modelId: "x-ai/grok-4.5"
+    displayName: "Grok 4.5"
+    capabilities: ["text", "image"]
+    maxContext: 500000
+    maxOutputTokens: 500000
+    reasoningRef: "openrouter-effort"
+  - modelId: "x-ai/grok-build-0.1"
+    displayName: "Grok Build 0.1"
+    capabilities: ["text", "image"]
+    maxContext: 256000
+    maxOutputTokens: 256000
+    reasoningRef: "openrouter-effort"
+  - modelId: "xiaomi/mimo-v2.5"
+    displayName: "MiMo-V2.5"
+    capabilities: ["text", "image", "audio", "video"]
+    maxContext: 1048576
+    maxOutputTokens: 131072
+    reasoningRef: "openrouter-effort"
+  - modelId: "xiaomi/mimo-v2.5-pro"
+    displayName: "MiMo-V2.5-Pro"
+    capabilities: ["text"]
+    maxContext: 1048576
+    maxOutputTokens: 131072
+    reasoningRef: "openrouter-effort"
+  - modelId: "z-ai/glm-4.5"
+    displayName: "GLM-4.5"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 98304
+    reasoningRef: "openrouter-effort"
+  - modelId: "z-ai/glm-4.5-air"
+    displayName: "GLM-4.5-Air"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 98304
+    reasoningRef: "openrouter-effort"
+  - modelId: "z-ai/glm-4.5v"
+    displayName: "GLM-4.5V"
+    capabilities: ["text", "image"]
+    maxContext: 65536
+    maxOutputTokens: 16384
+    reasoningRef: "openrouter-effort"
+  - modelId: "z-ai/glm-4.6"
+    displayName: "GLM-4.6"
+    capabilities: ["text"]
+    maxContext: 202752
+    maxOutputTokens: 131072
+    reasoningRef: "openrouter-effort"
+  - modelId: "z-ai/glm-4.6v"
+    displayName: "GLM-4.6V"
+    capabilities: ["text", "image", "video"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "openrouter-effort"
+  - modelId: "z-ai/glm-4.7"
+    displayName: "GLM-4.7"
+    capabilities: ["text"]
+    maxContext: 202752
+    maxOutputTokens: 131072
+    reasoningRef: "openrouter-effort"
+  - modelId: "z-ai/glm-4.7-flash"
+    displayName: "GLM-4.7-Flash"
+    capabilities: ["text"]
+    maxContext: 200000
+    maxOutputTokens: 131072
+    reasoningRef: "openrouter-effort"
+  - modelId: "z-ai/glm-5"
+    displayName: "GLM-5"
+    capabilities: ["text"]
+    maxContext: 202752
+    maxOutputTokens: 202752
+    reasoningRef: "openrouter-effort"
+  - modelId: "z-ai/glm-5-turbo"
+    displayName: "GLM-5-Turbo"
+    capabilities: ["text"]
+    maxContext: 202752
+    maxOutputTokens: 131072
+    reasoningRef: "openrouter-effort"
+  - modelId: "z-ai/glm-5.1"
+    displayName: "GLM-5.1"
+    capabilities: ["text"]
+    maxContext: 202752
+    maxOutputTokens: 128000
+    reasoningRef: "openrouter-effort"
+  - modelId: "z-ai/glm-5.2"
+    displayName: "GLM-5.2"
+    capabilities: ["text"]
+    maxContext: 1048576
+    maxOutputTokens: 131072
+    reasoningRef: "openrouter-effort"
+  - modelId: "z-ai/glm-5v-turbo"
+    displayName: "GLM-5V-Turbo"
+    capabilities: ["image", "text", "video"]
+    maxContext: 202752
+    maxOutputTokens: 131072
+    reasoningRef: "openrouter-effort"

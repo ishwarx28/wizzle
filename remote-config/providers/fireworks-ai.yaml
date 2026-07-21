@@ -1,0 +1,139 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "fireworks-ai"
+provider:
+  id: "fireworks-ai"
+  name: "Fireworks AI"
+  transport: "openai_chat_completions"
+  endpoint: "https://api.fireworks.ai/inference/v1"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields: []
+  defaults:
+    modelId: "accounts/fireworks/models/deepseek-v4-flash"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  replay-openai:
+    variants: []
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "accounts/fireworks/models/deepseek-v4-flash"
+    displayName: "DeepSeek V4 Flash"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 384000
+    reasoningRef: "replay-openai"
+  - modelId: "accounts/fireworks/models/deepseek-v4-pro"
+    displayName: "DeepSeek V4 Pro"
+    capabilities: ["text"]
+    maxContext: 1000000
+    maxOutputTokens: 384000
+    reasoningRef: "replay-openai"
+  - modelId: "accounts/fireworks/models/glm-5p1"
+    displayName: "GLM 5.1"
+    capabilities: ["text"]
+    maxContext: 202800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "accounts/fireworks/models/glm-5p2"
+    displayName: "GLM 5.2"
+    capabilities: ["text"]
+    maxContext: 1048575
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "accounts/fireworks/models/gpt-oss-120b"
+    displayName: "GPT OSS 120B"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "replay-openai"
+  - modelId: "accounts/fireworks/models/gpt-oss-20b"
+    displayName: "GPT OSS 20B"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 32768
+    reasoningRef: "replay-openai"
+  - modelId: "accounts/fireworks/models/kimi-k2p6"
+    displayName: "Kimi K2.6"
+    capabilities: ["text", "image"]
+    maxContext: 262000
+    maxOutputTokens: 262000
+    reasoningRef: "replay-openai"
+  - modelId: "accounts/fireworks/models/kimi-k2p7-code"
+    displayName: "Kimi K2.7 Code"
+    capabilities: ["text", "image"]
+    maxContext: 262000
+    maxOutputTokens: 262000
+    reasoningRef: "replay-openai"
+  - modelId: "accounts/fireworks/models/minimax-m2p7"
+    displayName: "MiniMax-M2.7"
+    capabilities: ["text"]
+    maxContext: 196608
+    maxOutputTokens: 196608
+    reasoningRef: "replay-openai"
+  - modelId: "accounts/fireworks/models/minimax-m3"
+    displayName: "MiniMax-M3"
+    capabilities: ["text"]
+    maxContext: 512000
+    maxOutputTokens: 512000
+    reasoningRef: "replay-openai"
+  - modelId: "accounts/fireworks/models/qwen3p7-plus"
+    displayName: "Qwen 3.7 Plus"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 65536
+    reasoningRef: "replay-openai"
+  - modelId: "accounts/fireworks/routers/glm-5p1-fast"
+    displayName: "GLM 5.1 Fast"
+    capabilities: ["text"]
+    maxContext: 202800
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "accounts/fireworks/routers/glm-5p2-fast"
+    displayName: "GLM 5.2 Fast"
+    capabilities: ["text"]
+    maxContext: 1048575
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "accounts/fireworks/routers/kimi-k2p6-fast"
+    displayName: "Kimi K2.6 Fast"
+    capabilities: ["text", "image"]
+    maxContext: 262000
+    maxOutputTokens: 262000
+    reasoningRef: "replay-openai"
+  - modelId: "accounts/fireworks/routers/kimi-k2p6-turbo"
+    displayName: "Kimi K2.6 Turbo"
+    capabilities: ["text", "image"]
+    maxContext: 262000
+    maxOutputTokens: 262000
+    reasoningRef: "replay-openai"
+  - modelId: "accounts/fireworks/routers/kimi-k2p7-code-fast"
+    displayName: "Kimi K2.7 Code Fast"
+    capabilities: ["text", "image"]
+    maxContext: 262000
+    maxOutputTokens: 262000
+    reasoningRef: "replay-openai"

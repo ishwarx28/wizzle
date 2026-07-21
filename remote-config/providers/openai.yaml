@@ -1,0 +1,428 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "openai"
+provider:
+  id: "openai"
+  name: "OpenAI"
+  transport: "openai_chat_completions"
+  endpoint: "https://api.openai.com/v1"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields: []
+  defaults:
+    modelId: "gpt-5.4"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  effort-extended:
+    defaultVariantId: "default"
+    variants:
+      - id: "off"
+        label: "Off"
+        request:
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "none"
+      - id: "default"
+        label: "Default"
+        request: []
+      - id: "low"
+        label: "Low"
+        request:
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "low"
+      - id: "medium"
+        label: "Medium"
+        request:
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "medium"
+      - id: "high"
+        label: "High"
+        request:
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "high"
+      - id: "xhigh"
+        label: "Extra high"
+        request:
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "xhigh"
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+  effort-low-high:
+    defaultVariantId: "default"
+    variants:
+      - id: "default"
+        label: "Default"
+        request: []
+      - id: "low"
+        label: "Low"
+        request:
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "low"
+      - id: "medium"
+        label: "Medium"
+        request:
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "medium"
+      - id: "high"
+        label: "High"
+        request:
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "high"
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+  effort-minimal-high:
+    defaultVariantId: "default"
+    variants:
+      - id: "default"
+        label: "Default"
+        request: []
+      - id: "minimal"
+        label: "Minimal"
+        request:
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "minimal"
+      - id: "low"
+        label: "Low"
+        request:
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "low"
+      - id: "medium"
+        label: "Medium"
+        request:
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "medium"
+      - id: "high"
+        label: "High"
+        request:
+          - operation: "set"
+            path: "/reasoning_effort"
+            value: "high"
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+  replay-openai:
+    variants: []
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "gpt-4"
+    displayName: "GPT-4"
+    capabilities: ["text"]
+    maxContext: 8192
+    maxOutputTokens: 8192
+  - modelId: "gpt-4-turbo"
+    displayName: "GPT-4 Turbo"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+  - modelId: "gpt-4.1"
+    displayName: "GPT-4.1"
+    capabilities: ["text", "image"]
+    maxContext: 1047576
+    maxOutputTokens: 32768
+  - modelId: "gpt-4.1-mini"
+    displayName: "GPT-4.1 mini"
+    capabilities: ["text", "image"]
+    maxContext: 1047576
+    maxOutputTokens: 32768
+  - modelId: "gpt-4.1-nano"
+    displayName: "GPT-4.1 nano"
+    capabilities: ["text", "image"]
+    maxContext: 1047576
+    maxOutputTokens: 32768
+  - modelId: "gpt-4o"
+    displayName: "GPT-4o"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "gpt-4o-2024-05-13"
+    displayName: "GPT-4o (2024-05-13)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 4096
+  - modelId: "gpt-4o-2024-08-06"
+    displayName: "GPT-4o (2024-08-06)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "gpt-4o-2024-11-20"
+    displayName: "GPT-4o (2024-11-20)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "gpt-4o-mini"
+    displayName: "GPT-4o mini"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "gpt-5"
+    displayName: "GPT-5"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "effort-minimal-high"
+  - modelId: "gpt-5-codex"
+    displayName: "GPT-5-Codex"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "effort-minimal-high"
+  - modelId: "gpt-5-mini"
+    displayName: "GPT-5 Mini"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "effort-minimal-high"
+  - modelId: "gpt-5-nano"
+    displayName: "GPT-5 Nano"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "effort-minimal-high"
+  - modelId: "gpt-5-pro"
+    displayName: "GPT-5 Pro"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 272000
+    reasoningRef: "replay-openai"
+  - modelId: "gpt-5.1"
+    displayName: "GPT-5.1"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "replay-openai"
+  - modelId: "gpt-5.1-chat-latest"
+    displayName: "GPT-5.1 Chat"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+    reasoningRef: "replay-openai"
+  - modelId: "gpt-5.1-codex"
+    displayName: "GPT-5.1 Codex"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "replay-openai"
+  - modelId: "gpt-5.1-codex-max"
+    displayName: "GPT-5.1 Codex Max"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "replay-openai"
+  - modelId: "gpt-5.1-codex-mini"
+    displayName: "GPT-5.1 Codex mini"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "replay-openai"
+  - modelId: "gpt-5.2"
+    displayName: "GPT-5.2"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "effort-extended"
+  - modelId: "gpt-5.2-chat-latest"
+    displayName: "GPT-5.2 Chat"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+    reasoningRef: "effort-extended"
+  - modelId: "gpt-5.2-codex"
+    displayName: "GPT-5.2 Codex"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "effort-extended"
+  - modelId: "gpt-5.2-pro"
+    displayName: "GPT-5.2 Pro"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "replay-openai"
+  - modelId: "gpt-5.3-chat-latest"
+    displayName: "GPT-5.3 Chat (latest)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "gpt-5.3-codex"
+    displayName: "GPT-5.3 Codex"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "effort-extended"
+  - modelId: "gpt-5.3-codex-spark"
+    displayName: "GPT-5.3 Codex Spark"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 32000
+    reasoningRef: "effort-extended"
+  - modelId: "gpt-5.4"
+    displayName: "GPT-5.4"
+    capabilities: ["text", "image"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "effort-extended"
+  - modelId: "gpt-5.4-mini"
+    displayName: "GPT-5.4 mini"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "effort-extended"
+  - modelId: "gpt-5.4-nano"
+    displayName: "GPT-5.4 nano"
+    capabilities: ["text", "image"]
+    maxContext: 400000
+    maxOutputTokens: 128000
+    reasoningRef: "effort-extended"
+  - modelId: "gpt-5.4-pro"
+    displayName: "GPT-5.4 Pro"
+    capabilities: ["text", "image"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "replay-openai"
+  - modelId: "gpt-5.5"
+    displayName: "GPT-5.5"
+    capabilities: ["text", "image"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "effort-extended"
+  - modelId: "gpt-5.5-pro"
+    displayName: "GPT-5.5 Pro"
+    capabilities: ["text", "image"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "replay-openai"
+  - modelId: "gpt-5.6"
+    displayName: "GPT-5.6"
+    capabilities: ["text", "image"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "effort-extended"
+  - modelId: "gpt-5.6-luna"
+    displayName: "GPT-5.6 Luna"
+    capabilities: ["text", "image"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "effort-extended"
+  - modelId: "gpt-5.6-sol"
+    displayName: "GPT-5.6 Sol"
+    capabilities: ["text", "image"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "effort-extended"
+  - modelId: "gpt-5.6-terra"
+    displayName: "GPT-5.6 Terra"
+    capabilities: ["text", "image"]
+    maxContext: 1050000
+    maxOutputTokens: 128000
+    reasoningRef: "effort-extended"
+  - modelId: "gpt-realtime-2.1"
+    displayName: "GPT-Realtime-2.1"
+    capabilities: ["text", "audio", "image"]
+    maxContext: 128000
+    maxOutputTokens: 32000
+    reasoningRef: "replay-openai"
+  - modelId: "o1"
+    displayName: "o1"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 100000
+    reasoningRef: "effort-low-high"
+  - modelId: "o1-pro"
+    displayName: "o1-pro"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 100000
+    reasoningRef: "effort-low-high"
+  - modelId: "o3"
+    displayName: "o3"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 100000
+    reasoningRef: "effort-low-high"
+  - modelId: "o3-deep-research"
+    displayName: "o3-deep-research"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 100000
+    reasoningRef: "effort-low-high"
+  - modelId: "o3-mini"
+    displayName: "o3-mini"
+    capabilities: ["text"]
+    maxContext: 200000
+    maxOutputTokens: 100000
+    reasoningRef: "effort-low-high"
+  - modelId: "o3-pro"
+    displayName: "o3-pro"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 100000
+    reasoningRef: "effort-low-high"
+  - modelId: "o4-mini"
+    displayName: "o4-mini"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 100000
+    reasoningRef: "effort-low-high"
+  - modelId: "o4-mini-deep-research"
+    displayName: "o4-mini-deep-research"
+    capabilities: ["text", "image"]
+    maxContext: 200000
+    maxOutputTokens: 100000
+    reasoningRef: "effort-low-high"

@@ -1,0 +1,55 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "sarvam"
+provider:
+  id: "sarvam"
+  name: "Sarvam AI"
+  transport: "openai_chat_completions"
+  endpoint: "https://api.sarvam.ai/v1"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields: []
+  defaults:
+    modelId: "sarvam-105b"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  replay-openai:
+    variants: []
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "sarvam-105b"
+    displayName: "Sarvam-105B"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 131072
+    reasoningRef: "replay-openai"
+  - modelId: "sarvam-30b"
+    displayName: "Sarvam-30B"
+    capabilities: ["text"]
+    maxContext: 65536
+    maxOutputTokens: 65536
+    reasoningRef: "replay-openai"

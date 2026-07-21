@@ -1,0 +1,194 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  url: "https://models.dev/api.json"
+  providerId: "mistral"
+provider:
+  id: "mistral"
+  name: "Mistral"
+  transport: "openai_chat_completions"
+  endpoint: "https://api.mistral.ai/v1"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields: []
+  defaults:
+    modelId: "devstral-medium-latest"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes:
+  replay-openai:
+    variants: []
+    replay:
+      scope: "active_tool_loop"
+      preserveExactly: true
+      capture:
+        - responsePath: "/choices/*/delta/reasoning_content"
+          assistantMessagePath: "/reasoning_content"
+          operation: "append"
+        - responsePath: "/choices/*/delta/reasoning"
+          assistantMessagePath: "/reasoning"
+          operation: "append"
+models:
+  - modelId: "codestral-latest"
+    displayName: "Codestral (latest) (free)"
+    capabilities: ["text"]
+    maxContext: 256000
+    maxOutputTokens: 4096
+  - modelId: "devstral-2512"
+    displayName: "Devstral 2 (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "devstral-latest"
+    displayName: "Devstral 2 (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "devstral-medium-2507"
+    displayName: "Devstral Medium (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 128000
+  - modelId: "devstral-medium-latest"
+    displayName: "Devstral 2 (latest) (free)"
+    capabilities: ["text"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "devstral-small-2505"
+    displayName: "Devstral Small 2505 (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 128000
+  - modelId: "devstral-small-2507"
+    displayName: "Devstral Small (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 128000
+  - modelId: "labs-devstral-small-2512"
+    displayName: "Devstral Small 2 (free)"
+    capabilities: ["text", "image"]
+    maxContext: 256000
+    maxOutputTokens: 256000
+  - modelId: "magistral-medium-latest"
+    displayName: "Magistral Medium (latest) (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+    reasoningRef: "replay-openai"
+  - modelId: "magistral-small"
+    displayName: "Magistral Small (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 128000
+    reasoningRef: "replay-openai"
+  - modelId: "ministral-3b-latest"
+    displayName: "Ministral 3B (latest) (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 128000
+  - modelId: "ministral-8b-latest"
+    displayName: "Ministral 8B (latest) (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 128000
+  - modelId: "mistral-large-2411"
+    displayName: "Mistral Large 2.1 (free)"
+    capabilities: ["text"]
+    maxContext: 131072
+    maxOutputTokens: 16384
+  - modelId: "mistral-large-2512"
+    displayName: "Mistral Large 3 (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "mistral-large-latest"
+    displayName: "Mistral Large (latest) (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "mistral-medium-2505"
+    displayName: "Mistral Medium 3 (free)"
+    capabilities: ["text", "image"]
+    maxContext: 131072
+    maxOutputTokens: 131072
+  - modelId: "mistral-medium-2508"
+    displayName: "Mistral Medium 3.1 (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+  - modelId: "mistral-medium-2604"
+    displayName: "Mistral Medium 3.5 (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "replay-openai"
+  - modelId: "mistral-medium-latest"
+    displayName: "Mistral Medium (latest) (free)"
+    capabilities: ["text", "image"]
+    maxContext: 262144
+    maxOutputTokens: 262144
+    reasoningRef: "replay-openai"
+  - modelId: "mistral-nemo"
+    displayName: "Mistral Nemo (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 128000
+  - modelId: "mistral-small-2506"
+    displayName: "Mistral Small 3.2 (free)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 16384
+  - modelId: "mistral-small-2603"
+    displayName: "Mistral Small 4 (free)"
+    capabilities: ["text", "image"]
+    maxContext: 256000
+    maxOutputTokens: 256000
+    reasoningRef: "replay-openai"
+  - modelId: "mistral-small-latest"
+    displayName: "Mistral Small (latest) (free)"
+    capabilities: ["text", "image"]
+    maxContext: 256000
+    maxOutputTokens: 256000
+    reasoningRef: "replay-openai"
+  - modelId: "open-mistral-7b"
+    displayName: "Mistral 7B (free)"
+    capabilities: ["text"]
+    maxContext: 8000
+    maxOutputTokens: 8000
+  - modelId: "open-mistral-nemo"
+    displayName: "Open Mistral Nemo (free)"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 128000
+  - modelId: "open-mixtral-8x22b"
+    displayName: "Mixtral 8x22B (free)"
+    capabilities: ["text"]
+    maxContext: 64000
+    maxOutputTokens: 64000
+  - modelId: "open-mixtral-8x7b"
+    displayName: "Mixtral 8x7B (free)"
+    capabilities: ["text"]
+    maxContext: 32000
+    maxOutputTokens: 32000
+  - modelId: "pixtral-12b"
+    displayName: "Pixtral 12B (free)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 128000
+  - modelId: "pixtral-large-latest"
+    displayName: "Pixtral Large (latest) (free)"
+    capabilities: ["text", "image"]
+    maxContext: 128000
+    maxOutputTokens: 128000

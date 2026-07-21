@@ -82,7 +82,7 @@ export function resolveAvailableAppUpdate(
   update: RemoteUpdate,
   currentVersion: string,
 ): AvailableAppUpdate | null {
-  return compareSemanticVersions(currentVersion, update.version) === -1
+  return update.enabled && compareSemanticVersions(currentVersion, update.version) === -1
     ? { ...update, currentVersion }
     : null;
 }

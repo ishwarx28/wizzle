@@ -1,0 +1,35 @@
+# Generated from Models.dev plus Wizzle transport/reasoning metadata.
+schemaVersion: 1
+revision: "models.dev-2026-07-17"
+source:
+  type: "local-curated"
+provider:
+  id: "agnes-ai"
+  name: "Agnes AI"
+  transport: "openai_chat_completions"
+  endpoint: "https://apihub.agnes-ai.com/v1"
+  routes:
+    chatCompletions: "/chat/completions"
+    models: "/models"
+  auth:
+    mode: "api_key"
+    required: true
+    location: "header"
+    name: "Authorization"
+    prefix: "Bearer "
+  setupFields: []
+  defaults:
+    modelId: "agnes-2.0-flash"
+    maxContext: 128000
+    maxOutputTokens: 8192
+  modelCatalog:
+    mode: "fixed"
+    unknownModelPolicy: "exclude"
+  headers: []
+reasoningRecipes: {}
+models:
+  - modelId: "agnes-2.0-flash"
+    displayName: "Agnes 2.5 Flash"
+    capabilities: ["text"]
+    maxContext: 128000
+    maxOutputTokens: 8192
