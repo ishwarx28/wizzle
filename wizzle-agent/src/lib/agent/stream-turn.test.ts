@@ -114,7 +114,7 @@ function main() {
   assert(subagent.items[0]?.kind === "ready", "subagent is a recognized agent tool");
 
   const plan = normalizeStreamedToolCalls(
-    [toolCall({ id: "plan-1", name: "implementation_plan", arguments: '{"action":"status"}' })],
+    [toolCall({ id: "plan-1", name: "implementation_plan", arguments: '{"action":"advance"}' })],
     0,
   );
   assert(plan.items[0]?.kind === "ready", "implementation planner is a recognized agent tool");

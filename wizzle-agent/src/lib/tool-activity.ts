@@ -224,15 +224,11 @@ function buildRunDetailLabel(
       }
     }
     case "implementation_plan": {
-      const action = parseToolPayload(toolCall.input)?.action ?? resultPayload?.action ?? "status";
-      if (live) return action === "status" ? "Reading implementation plan" : "Updating implementation plan";
+      const action = parseToolPayload(toolCall.input)?.action ?? resultPayload?.action ?? "advance";
+      if (live) return action === "save" ? "Saving implementation plan" : "Advancing implementation plan";
       const labels: Record<string, string> = {
-        complete_step: "Completed a plan step",
-        create: "Created implementation plan",
-        resume: "Started implementation plan",
-        revise: "Revised implementation plan",
-        start_step: "Started a plan step",
-        status: "Read implementation plan",
+        advance: "Advanced implementation plan",
+        save: "Saved implementation plan",
       };
       return labels[action] ?? "Updated implementation plan";
     }

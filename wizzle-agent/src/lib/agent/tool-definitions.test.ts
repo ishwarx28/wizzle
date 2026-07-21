@@ -14,7 +14,7 @@ function assert(condition: unknown, message: string): asserts condition {
 }
 
 function main() {
-  assert(TOOL_SCHEMA_VERSION === 19, "automatic verification schema bump");
+  assert(TOOL_SCHEMA_VERSION === 26, "subagent join description schema bump");
   assert(SHELL_TOOL.name === "shell", "host command tool uses the platform-neutral shell name");
   assert(
     SHELL_TOOL.description.includes("cmd.exe /C") && SHELL_TOOL.description.includes("sh -lc"),
@@ -78,13 +78,11 @@ function main() {
     { enum?: unknown[] }
   >;
   assert(
-    planProperties.action?.enum?.join(",") ===
-      "create,revise,resume,start_step,complete_step,status",
-    "planner exposes review and ordered execution actions",
+    planProperties.action?.enum?.join(",") === "save,advance",
+    "planner exposes only save and advance",
   );
-  assert(Boolean(planProperties.approaches), "planner captures implementation approaches");
-  assert(Boolean(planProperties.affectedFiles), "planner captures affected files");
-  assert(Boolean(planProperties.verificationSteps), "planner requires final verification");
+  assert(Boolean(planProperties.markdown), "planner accepts one compact Markdown document");
+  assert(Object.keys(planProperties).length === 2, "planner has no model-facing workflow IDs or nested plan fields");
   assert(CLARIFY_TOOL.name === "clarify", "clarify tool has the expected name");
   const clarifyProperties = CLARIFY_TOOL.parameters.properties as Record<string, unknown>;
   assert(

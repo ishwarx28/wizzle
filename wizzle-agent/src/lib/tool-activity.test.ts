@@ -160,7 +160,7 @@ function main() {
   const [planRun] = collectToolRuns([
     {
       id: "plan-call",
-      input: JSON.stringify({ action: "create" }),
+      input: JSON.stringify({ action: "save", markdown: "# Plan" }),
       name: "implementation_plan",
       status: "done",
       toolCallId: "plan-1",
@@ -185,7 +185,7 @@ function main() {
   ]);
   assert(planRun?.kind === "implementation_plan", "planner gets a dedicated compact UI kind");
   assert(planRun?.isExpandable, "plan details are available on demand");
-  assert(planRun?.detailLabel === "Created implementation plan", "plan create has a concise label");
+  assert(planRun?.detailLabel === "Saved implementation plan", "plan save has a concise label");
   assert(
     extractLinkedFileFromToolResult({
       content: JSON.stringify({ path: "/tmp/implementation-plan.md", stopTurn: true }),

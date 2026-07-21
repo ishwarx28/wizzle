@@ -1685,7 +1685,7 @@ async function runWorkspaceAgentInternal(
       if (item.toolCall.function.name !== "implementation_plan") return false;
       try {
         const input = JSON.parse(item.toolCall.function.arguments) as { action?: string };
-        return input.action === "create" || input.action === "revise";
+        return input.action === "save";
       } catch {
         return false;
       }
@@ -1839,9 +1839,9 @@ async function runWorkspaceAgentInternal(
         toolCall.function.name !== "implementation_plan"
       ) {
         toolPayload = {
-          error: "Project tools cannot run in the same batch that creates or revises an implementation plan.",
+          error: "Project tools cannot run in the same batch that saves an implementation plan.",
           output: JSON.stringify({
-            error: "Project tools cannot run in the same batch that creates or revises an implementation plan.",
+            error: "Project tools cannot run in the same batch that saves an implementation plan.",
             ok: false,
           }),
           status: "error",

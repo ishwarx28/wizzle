@@ -5,39 +5,31 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-function planInput() {
-  return {
-    action: "create" as const,
-    affectedFiles: [{ path: "src/app.ts", reason: "Controls the changed behavior." }],
-    approaches: [
-      {
-        summary: "Change the controlling implementation directly.",
-        title: "Direct integration",
-        tradeoffs: ["Smallest change"],
-      },
-      {
-        summary: "Introduce an abstraction before changing behavior.",
-        title: "New abstraction",
-        tradeoffs: ["More reusable", "Larger change"],
-      },
-    ],
-    concerns: ["Preserve persisted sessions."],
-    findings: ["The existing behavior is controlled in src/app.ts."],
-    gaps: [],
-    goal: "Implement the requested behavior safely.",
-    implementationSteps: [
-      { details: "Update the controlling branch.", title: "Implement the behavior" },
-      { details: "Update the user-facing integration.", title: "Wire the UI" },
-    ],
-    recommendedApproach: 0,
-    summary: "Use the existing integration point and preserve compatibility.",
-    taskType: "implementation" as const,
-    title: "Implementation plan",
-    verificationSteps: [
-      { details: "Run the focused test and typecheck.", title: "Verify the implementation" },
-    ],
-  };
-}
+const PLAN_MARKDOWN = `# Implementation plan
+
+## Goal
+
+Implement the requested behavior safely.
+
+## Approaches
+
+1. Direct integration — smallest compatible change.
+2. New abstraction — more reusable but larger.
+
+## Affected files
+
+- src/app.ts — controls the behavior.
+- src/app.test.ts — verifies the behavior.
+
+## Steps
+
+- [ ] Implement the behavior
+- [ ] Update the integration
+
+## Verification
+
+- [ ] Run the focused test and typecheck
+`;
 
 function main() {
   let id = 0;
@@ -46,51 +38,54 @@ function main() {
     idFactory: () => String(++id),
     now: () => ++time,
   });
-  const created = engine.run(planInput());
-  assert(created.stopTurn, "creating a plan stops the turn for user review");
-  assert(created.status === "awaiting_user", "new plans await user review");
-  assert(created.approaches.length === 2, "plans retain one to three approaches");
+  const saved = engine.run({ action: "save", markdown: PLAN_MARKDOWN });
+  assert(saved.stopTurn, "saving a plan stops the turn for user review");
+  assert(saved.status === "awaiting_user", "saved plans await user review");
+  assert(saved.steps.length === 3, "compact results retain ordered implementation and verification steps");
+  assert(!("id" in saved.steps[0]!), "model-facing plan results omit workflow IDs");
+  assert(!("approaches" in saved), "model-facing plan results omit internal plan structures");
   assert(engine.hasPendingExecution(), "an unapproved plan remains pending");
 
-  const resumed = engine.run({
-    action: "resume",
-    approachId: created.recommendedApproachId,
-  });
-  assert(resumed.status === "in_progress", "approved plans enter execution");
+  const started = engine.run({ action: "advance" });
+  assert(started.status === "in_progress", "advance approves the plan and starts its first step");
+  assert(started.currentStep?.title === "Implement the behavior", "the first step starts automatically");
 
-  const firstStep = resumed.steps[0]!;
-  engine.run({ action: "start_step", stepId: firstStep.id });
-  let skippedStepFailed = false;
-  try {
-    engine.run({ action: "start_step", stepId: resumed.steps[1]!.id });
-  } catch {
-    skippedStepFailed = true;
-  }
-  assert(skippedStepFailed, "the next step cannot start before the current step is complete");
+  const second = engine.run({ action: "advance" });
+  assert(second.steps[0]?.status === "completed", "advance completes the active step first");
+  assert(second.currentStep?.title === "Update the integration", "advance starts only the next step");
 
-  engine.run({ action: "complete_step", stepId: firstStep.id });
-  for (const step of resumed.steps.slice(1)) {
-    engine.run({ action: "start_step", stepId: step.id });
-    engine.run({ action: "complete_step", stepId: step.id });
-  }
-  const completed = engine.run({ action: "status" });
-  assert(completed.status === "completed", "verification completion finishes the plan");
+  engine.run({ action: "advance" });
+  const completed = engine.run({ action: "advance" });
+  assert(completed.status === "completed", "the final verification advance completes the plan");
   assert(!engine.hasPendingExecution(), "completed plans release final-answer enforcement");
 
-  const markdown = renderImplementationPlanMarkdown(completed);
+  const snapshot = engine.getSnapshot();
+  assert(snapshot, "the completed plan remains available");
+  const markdown = renderImplementationPlanMarkdown(snapshot);
   assert(markdown.includes("## Approaches"), "artifact includes approaches");
   assert(markdown.includes("## Affected files"), "artifact includes affected files");
-  assert(markdown.includes("## Verification steps"), "artifact ends with verification details");
-  assert(markdown.includes("- [x]"), "completed steps are marked in Markdown");
+  assert(markdown.includes("## Verification"), "artifact ends with verification details");
+  assert(markdown.match(/- \[x\]/g)?.length === 3, "completed steps are checked in Markdown");
+
+  const revisionEngine = createImplementationPlanEngine(null, "/tmp/revision-plan.md");
+  revisionEngine.run({ action: "save", markdown: PLAN_MARKDOWN });
+  const revised = revisionEngine.run({
+    action: "save",
+    markdown: PLAN_MARKDOWN.replace("Direct integration", "Focused integration"),
+  });
+  assert(revised.stopTurn && revised.status === "awaiting_user", "saving again revises and reopens review");
 
   const bugEngine = createImplementationPlanEngine(null, "/tmp/bug-plan.md");
-  let missingRootCauseFailed = false;
+  let missingFixFailed = false;
   try {
-    bugEngine.run({ ...planInput(), taskType: "bug_fix" });
+    bugEngine.run({
+      action: "save",
+      markdown: PLAN_MARKDOWN.replace("## Approaches", "## Root cause\n\nThe failing branch is stale.\n\n## Approaches"),
+    });
   } catch {
-    missingRootCauseFailed = true;
+    missingFixFailed = true;
   }
-  assert(missingRootCauseFailed, "bug plans require root cause and intended fix");
+  assert(missingFixFailed, "bug sections require both root cause and intended fix");
 
   console.log("implementation plan engine tests passed");
 }

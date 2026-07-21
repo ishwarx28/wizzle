@@ -51,7 +51,48 @@ function statusLabel(status: ImplementationPlanState["status"]) {
   return "Completed";
 }
 
+function renderSavedMarkdown(state: ImplementationPlanState) {
+  const stepsByKind = {
+    implementation: state.steps.filter((step) => step.kind === "implementation"),
+    verification: state.steps.filter((step) => step.kind === "verification"),
+  };
+  const indexes = { implementation: 0, verification: 0 };
+  let activeKind: ImplementationPlanStep["kind"] | null = null;
+  const rendered: string[] = [];
+
+  for (const line of state.markdown!.trim().split("\n")) {
+    const heading = /^##\s+(.+?)\s*$/.exec(line)?.[1]?.trim().toLowerCase();
+    activeKind = heading === "steps"
+      ? "implementation"
+      : heading === "verification"
+        ? "verification"
+        : heading
+          ? null
+          : activeKind;
+    const checkbox = /^(\s*)-\s*\[[ xX]\]\s+(.+?)\s*$/.exec(line);
+    if (!activeKind || !checkbox) {
+      rendered.push(line);
+      continue;
+    }
+
+    const step = stepsByKind[activeKind][indexes[activeKind]++];
+    if (!step) {
+      rendered.push(line);
+      continue;
+    }
+    const checked = step.status === "completed" ? "x" : " ";
+    const active = step.status === "in_progress" ? " — in progress" : "";
+    rendered.push(`${checkbox[1]}- [${checked}] ${step.title}${active}`);
+  }
+
+  const titleIndex = rendered.findIndex((line) => /^#\s+/.test(line));
+  rendered.splice(titleIndex + 1, 0, "", `**Status:** ${statusLabel(state.status)}`);
+  return `${rendered.join("\n").trim()}\n`;
+}
+
 export function renderImplementationPlanMarkdown(state: ImplementationPlanState) {
+  if (state.markdown) return renderSavedMarkdown(state);
+
   const implementationSteps = state.steps.filter((step) => step.kind === "implementation");
   const verificationSteps = state.steps.filter((step) => step.kind === "verification");
   const affectedFiles = state.affectedFiles

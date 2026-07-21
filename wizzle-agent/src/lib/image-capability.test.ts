@@ -45,14 +45,10 @@ function main() {
 
   assert(formatEnvironmentImageSupportLine(false) === "image: disabled", "env disabled");
   assert(formatEnvironmentImageSupportLine(true) === "image: enabled", "env enabled");
-  assert(
-    resolveReadToolDescription(false).includes("Image support is disabled"),
-    "read tool desc without images",
-  );
-  assert(
-    resolveReadToolDescription(true).includes("image file"),
-    "read tool desc with images",
-  );
+  const readDescription =
+    "Read a file from a path. Prefer targeted line ranges to avoid unnecessary context when possible.";
+  assert(resolveReadToolDescription(false) === readDescription, "text-only read description stays concise");
+  assert(resolveReadToolDescription(true) === readDescription, "image-capable read description stays concise");
 
   console.log("image-capability tests passed");
 }

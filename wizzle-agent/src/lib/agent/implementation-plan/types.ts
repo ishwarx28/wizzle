@@ -39,6 +39,7 @@ export type ImplementationPlanState = {
   gaps: string[];
   goal: string;
   intendedFix?: string;
+  markdown?: string;
   planPath: string;
   recommendedApproachId: string;
   rootCause?: string;
@@ -52,46 +53,22 @@ export type ImplementationPlanState = {
   version: 1;
 };
 
-export type ImplementationPlanApproachInput = {
-  summary?: string;
-  title?: string;
-  tradeoffs?: string[];
-};
-
-export type ImplementationPlanAffectedFileInput = {
-  path?: string;
-  reason?: string;
-};
-
-export type ImplementationPlanStepInput = {
-  details?: string;
-  title?: string;
-};
-
 export type ImplementationPlanToolInput = {
-  action?: "complete_step" | "create" | "resume" | "revise" | "start_step" | "status";
-  affectedFiles?: ImplementationPlanAffectedFileInput[];
-  approaches?: ImplementationPlanApproachInput[];
-  approachId?: string;
-  concerns?: string[];
-  findings?: string[];
-  gaps?: string[];
-  goal?: string;
-  implementationSteps?: ImplementationPlanStepInput[];
-  intendedFix?: string;
-  recommendedApproach?: number;
-  rootCause?: string;
-  stepId?: string;
-  summary?: string;
-  taskType?: ImplementationPlanTaskType;
-  title?: string;
-  verificationSteps?: ImplementationPlanStepInput[];
+  action?: "advance" | "save";
+  markdown?: string;
 };
 
-export type ImplementationPlanToolResult = ImplementationPlanState & {
-  currentStep?: ImplementationPlanStep;
+export type ImplementationPlanToolStep = Pick<
+  ImplementationPlanStep,
+  "kind" | "status" | "title"
+>;
+
+export type ImplementationPlanToolResult = {
+  currentStep?: ImplementationPlanToolStep;
   note: string;
   ok: true;
   path: string;
+  status: ImplementationPlanStatus;
+  steps: ImplementationPlanToolStep[];
   stopTurn: boolean;
 };
