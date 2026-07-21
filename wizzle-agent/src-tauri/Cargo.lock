@@ -6487,6 +6487,7 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "image",
+ "libc",
  "notify",
  "rand 0.8.6",
  "regex",

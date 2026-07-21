@@ -21,6 +21,45 @@ const AGENT_PROCESS_EVENT: &str = "agent-process-updated";
 const DELETE_WAIT_ATTEMPTS: usize = 120;
 const DELETE_WAIT_INTERVAL_MS: u64 = 25;
 
+#[cfg(unix)]
+fn isolated_process_group_target(pid: i32, target_group: i32, current_group: i32) -> Option<i32> {
+    (target_group > 0 && target_group == pid && target_group != current_group)
+        .then_some(-target_group)
+}
+
+#[cfg(unix)]
+fn unix_process_group_target(pid: i32) -> Result<Option<i32>, String> {
+    // SAFETY: getpgid/getpgrp only inspect process metadata and receive valid integer values.
+    let target_group = unsafe { libc::getpgid(pid) };
+    if target_group == -1 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(None);
+        }
+        return Err(format!("Could not inspect process {pid}: {error}"));
+    }
+    // SAFETY: getpgrp takes no pointers or external memory.
+    let current_group = unsafe { libc::getpgrp() };
+    Ok(isolated_process_group_target(
+        pid,
+        target_group,
+        current_group,
+    ))
+}
+
+#[cfg(unix)]
+fn signal_unix_process(target: i32, signal: i32) -> Result<(), String> {
+    // SAFETY: kill receives a validated PID/process-group target and a libc signal constant.
+    if unsafe { libc::kill(target, signal) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(format!("Could not signal process target {target}: {error}"))
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -225,21 +264,20 @@ pub(crate) async fn terminate_pid(pid: u32) -> Result<(), String> {
         return Ok(());
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(unix)]
     {
-        // Negative PID = process group (requires spawn with process_group(0)).
-        let _ = tokio::process::Command::new("kill")
-            .args(["-TERM", &format!("-{pid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
-        let _ = tokio::process::Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
+        let pid = i32::try_from(pid).map_err(|_| "Process ID is out of range.".to_string())?;
+        let current_pid = i32::try_from(std::process::id())
+            .map_err(|_| "Current process ID is out of range.".to_string())?;
+        if pid == current_pid {
+            return Err("Wizzle refused to terminate its own process.".to_string());
+        }
+        let process_group = unix_process_group_target(pid)?;
+        if let Some(group) = process_group {
+            // Some Unix variants reject group signals while allowing the direct child signal.
+            let _ = signal_unix_process(group, libc::SIGTERM);
+        }
+        signal_unix_process(pid, libc::SIGTERM)?;
         // Children of the shell that left the group (common for pipelines).
         let _ = tokio::process::Command::new("pkill")
             .args(["-TERM", "-P", &pid.to_string()])
@@ -250,26 +288,21 @@ pub(crate) async fn terminate_pid(pid: u32) -> Result<(), String> {
 
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-        let _ = tokio::process::Command::new("kill")
-            .args(["-KILL", &format!("-{pid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
+        if let Some(group) = process_group {
+            let _ = signal_unix_process(group, libc::SIGKILL);
+        }
         let _ = tokio::process::Command::new("pkill")
             .args(["-KILL", "-P", &pid.to_string()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .await;
-        let _ = tokio::process::Command::new("kill")
-            .args(["-KILL", &pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
+        signal_unix_process(pid, libc::SIGKILL)?;
         Ok(())
     }
+
+    #[cfg(all(not(target_os = "windows"), not(unix)))]
+    Err("Process termination is unsupported on this platform.".to_string())
 }
 
 impl AgentRuntimeState {
@@ -871,6 +904,24 @@ pub fn active_runtime_state_names() -> HashSet<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_target_never_selects_the_current_group() {
+        assert_eq!(isolated_process_group_target(700, 700, 600), Some(-700));
+        assert_eq!(isolated_process_group_target(700, 600, 600), None);
+        assert_eq!(isolated_process_group_target(700, 701, 600), None);
+        assert_eq!(isolated_process_group_target(0, 0, 600), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_termination_refuses_the_current_process() {
+        let error = terminate_pid(std::process::id())
+            .await
+            .expect_err("current process must be protected");
+        assert!(error.contains("own process"));
+    }
 
     #[test]
     fn runtime_state_names_cover_phase_six_states() {
