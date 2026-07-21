@@ -67,9 +67,9 @@ Copy the example env file before starting the app:
 cp .env.example .env
 ```
 
-`WIZZLE_CONFIG_URL` is required and must point directly to the public root YAML manifest. The manifest supplies developer metadata, update information, system prompts, and links to independently validated provider catalogs. Wizzle downloads it over HTTPS and keeps a last-known-good local cache for temporary network failures. There are no bundled provider, reasoning, prompt, or identity fallbacks.
+`WIZZLE_CONFIG_URL` is required and defaults to the public manifest in [`../remote-config`](../remote-config). The manifest supplies developer metadata, update information, system prompts, and links to independently validated provider catalogs. Wizzle downloads it over HTTPS and keeps a last-known-good local cache for temporary network failures. There are no bundled provider, reasoning, prompt, or identity fallbacks.
 
-The `update` entry uses semantic versions and platform-specific signed updater endpoints. When the configured version is newer, Wizzle installs it inside the app; `critical` updates block the workspace until installation. Release builds embed `WIZZLE_UPDATER_PUBLIC_KEY`, while CI signs updater artifacts with `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+The `update` entry supports semantic versions, platform URLs, and normal or critical update behavior. `update.enabled` is currently `false`, so unsigned builds do not show or install in-app updates. Signed Tauri updater artifacts and a public verification key are required before this is enabled.
 
 The Providers page offers two paths:
 
@@ -93,7 +93,7 @@ The provider layer supports OpenAI-compatible chat completions, Anthropic's nati
 
 ## Agent Prompt and Skills
 
-The frontend builds the agent system prompt from the validated remote prompt catalog, discovered `AGENTS.md` paths, and global skill metadata. Dedicated remote prompts cover title generation, enhancement, compaction, context pressure, subagents, and final-response recovery. For project work, the main agent first creates a durable Markdown implementation plan with approaches, affected files, ordered steps, and verification, then stops for user review. The plan opens in the in-app file sidebar through the Read plan tile; execution resumes from the user's next plain-language response and advances one completed step at a time. The agent reads applicable instruction files before relying on their rules; the closest scoped file takes precedence. Replay history is trimmed by `src/lib/context-budget.ts` before model calls so large sessions stay inside the selected model's context budget.
+The frontend builds the agent system prompt from the validated remote prompt catalog, discovered `AGENTS.md` paths, and global skill metadata. Dedicated remote prompts cover title generation, enhancement, compaction, context pressure, subagents, and final-response recovery. For project work, the main agent first saves a concise durable Markdown implementation plan with approaches, affected files, ordered steps, and verification, then stops for user review. The model-facing planner has only `save` and `advance`; Wizzle owns plan state and advances one completed step at a time without exposing workflow IDs. The plan opens in the in-app file sidebar through the Read plan tile. The agent reads applicable instruction files before relying on their rules; the closest scoped file takes precedence. Replay history is trimmed by `src/lib/context-budget.ts` before model calls so large sessions stay inside the selected model's context budget.
 
 ## Automatic Mutation Verification
 
@@ -154,7 +154,7 @@ npm run tauri build
 
 Bundle output is generated under `src-tauri/target/release/bundle/`.
 
-CI is configured in `../.github/workflows/build-desktop-packages.yml`. It runs tests and quality checks before publishing `dmg`, `exe`, and `deb` assets to the rolling GitHub prerelease tag `main-build`.
+CI is configured in `../.github/workflows/build-desktop-packages.yml`. It runs tests and quality checks before replacing the rolling `main-build` prerelease with `Wizzle-macOS.dmg`, `Wizzle-Windows.exe`, and `Wizzle-Linux.AppImage`. These packages are currently unsigned.
 
 ## Notes
 
@@ -167,4 +167,4 @@ CI is configured in `../.github/workflows/build-desktop-packages.yml`. It runs t
 
 ## License
 
-This project is proprietary. See [LICENSE.txt](../LICENSE.txt).
+This project is available under the [MIT License](../LICENSE).

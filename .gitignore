@@ -44,6 +44,4 @@ Thumbs.db
 # Private local instructions
 AGENTS.md
 cleanup-instructions.md
-
-# Private remote-configuration source files
-/resources/
+setup.md

@@ -1,67 +1,52 @@
 # Wizzle
 
-Wizzle is a local-first desktop AI coding agent. The Tauri application owns the workspace UI, project/session state, tool execution, and direct calls to configured OpenAI-compatible, Anthropic, and Google Gemini model providers. This checkout does not require a separate proxy or sign-in service.
+Wizzle is an open-source, local-first desktop AI coding agent. It combines a React workspace with a Rust/Tauri backend for project tools, local SQLite state, and direct connections to supported AI providers.
 
-## Architecture
+## What it provides
 
-- `wizzle-agent/src`: React and TypeScript workspace UI plus agent orchestration.
-- `wizzle-agent/src-tauri`: Rust commands for SQLite persistence, provider HTTP calls, local file tools, and process control.
-- `WIZZLE_CONFIG_URL`: required public manifest for developer metadata, updates, prompts, and managed provider catalogs.
-- Local state and provider credentials are stored under `~/.wizzle`.
+- Project-aware AI sessions with durable implementation plans
+- Local file, edit, shell, and subagent tools
+- Automatic diagnostics after code mutations across common web, Python, Flutter, Rust, mobile, and JVM stacks
+- OpenAI-compatible, Anthropic, Google Gemini, and local model providers
+- Remotely managed prompts and provider catalogs with SHA-256 validation
+- Local credentials and workspace data under `~/.wizzle`
 
-A project maps to one user-selected local folder, and every stored session belongs to one project. Ordinary mutations stay within that project; approved external mutations and host-capable shell commands remain subject to the selected session permission mode.
+## Download
 
-After in-project write, edit, or foreground shell mutations, Wizzle runs bounded stack-aware verification and returns normalized diagnostics directly to the agent. Built-in adapters cover web/TypeScript, Python with Pyright and Ruff, Flutter/Dart, Rust, Go, JVM via Gradle/Maven, native Android/Gradle, native iOS/Swift/Xcode, and .NET; project-specific direct commands can be declared in `.wizzle.yaml`.
+The latest successful `main` build is published with stable URLs:
 
-## Quick Start
+- [macOS DMG](https://github.com/ishwarx28/wizzle/releases/download/main-build/Wizzle-macOS.dmg)
+- [Windows installer](https://github.com/ishwarx28/wizzle/releases/download/main-build/Wizzle-Windows.exe)
+- [Linux AppImage](https://github.com/ishwarx28/wizzle/releases/download/main-build/Wizzle-Linux.AppImage)
 
-Wizzle uses Node.js 22, declared in `wizzle-agent/.nvmrc`.
+Packages are currently unsigned, so your operating system may show a security warning. In-app updates remain disabled until release signing is configured.
+
+## Develop
+
+Requirements: Node.js 22, Rust stable, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your platform.
 
 ```bash
 cd wizzle-agent
-npm install
+npm ci
 cp .env.example .env
-source "$HOME/.cargo/env"
 npm run tauri dev
 ```
 
-The app validates and caches the remote configuration at startup. Managed providers are installed explicitly from the Providers page; custom providers and their models remain locally configurable.
+Useful checks:
 
-### In-app updates
-
-The root YAML manifest declares the latest semantic version, severity, release note, and a signed Tauri update-manifest URL for each desktop platform:
-
-```yaml
-update:
-  version: "0.2.0"
-  status: "normal" # or critical
-  note: "Release summary"
-  platforms:
-    macos:
-      url: "https://github.com/OWNER/REPO/releases/download/main-build/macos.json"
-    windows:
-      url: "https://github.com/OWNER/REPO/releases/download/main-build/windows.json"
-    linux:
-      url: "https://github.com/OWNER/REPO/releases/download/main-build/linux.json"
+```bash
+npm test
+npm run build
+cd src-tauri
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
 ```
 
-Release builds require `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. The matching public key must be embedded with `WIZZLE_UPDATER_PUBLIC_KEY`. GitHub Actions generates signed updater packages and the three platform manifests without sending users to a browser.
+The public runtime configuration lives in [`remote-config`](remote-config). Pushes to `main` verify the project, build macOS, Windows, and Linux installers, and replace the rolling `main-build` prerelease.
 
-## Verification
-
-- TypeScript tests: `cd wizzle-agent && npm test`
-- Frontend build and bundle budget: `cd wizzle-agent && npm run build`
-- Rust tests: `cd wizzle-agent/src-tauri && cargo test --all-features`
-- Rust formatting: `cd wizzle-agent/src-tauri && cargo fmt --all -- --check`
-- Strict Rust linting: `cd wizzle-agent/src-tauri && cargo clippy --all-targets --all-features -- -D warnings`
-
-## Packaging
-
-- macOS `.dmg`: `cd wizzle-agent && npm run tauri build -- --bundles dmg`
-- Windows `.exe` installer: `cd wizzle-agent && npm run tauri build -- --bundles nsis`
-- Linux bundles: `cd wizzle-agent && npm run tauri build -- --bundles appimage`, `deb`, or `rpm`
-- GitHub Actions verifies the app, builds all three package formats on pushes to `main`, and publishes them to the rolling `main-build` prerelease.
+Contributions and focused bug reports are welcome. Please keep credentials, tokens, and user data out of commits.
 
 ## License
 
-This repository is proprietary. See [LICENSE.txt](LICENSE.txt).
+[MIT](LICENSE)
